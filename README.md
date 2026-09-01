@@ -1,8 +1,8 @@
 # ngtwitchtimer
 
 Tracks a Twitch streamer's NES speedrun attempts by watching the public
-stream and OCR-reading the on-screen LiveSplit timer. No cooperation from the
-streamer needed. Runs, resets, finishes, and per-act splits are detected by a
+stream and OCR-reading the on-screen LiveSplit timer. Works from the
+public broadcast alone. Runs, resets, finishes, and per-act splits are detected by a
 state machine and logged to SQLite; optional chat integration announces
 finishes and answers viewer commands; a static records site
 (https://ng.lexicone.com) renders the whole history — daily heartbeat
