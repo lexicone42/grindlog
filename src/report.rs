@@ -61,6 +61,9 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
             "record_label": cfg.game.record_label,
             "references": references,
             "baseline_best_ms": cfg.game.baseline_best_ms(),
+            "ls_sob_ms": db::get_setting(&pool, "ls_sob_ms")
+                .await?
+                .and_then(|s| s.parse::<i64>().ok()),
             "summaries": summaries,
             "today": today,
             "runs": all_runs,

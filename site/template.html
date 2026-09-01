@@ -270,7 +270,8 @@
 
     <section class="card">
       <h2>The daily grind</h2>
-      <p class="subnote">Attempts per streamed day — finished runs highlighted.</p>
+      <p class="subnote">Best time per day (faster is higher), then attempts per day with finishes highlighted.</p>
+      <svg id="trend" width="100%" height="110" role="img" aria-label="Best time per day" hidden style="margin-bottom:12px"></svg>
       <div class="legend">
         <span><span class="key" style="background:var(--series)"></span>Finished</span>
         <span><span class="key" style="background:var(--deemph);opacity:.55"></span>Reset</span>
@@ -391,8 +392,15 @@ document.getElementById('death-chart').innerHTML = D.death_chart.map(x => `
 if (D.survival.length) {
   const fin = D.survival[D.survival.length - 1];
   const act1 = D.survival[0];
-  document.getElementById('surv-note').textContent =
-    `Survive Act 1 (${act1.pct.toFixed(0)}% do) and the odds transform: ${fin.pct.toFixed(0)}% of all attempts finish.`;
+  // Survival funnel: how far the field gets.
+  document.getElementById('surv-note').innerHTML =
+    `<div style="margin-bottom:10px">Survive Act 1 (${act1.pct.toFixed(0)}% do) and the odds transform: ${fin.pct.toFixed(0)}% of all attempts finish.</div>` +
+    D.survival.map(s => `
+      <div class="drow" style="margin:5px 0" title="${s.deaths} runs got past ${s.label}">
+        <span class="act">${s.label.toUpperCase()}</span>
+        <span class="dtrack" style="height:10px"><span class="dbar" style="height:10px;width:${s.pct.toFixed(1)}%;opacity:.45"></span></span>
+        <span class="dval">${s.pct.toFixed(0)}%</span>
+      </div>`).join('');
 }
 
 /* daily grind */
@@ -413,6 +421,34 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     <span class="best">${fmt(x.best_ms)}</span>
   </div>`;
 }).join('');
+
+/* daily-best trend */
+(function trend() {
+  const pts = D.daily.filter(d => d.best_ms != null);
+  if (pts.length < 2) return;
+  const svg = document.getElementById('trend');
+  svg.hidden = false;
+  const W = svg.clientWidth || 460, H = 110, L = 52, R = 14, T = 10, B = 8;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const ys = pts.map(p => p.best_ms);
+  const pad = 4000;
+  const ymin = Math.min(...ys) - pad, ymax = Math.max(...ys) + pad;
+  const X = i => L + i / (pts.length - 1) * (W - L - R);
+  const Y = v => T + (v - ymin) / (ymax - ymin) * (H - T - B);
+  let out = `<line x1="${L}" x2="${W-R}" y1="${Y(ymin+pad)}" y2="${Y(ymin+pad)}" stroke="var(--grid)" stroke-width="1"/>`;
+  out += `<path d="${pts.map((p, i) => `${i ? 'L' : 'M'} ${X(i)} ${Y(p.best_ms)}`).join(' ')}"
+    fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  const best = Math.min(...ys);
+  pts.forEach((p, i) => {
+    out += `<circle cx="${X(i)}" cy="${Y(p.best_ms)}" r="4.5"
+      fill="${p.best_ms === best ? 'var(--gold)' : 'var(--series)'}" stroke="var(--card)" stroke-width="2">
+      <title>${p.day}: ${fmt(p.best_ms)}</title></circle>`;
+  });
+  const last = pts[pts.length - 1];
+  out += `<text x="${W - R}" y="${Y(last.best_ms) - 8}" text-anchor="end">${fmt(last.best_ms)}</text>`;
+  out += `<text x="${L - 8}" y="${Y(best) + 3.5}" text-anchor="end">${fmt(best)}</text>`;
+  svg.innerHTML = out;
+})();
 
 /* finish scatter + PB step line */
 (function scatter() {
@@ -650,9 +686,12 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   const el = document.getElementById('golds-table');
   if (!g.length) { el.outerHTML = '<p class="subnote">No split data recorded yet.</p>'; return; }
   const sob = g.reduce((a, x) => a + x.gold_ms, 0);
-  el.innerHTML = `<tr><th>Act</th><th class="num">Gold</th><th class="num">Runs sampled</th></tr>` +
-    g.map(x => `<tr><td>${x.act_name}</td><td class="num tnum gold-t">${fmt(x.gold_ms)}</td><td class="num tnum">${x.samples}</td></tr>`).join('') +
-    `<tr class="sobrow"><td>Sum of best</td><td class="num tnum gold-t">${fmt(sob)}</td><td></td></tr>`;
+  el.innerHTML = `<tr><th>Act</th><th class="num">Gold</th><th style="padding-left:14px">Set</th><th class="num">Sampled</th></tr>` +
+    g.map(x => `<tr><td>${x.act_name}</td><td class="num tnum gold-t">${fmt(x.gold_ms)}</td><td style="padding-left:14px">${dshort(x.set_at_ms)}</td><td class="num tnum">${x.samples}</td></tr>`).join('') +
+    `<tr class="sobrow"><td>Sum of best (tracked)</td><td class="num tnum gold-t">${fmt(sob)}</td><td></td><td></td></tr>` +
+    (D.ls_sob_ms != null
+      ? `<tr class="sobrow"><td>His lifetime sum of best</td><td class="num tnum gold-t">${fmt(D.ls_sob_ms)}</td><td colspan="2" style="padding-left:14px;color:var(--muted);font-weight:400">${D.references && D.references.some(r=>r.label==='WR'&&D.ls_sob_ms<r.ms) ? 'under the WR' : 'from his layout'}</td></tr>`
+      : '');
 })();
 
 /* sessions table */

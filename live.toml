@@ -83,3 +83,11 @@ crop_x = 552
 crop_y = 462
 crop_w = 120
 crop_h = 34
+
+[lifetime_sob]
+# LiveSplit "Sum of Best Segments" row.
+enabled = true
+crop_x = 540
+crop_y = 946
+crop_w = 130
+crop_h = 40

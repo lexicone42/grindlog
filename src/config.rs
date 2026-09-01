@@ -34,6 +34,9 @@ pub struct Config {
     pub splits: SplitsCfg,
     #[serde(default)]
     pub attempts_counter: CounterCfg,
+    /// LiveSplit's "Sum of Best Segments" row — the runner's lifetime SoB.
+    #[serde(default)]
+    pub lifetime_sob: CounterCfg,
 }
 
 /// LiveSplit's lifetime attempt counter (the number in the layout header).
@@ -454,14 +457,17 @@ impl Config {
         if self.game.baseline_best.is_some() && self.game.baseline_best_ms().is_none() {
             bail!("game.baseline_best {:?} is unparseable", self.game.baseline_best);
         }
-        if self.attempts_counter.enabled {
-            let c = &self.attempts_counter;
-            if c.crop_w == 0
-                || c.crop_h == 0
-                || c.crop_x + c.crop_w > self.stream.canvas_w
-                || c.crop_y + c.crop_h > self.stream.canvas_h
+        for (name, c) in [
+            ("attempts_counter", &self.attempts_counter),
+            ("lifetime_sob", &self.lifetime_sob),
+        ] {
+            if c.enabled
+                && (c.crop_w == 0
+                    || c.crop_h == 0
+                    || c.crop_x + c.crop_w > self.stream.canvas_w
+                    || c.crop_y + c.crop_h > self.stream.canvas_h)
             {
-                bail!("attempts_counter crop rectangle is invalid for the canvas");
+                bail!("{name} crop rectangle is invalid for the canvas");
             }
         }
         if self.splits.enabled {

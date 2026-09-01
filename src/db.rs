@@ -516,15 +516,23 @@ pub struct Gold {
     pub act_name: String,
     pub gold_ms: i64,
     pub samples: i64,
+    /// When the gold was set (start of the run that holds it).
+    pub set_at_ms: i64,
 }
 
-/// Best (gold) segment per act across all recorded runs of a game/category.
+/// Best (gold) segment per act across all recorded runs of a game/category,
+/// with the date each gold was set.
 pub async fn golds(pool: &SqlitePool, game: &str, category: &str) -> Result<Vec<Gold>> {
     let rows = sqlx::query(
-        "SELECT s.act_index, s.act_name, MIN(s.segment_ms) AS gold_ms, COUNT(*) AS samples \
-         FROM splits s JOIN runs r ON r.id = s.run_id \
-         WHERE r.game = ? AND r.category = ? AND s.segment_ms IS NOT NULL \
-         GROUP BY s.act_index ORDER BY s.act_index",
+        "SELECT act_index, act_name, segment_ms AS gold_ms, started_at_ms AS set_at_ms, cnt AS samples \
+         FROM ( \
+           SELECT s.act_index, s.act_name, s.segment_ms, r.started_at_ms, \
+                  ROW_NUMBER() OVER (PARTITION BY s.act_index \
+                                     ORDER BY s.segment_ms ASC, r.started_at_ms ASC) AS rn, \
+                  COUNT(*) OVER (PARTITION BY s.act_index) AS cnt \
+           FROM splits s JOIN runs r ON r.id = s.run_id \
+           WHERE r.game = ? AND r.category = ? AND s.segment_ms IS NOT NULL \
+         ) WHERE rn = 1 ORDER BY act_index",
     )
     .bind(game)
     .bind(category)
@@ -537,6 +545,7 @@ pub async fn golds(pool: &SqlitePool, game: &str, category: &str) -> Result<Vec<
             act_name: r.get("act_name"),
             gold_ms: r.get("gold_ms"),
             samples: r.get("samples"),
+            set_at_ms: r.get("set_at_ms"),
         })
         .collect())
 }

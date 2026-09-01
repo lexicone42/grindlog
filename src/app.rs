@@ -60,6 +60,7 @@ pub struct Regions {
     pub timer: (u32, u32, u32, u32), // relative to union
     pub splits: Option<(u32, u32, u32, u32)>, // relative to union
     pub counter: Option<(u32, u32, u32, u32)>, // relative to union
+    pub sob: Option<(u32, u32, u32, u32)>,     // relative to union
 }
 
 pub fn regions(cfg: &Config) -> Regions {
@@ -72,6 +73,10 @@ pub fn regions(cfg: &Config) -> Regions {
     let c = &cfg.attempts_counter;
     if c.enabled {
         rects.push((c.crop_x, c.crop_y, c.crop_w, c.crop_h));
+    }
+    let b = &cfg.lifetime_sob;
+    if b.enabled {
+        rects.push((b.crop_x, b.crop_y, b.crop_w, b.crop_h));
     }
     let ux = rects.iter().map(|r| r.0).min().unwrap();
     let uy = rects.iter().map(|r| r.1).min().unwrap();
@@ -88,6 +93,9 @@ pub fn regions(cfg: &Config) -> Regions {
         counter: c
             .enabled
             .then(|| rel(&(c.crop_x, c.crop_y, c.crop_w, c.crop_h))),
+        sob: b
+            .enabled
+            .then(|| rel(&(b.crop_x, b.crop_y, b.crop_w, b.crop_h))),
     }
 }
 
@@ -201,6 +209,11 @@ pub async fn run(cfg: Config) -> Result<()> {
     // (last stable counter value, consecutive sightings)
     let mut counter_stable: Option<(i64, u32)> = None;
     let mut last_counter_read_t: i64 = i64::MIN / 2;
+    let mut sob_stable: Option<(i64, u32)> = None;
+    let mut sob_recorded: Option<i64> = db::get_setting(&pool, "ls_sob_ms")
+        .await?
+        .and_then(|s| s.parse().ok());
+    let mut last_sob_read_t: i64 = i64::MIN / 2;
 
     // Recorded sources (vod/file) may decode much faster than realtime, so
     // the state machine is ticked by frame index instead of wall clock —
@@ -429,6 +442,36 @@ pub async fn run(cfg: Config) -> Result<()> {
                         if matches!(counter_stable, Some((_, n)) if n >= 2) {
                             info!("livesplit attempt counter: {v}");
                             cr.ls_attempt = Some(v);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Lifetime Sum of Best row: static text that changes only when he
+        // golds a segment; a slow read keeps it current in settings.
+        if let Some((bx, by, bw2, bh2)) = reg.sob {
+            if t - last_sob_read_t >= 60_000 {
+                last_sob_read_t = t;
+                let bimg = image::imageops::crop_imm(&union_img, bx, by, bw2, bh2).to_image();
+                let bp = ocr::preprocess(&bimg, &pre_counter);
+                if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&bp)?).await {
+                    if let Some(v) = parse_time(txt.trim()) {
+                        sob_stable = match sob_stable {
+                            Some((pv, n)) if pv == v => Some((v, n + 1)),
+                            _ => Some((v, 1)),
+                        };
+                        if matches!(sob_stable, Some((_, n)) if n >= 2)
+                            && sob_recorded != Some(v)
+                        {
+                            info!("lifetime sum of best: {}", format_ms(v));
+                            if let Err(e) =
+                                db::set_setting(&pool, "ls_sob_ms", &v.to_string()).await
+                            {
+                                warn!("failed to store lifetime SoB: {e:#}");
+                            } else {
+                                sob_recorded = Some(v);
+                            }
                         }
                     }
                 }
