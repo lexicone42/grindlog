@@ -424,6 +424,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                     splits_tracker = None;
                     shared.current_splits.write().await.clear();
                 }
+                // Same run continues on a slipped clock: keep splits state.
+                Event::Resynced { .. } => {}
             }
             if let Err(e) =
                 handle_event(&pool, &shared, &announce_tx, announce, &mut current, ev, wall_now)
@@ -568,6 +570,24 @@ async fn handle_event(
             if announce {
                 let _ = announce_tx.send(msg);
             }
+        }
+        Event::Resynced { from_ms, to_ms } => {
+            let (game, category) = shared.game.read().await.clone();
+            info!(
+                "stream clock slipped: re-anchored {} -> {} (same run continues)",
+                format_ms(from_ms),
+                format_ms(to_ms)
+            );
+            db::log_transition(
+                pool,
+                now,
+                "RUNNING",
+                "RUNNING",
+                &game,
+                &category,
+                &format!("resync from_ms={from_ms} to_ms={to_ms}"),
+            )
+            .await?;
         }
         Event::Reset { last_ms, reason } => {
             let Some(run) = current.take() else {

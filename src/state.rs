@@ -54,6 +54,11 @@ pub struct TrackerConfig {
     /// This many consecutive skipped-but-self-consistent readings trigger a
     /// desync re-sync (missed reset, timer edited, etc.).
     pub desync_confirmations: usize,
+    /// A desync that re-syncs onto a timer BELOW this is a real
+    /// reset-and-restart (Reset+Started). At or above it, the readings are
+    /// mid-run values — stream time slipped (CDN rewind, dropout) — so the
+    /// tracker re-anchors silently and the same run continues.
+    pub desync_restart_max_ms: i64,
     /// Readings kept for the smoothed "current time" estimate.
     pub smoothing_window: usize,
     /// A frozen timer below this is a reset, not a finish. Guards against
@@ -77,6 +82,7 @@ impl Default for TrackerConfig {
             illegible_reset_count: 180,
             max_jump_ms: 5000,
             desync_confirmations: 3,
+            desync_restart_max_ms: 90_000,
             smoothing_window: 5,
             min_final_ms: 60_000,
         }
@@ -118,6 +124,10 @@ pub enum Event {
     Started { timer_ms: i64 },
     Finished { final_ms: i64 },
     Reset { last_ms: i64, reason: ResetReason },
+    /// Stream time slipped (CDN rewind, dropout) and the tracker re-anchored
+    /// onto the same run's new apparent timeline. Informational — no run
+    /// starts or ends.
+    Resynced { from_ms: i64, to_ms: i64 },
 }
 
 enum Phase {
@@ -327,11 +337,21 @@ impl Tracker {
         }
         if run.suspects.len() == cfg.desync_confirmations && consistent(&run.suspects, cfg) {
             let &(st, sv) = run.suspects.last().unwrap();
-            events.push(Event::Reset {
-                last_ms: run.last_good_ms,
-                reason: ResetReason::Desync,
-            });
-            events.push(Event::Started { timer_ms: sv });
+            if sv < cfg.desync_restart_max_ms {
+                // Small values: the runner really did reset and restart.
+                events.push(Event::Reset {
+                    last_ms: run.last_good_ms,
+                    reason: ResetReason::Desync,
+                });
+                events.push(Event::Started { timer_ms: sv });
+            } else {
+                // Mid-run values: LiveSplit never jumps to these on its own —
+                // the stream's clock slipped. Same run, new anchor.
+                events.push(Event::Resynced {
+                    from_ms: run.last_good_ms,
+                    to_ms: sv,
+                });
+            }
             return Phase::Running(Box::new(Run::seed(st, sv, cfg)));
         }
         Phase::Running(run)
@@ -569,24 +589,26 @@ mod tests {
     }
 
     #[test]
-    fn desync_resyncs_onto_new_timeline() {
-        // We somehow missed a reset (e.g. capture died for 5 minutes) and the
-        // timer is now on a completely different value, advancing normally.
+    fn clock_slip_reanchors_without_phantom_runs() {
+        // Stream time slipped (CDN rewind / dropout): readings land on a
+        // consistent mid-run timeline. Same run — re-anchor, no Reset/Started.
         let mut s = Sim::new(cfg());
         s.start_run(60_000);
         assert_eq!(s.time(300_000), vec![]);
         assert_eq!(s.time(301_000), vec![]);
         assert_eq!(
             s.time(302_000),
-            vec![
-                Event::Reset {
-                    last_ms: 60_000,
-                    reason: ResetReason::Desync
-                },
-                Event::Started { timer_ms: 302_000 },
-            ]
+            vec![Event::Resynced { from_ms: 60_000, to_ms: 302_000 }]
         );
         assert_eq!(s.tr.phase_name(), "RUNNING");
+        // ...and a backward slip (rewind) too.
+        assert_eq!(s.time(150_000), vec![]);
+        assert_eq!(s.time(151_000), vec![]);
+        assert_eq!(
+            s.time(152_000),
+            vec![Event::Resynced { from_ms: 302_000, to_ms: 152_000 }]
+        );
+        s.advance_quietly(153_000, 160_000);
     }
 
     #[test]
