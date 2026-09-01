@@ -87,7 +87,7 @@ crop_w = 120
 crop_h = 34
 
 [lifetime_sob]
-# LiveSplit "Sum of Best Segments" row.
+# LiveSplit "Sum of Best Segments" row (seasonal — his splits reset each season).
 enabled = true
 crop_x = 540
 crop_y = 912

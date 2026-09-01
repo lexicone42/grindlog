@@ -697,7 +697,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     g.map(x => `<tr><td>${x.act_name}</td><td class="num tnum gold-t">${fmt(x.gold_ms)}</td><td style="padding-left:14px">${dshort(x.set_at_ms)}</td><td class="num tnum">${x.samples}</td></tr>`).join('') +
     `<tr class="sobrow"><td>Sum of best (tracked)</td><td class="num tnum gold-t">${fmt(sob)}</td><td></td><td></td></tr>` +
     (D.ls_sob_ms != null
-      ? `<tr class="sobrow"><td>His lifetime sum of best</td><td class="num tnum gold-t">${fmt(D.ls_sob_ms)}</td><td colspan="2" style="padding-left:14px;color:var(--muted);font-weight:400">${D.references && D.references.some(r=>r.label==='WR'&&D.ls_sob_ms<r.ms) ? 'under the WR' : 'from his layout'}</td></tr>`
+      ? `<tr class="sobrow"><td>His season sum of best</td><td class="num tnum gold-t">${fmt(D.ls_sob_ms)}</td><td colspan="2" style="padding-left:14px;color:var(--muted);font-weight:400">${D.references && D.references.some(r=>r.label==='WR'&&D.ls_sob_ms<r.ms) ? 'under the WR' : 'from his layout'}</td></tr>`
       : '');
 })();
 

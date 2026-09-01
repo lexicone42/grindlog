@@ -34,7 +34,7 @@ pub struct Config {
     pub splits: SplitsCfg,
     #[serde(default)]
     pub attempts_counter: CounterCfg,
-    /// LiveSplit's "Sum of Best Segments" row — the runner's lifetime SoB.
+    /// LiveSplit's "Sum of Best Segments" row (seasonal, given his splits-file practice).
     #[serde(default)]
     pub lifetime_sob: CounterCfg,
 }

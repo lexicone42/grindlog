@@ -470,7 +470,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         if matches!(sob_stable, Some((_, n)) if n >= 2)
                             && sob_recorded != Some(v)
                         {
-                            info!("lifetime sum of best: {}", format_ms(v));
+                            info!("season sum of best: {}", format_ms(v));
                             if let Err(e) =
                                 db::set_setting(&pool, "ls_sob_ms", &v.to_string()).await
                             {
