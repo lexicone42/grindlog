@@ -112,7 +112,7 @@
   .card { background: var(--card); border: 1px solid var(--hairline); border-radius: 8px; padding: 18px 20px; }
   .pbcard { display: flex; flex-direction: column; justify-content: center; background:
     linear-gradient(135deg, var(--gold-soft), transparent 55%), var(--card); }
-  .pbvalue { font-family: "Martian Mono", monospace; font-weight: 700; font-size: clamp(40px, 6vw, 58px); line-height: 1.05; letter-spacing: -.01em; }
+  .pbvalue { font-family: "Martian Mono", monospace; font-weight: 700; font-size: clamp(24px, 3.2vw, 34px); line-height: 1.05; letter-spacing: -.01em; }
   .pbmeta { color: var(--ink2); font-size: 13px; margin-top: 8px; }
   .pbmeta b { color: var(--gold); font-weight: 600; }
   .top5 { list-style: none; margin: 12px 0 0; padding: 0; }
@@ -190,12 +190,12 @@
   .sobrow td { border-top: 1px solid var(--grid); font-weight: 600; }
 
   .daychip {
-    font-family: "Martian Mono", monospace; font-size: 11px; cursor: pointer;
-    padding: 3px 10px; border-radius: 12px; border: 1px solid var(--hairline);
+    font-family: "Martian Mono", monospace; font-size: 13px; cursor: pointer;
+    padding: 7px 16px; border-radius: 8px; border: 1px solid var(--hairline);
     background: none; color: var(--ink2);
   }
-  .daychip:hover { color: var(--ink); }
-  .daychip[aria-pressed="true"] { background: var(--series-soft); color: var(--series); border-color: transparent; font-weight: 600; }
+  .daychip:hover { color: var(--ink); border-color: var(--series); }
+  .daychip[aria-pressed="true"] { background: var(--series); color: #fff; border-color: transparent; font-weight: 600; }
   .daychip:focus-visible, .rowbtn:focus-visible { outline: 2px solid var(--series); outline-offset: 1px; }
   tr.rowbtn { cursor: pointer; }
   tr.rowbtn:hover td { background: var(--card2); }
@@ -223,22 +223,7 @@
     <div class="tagline">Every attempt, split, and heartbreak — read off the stream by OCR, no cooperation required.</div>
   </header>
   <div class="horizon"></div>
-
-  <div class="hero">
-    <div class="card pbcard">
-      <p class="eyebrow" id="pb-label">Fastest runs</p>
-      <div class="pbvalue" id="pb-value">–:––.–</div>
-      <div class="pbmeta" id="pb-meta"></div>
-      <ol class="top5" id="pb-top5"></ol>
-      <div class="pbmeta" id="pb-refs"></div>
-    </div>
-    <div>
-      <div class="tiles" id="tiles"></div>
-      <div class="tiles" id="tiles2" style="margin-top:14px"></div>
-    </div>
-  </div>
-
-  <section class="card" style="margin-top:14px" id="heartbeat-card" hidden>
+  <section class="card" id="heartbeat-card" hidden>
     <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">
       <h2>The daily log</h2>
       <div id="day-chips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
@@ -259,6 +244,21 @@
       <table id="day-table"></table>
     </div>
   </section>
+
+  <div class="hero" style="margin-top:14px">
+    <div class="card pbcard">
+      <p class="eyebrow" id="pb-label">Fastest runs</p>
+      <div class="pbvalue" id="pb-value">–:––.–</div>
+      <div class="pbmeta" id="pb-meta"></div>
+      <ol class="top5" id="pb-top5"></ol>
+      <div class="pbmeta" id="pb-refs"></div>
+    </div>
+    <div>
+      <div class="tiles" id="tiles"></div>
+      <div class="tiles" id="tiles2" style="margin-top:14px"></div>
+    </div>
+  </div>
+
 
   <div class="grid2">
     <section class="card">
@@ -540,7 +540,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
 
   const chips = document.getElementById('day-chips');
   chips.innerHTML = days.map(d =>
-    `<button class="daychip" data-day="${d}" aria-pressed="false">${d.slice(5)}</button>`).join('');
+    `<button class="daychip" data-day="${d}" aria-pressed="false">${dshort(byDay.get(d)[0].started_at_ms)}</button>`).join('');
   chips.addEventListener('click', e => {
     const d = e.target.dataset && e.target.dataset.day;
     if (d) renderDay(d);
@@ -594,7 +594,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     svg.innerHTML = out;
 
     document.getElementById('day-table').innerHTML =
-      `<tr><th>№</th><th>Start</th><th>Result</th><th class="num">Time</th><th class="num">Splits seen</th></tr>` +
+      `<tr><th>№</th><th>His №</th><th>Start</th><th>Result</th><th class="num">Time</th><th class="num">Splits seen</th></tr>` +
       runs.map((r, i) => {
         const finished = r.outcome === 'finished';
         const nsplits = ((D.splits_by_run || {})[String(r.id)] || []).length;
@@ -602,6 +602,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
           ? (isPB(r) ? '<span class="pill pb">record</span>' : '<span class="pill fin">finished</span>')
           : `<span class="pill res">${r.reset_reason || 'reset'}</span>`;
         return `<tr class="rowbtn" data-i="${i}" tabindex="0"><td class="tnum">#${r.attempt_number}</td>
+          <td class="tnum">${r.ls_attempt != null ? r.ls_attempt.toLocaleString() : '—'}</td>
           <td>${dtime(r.started_at_ms)}</td><td>${pill}</td>
           <td class="num tnum">${finished ? fmt(r.final_time_ms) : '† ' + fmt(r.last_timer_ms)}</td>
           <td class="num tnum">${nsplits || '—'}</td></tr>`;
