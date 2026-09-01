@@ -38,7 +38,9 @@ category = "Any%"
 # is seasonal, so call it what it is.
 record_label = "season best"
 # His actual season best predates tracking — read off the LiveSplit
-# comparison column. NEW-record announcements must beat this.
+# comparison column (his comparison IS seasonal bests; he resets his splits
+# file every season, roughly 3-4 months). UPDATE THIS when a new season
+# starts. NEW-record announcements must beat this.
 baseline_best = "11:35.1"
 # Reference times shown on the records site / finish chart.
 references = [
