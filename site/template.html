@@ -1,0 +1,641 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230c0e14'/%3E%3Crect x='2' y='6' width='12' height='4' rx='1' fill='%233987e5'/%3E%3Crect x='4' y='7' width='2' height='2' fill='%23eef0f6'/%3E%3Crect x='10' y='7' width='2' height='2' fill='%23eef0f6'/%3E%3C/svg%3E">
+<title>Arcus Grind Log</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=Instrument+Sans:wght@400;500;600&family=Martian+Mono:wght@400;600;700&display=swap">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0c0e14;
+    --card: #151824;
+    --card2: #1b1f30;
+    --ink: #eef0f6;
+    --ink2: #9aa3b8;
+    --muted: #6a7189;
+    --grid: #262b3d;
+    --hairline: rgba(255,255,255,.08);
+    --series: #3987e5;
+    --series-soft: rgba(57,135,229,.12);
+    --deemph: #565d75;
+    --gold: #e0a832;
+    --gold-soft: rgba(224,168,50,.12);
+    --behind: #e66767;
+    --ahead: #58b96b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      color-scheme: light;
+      --bg: #f5f5f2;
+      --card: #ffffff;
+      --card2: #eef0f5;
+      --ink: #14161f;
+      --ink2: #4d5468;
+      --muted: #868da0;
+      --grid: #e4e5ec;
+      --hairline: rgba(11,11,20,.10);
+      --series: #2a78d6;
+      --series-soft: rgba(42,120,214,.10);
+      --deemph: #b3b8c8;
+      --gold: #a3730f;
+      --gold-soft: rgba(163,115,15,.12);
+      --behind: #d03b3b;
+      --ahead: #1e7e34;
+    }
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f5f5f2;
+    --card: #ffffff;
+    --card2: #eef0f5;
+    --ink: #14161f;
+    --ink2: #4d5468;
+    --muted: #868da0;
+    --grid: #e4e5ec;
+    --hairline: rgba(11,11,20,.10);
+    --series: #2a78d6;
+    --series-soft: rgba(42,120,214,.10);
+    --deemph: #b3b8c8;
+    --gold: #a3730f;
+    --gold-soft: rgba(163,115,15,.12);
+    --behind: #d03b3b;
+    --ahead: #1e7e34;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Instrument Sans", system-ui, -apple-system, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 28px 20px 64px; }
+
+  .mono { font-family: "Martian Mono", ui-monospace, monospace; }
+  .px { font-family: "Silkscreen", "Martian Mono", monospace; }
+
+  /* ---------- masthead ---------- */
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px 18px; margin-bottom: 28px; }
+  .wordmark { font-family: "Silkscreen", monospace; font-weight: 700; font-size: 22px; letter-spacing: .02em; }
+  .wordmark span { color: var(--series); }
+  .chip {
+    font-family: "Silkscreen", monospace; font-size: 10px; letter-spacing: .08em;
+    padding: 4px 9px 3px; border: 1px solid var(--hairline); border-radius: 3px;
+    color: var(--ink2); text-transform: uppercase;
+  }
+  .tagline { flex-basis: 100%; color: var(--muted); font-size: 13px; margin-top: -6px; }
+
+  .eyebrow {
+    font-family: "Silkscreen", monospace; font-size: 10px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 10px;
+  }
+
+  /* ---------- hero ---------- */
+  .hero { display: grid; grid-template-columns: minmax(280px, 1.2fr) 2fr; gap: 14px; margin-bottom: 14px; }
+  @media (max-width: 760px) { .hero { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--hairline); border-radius: 8px; padding: 18px 20px; }
+  .pbcard { display: flex; flex-direction: column; justify-content: center; background:
+    linear-gradient(135deg, var(--gold-soft), transparent 55%), var(--card); }
+  .pbvalue { font-family: "Martian Mono", monospace; font-weight: 700; font-size: clamp(40px, 6vw, 58px); line-height: 1.05; letter-spacing: -.01em; }
+  .pbmeta { color: var(--ink2); font-size: 13px; margin-top: 8px; }
+  .pbmeta b { color: var(--gold); font-weight: 600; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 14px; }
+  .tile { background: var(--card); border: 1px solid var(--hairline); border-radius: 8px; padding: 14px 16px; }
+  .tile .label { font-size: 12px; color: var(--muted); }
+  .tile .value { font-family: "Martian Mono", monospace; font-weight: 600; font-size: 24px; margin-top: 2px; }
+  .tile .sub { font-size: 12px; color: var(--ink2); margin-top: 2px; }
+
+  /* ---------- layout grid ---------- */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+  @media (max-width: 820px) { .grid2 { grid-template-columns: 1fr; } }
+  section.card h2 { font-size: 15px; font-weight: 600; margin: 0; }
+  .subnote { color: var(--muted); font-size: 12.5px; margin: 2px 0 16px; }
+
+  /* ---------- death chart (HTML bars) ---------- */
+  .drow { display: grid; grid-template-columns: 52px 1fr 96px; align-items: center; gap: 10px; margin: 9px 0; }
+  .drow .act { font-family: "Silkscreen", monospace; font-size: 10px; color: var(--ink2); letter-spacing: .05em; }
+  .dtrack { position: relative; height: 18px; }
+  .dbar {
+    position: absolute; inset: 0 auto 0 0; background: var(--series);
+    border-radius: 0 4px 4px 0; min-width: 2px; height: 18px;
+    transition: opacity .15s;
+  }
+  .drow:hover .dbar { opacity: .82; }
+  .dval { font-family: "Martian Mono", monospace; font-size: 12px; color: var(--ink2); font-variant-numeric: tabular-nums; text-align: left; white-space: nowrap; }
+  .dval b { color: var(--ink); font-weight: 600; }
+  .survnote { border-top: 1px solid var(--hairline); margin-top: 14px; padding-top: 12px; font-size: 12.5px; color: var(--ink2); }
+
+  /* ---------- daily sessions ---------- */
+  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--ink2); margin-bottom: 12px; }
+  .key { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .day { display: grid; grid-template-columns: 86px 1fr 110px; gap: 10px; align-items: center; margin: 10px 0; }
+  .day .date { font-family: "Martian Mono", monospace; font-size: 12px; color: var(--ink2); font-variant-numeric: tabular-nums; }
+  .day .best { font-family: "Martian Mono", monospace; font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+  .stack { display: flex; height: 18px; gap: 2px; }
+  .seg { height: 18px; min-width: 3px; }
+  .seg.fin { background: var(--series); border-radius: 0 4px 4px 0; }
+  .seg.res { background: var(--deemph); border-radius: 0 4px 4px 0; opacity: .55; }
+  .seg.res:first-child, .seg.fin:first-child { border-radius: 4px; }
+  .daycount { font-size: 11.5px; color: var(--muted); margin-left: 8px; white-space: nowrap; }
+
+  /* ---------- finish scatter ---------- */
+  .chartbox { position: relative; }
+  svg text { font-family: "Martian Mono", monospace; font-size: 10.5px; fill: var(--muted); }
+  .tooltip {
+    position: absolute; pointer-events: none; background: var(--card2);
+    border: 1px solid var(--hairline); border-radius: 6px; padding: 7px 10px;
+    font-size: 12px; color: var(--ink); opacity: 0; transition: opacity .1s;
+    white-space: nowrap; z-index: 3; transform: translate(-50%, -115%);
+  }
+  .tooltip .t { font-family: "Martian Mono", monospace; font-weight: 600; }
+  .tooltip .m { color: var(--ink2); font-size: 11px; }
+
+  /* ---------- tables ---------- */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11.5px;
+       text-transform: uppercase; letter-spacing: .06em; padding: 0 10px 8px 0; }
+  td { padding: 7px 10px 7px 0; border-top: 1px solid var(--hairline); }
+  td.num, th.num { text-align: right; padding-right: 0; }
+  .tnum { font-family: "Martian Mono", monospace; font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .gold-t { color: var(--gold); font-weight: 600; }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 10px; }
+  .pill.fin { background: var(--series-soft); color: var(--series); }
+  .pill.pb { background: var(--gold-soft); color: var(--gold); }
+  .pill.res { color: var(--muted); border: 1px solid var(--hairline); }
+  .sobrow td { border-top: 1px solid var(--grid); font-weight: 600; }
+
+  .daychip {
+    font-family: "Martian Mono", monospace; font-size: 11px; cursor: pointer;
+    padding: 3px 10px; border-radius: 12px; border: 1px solid var(--hairline);
+    background: none; color: var(--ink2);
+  }
+  .daychip:hover { color: var(--ink); }
+  .daychip[aria-pressed="true"] { background: var(--series-soft); color: var(--series); border-color: transparent; font-weight: 600; }
+  .daychip:focus-visible, .rowbtn:focus-visible { outline: 2px solid var(--series); outline-offset: 1px; }
+  tr.rowbtn { cursor: pointer; }
+  tr.rowbtn:hover td { background: var(--card2); }
+  .finchip {
+    font-family: "Martian Mono", monospace; font-size: 12.5px; cursor: pointer;
+    padding: 5px 11px; border-radius: 6px; border: 1px solid var(--hairline);
+    background: var(--series-soft); color: var(--ink);
+  }
+  .finchip b { font-weight: 600; }
+  .finchip .att { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  .finchip.best { background: var(--gold-soft); border-color: var(--gold); }
+  .finchip:hover { border-color: var(--series); }
+
+  footer { margin-top: 36px; color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  footer .px { font-size: 9px; letter-spacing: .1em; }
+  a { color: var(--series); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="wordmark">ARCUS <span>//</span> NINJA GAIDEN</div>
+    <span class="chip" id="chip-cat">Any% · NES</span>
+    <span class="chip" id="chip-updated"></span>
+    <div class="tagline">Every attempt, split, and heartbreak — read off the stream by OCR, no cooperation required.</div>
+  </header>
+
+  <div class="hero">
+    <div class="card pbcard">
+      <p class="eyebrow" id="pb-label">Personal best</p>
+      <div class="pbvalue" id="pb-value">–:––.–</div>
+      <div class="pbmeta" id="pb-meta"></div>
+      <div class="pbmeta" id="pb-refs"></div>
+    </div>
+    <div>
+      <div class="tiles" id="tiles"></div>
+      <div class="tiles" id="tiles2" style="margin-top:14px"></div>
+    </div>
+  </div>
+
+  <section class="card" style="margin-top:14px" id="heartbeat-card" hidden>
+    <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">
+      <h2>The daily log</h2>
+      <div id="day-chips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+    </div>
+    <p class="subnote" id="hb-sub"></p>
+    <div id="day-finishes" style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px"></div>
+    <div class="legend">
+      <span><span class="key" style="background:var(--series)"></span>Finished</span>
+      <span><span class="key" style="background:var(--deemph);opacity:.55"></span>Reset (bar height = how far it got)</span>
+      <span style="color:var(--muted)">click any bar or row for the full run</span>
+    </div>
+    <div class="chartbox">
+      <svg id="heartbeat" width="100%" height="190" role="img" aria-label="Every attempt of the selected day over the session clock"></svg>
+      <div class="tooltip" id="tip2"></div>
+    </div>
+    <div id="run-detail" hidden style="border-top:1px solid var(--hairline); margin-top:14px; padding-top:14px;"></div>
+    <div style="max-height:340px;overflow-y:auto;margin-top:14px;border-top:1px solid var(--hairline);padding-top:6px">
+      <table id="day-table"></table>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Where runs die</h2>
+      <p class="subnote" id="death-sub"></p>
+      <div id="death-chart"></div>
+      <div class="survnote" id="surv-note"></div>
+    </section>
+
+    <section class="card">
+      <h2>The daily grind</h2>
+      <p class="subnote">Attempts per streamed day — finished runs highlighted.</p>
+      <div class="legend">
+        <span><span class="key" style="background:var(--series)"></span>Finished</span>
+        <span><span class="key" style="background:var(--deemph);opacity:.55"></span>Reset</span>
+      </div>
+      <div id="daily"></div>
+    </section>
+  </div>
+
+  <section class="card" style="margin-top:14px">
+    <h2>Every finish</h2>
+    <p class="subnote">Finished runs by attempt number — faster is higher. The gold line tracks the best tracked run as it falls.</p>
+    <div class="chartbox">
+      <svg id="scatter" width="100%" height="240" role="img" aria-label="Finish times by attempt number"></svg>
+      <div class="tooltip" id="tip"></div>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Gold splits</h2>
+      <p class="subnote">Best segment ever recorded for each act.</p>
+      <table id="golds-table"></table>
+    </section>
+
+    <section class="card">
+      <h2>Sessions</h2>
+      <p class="subnote">Every tracked broadcast.</p>
+      <table id="sessions-table"></table>
+    </section>
+  </div>
+
+  <footer>
+    <span class="px">NGTWITCHTIMER</span>
+    <span id="foot-gen"></span>
+    <span>Times read from the on-screen LiveSplit timer at 1 fps · all times are the runner's own</span>
+  </footer>
+</div>
+
+<script id="data" type="application/json">
+__DATA__
+</script>
+
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+
+const fmt = ms => {
+  if (ms == null) return '—';
+  const t = Math.floor(ms / 100) / 10;
+  const m = Math.floor(t / 60), s = (t - m * 60).toFixed(1).padStart(4, '0');
+  return m >= 60 ? `${Math.floor(m/60)}:${String(m%60).padStart(2,'0')}:${s}` : `${m}:${s}`;
+};
+const dshort = ms => new Date(ms).toLocaleDateString(undefined, {month:'short', day:'numeric'});
+const dtime = ms => new Date(ms).toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+
+/* masthead */
+document.getElementById('chip-cat').textContent = `${D.current_category} · NES`;
+document.getElementById('chip-updated').textContent = `updated ${dshort(D.generated_at_ms)}`;
+document.getElementById('foot-gen').textContent =
+  `Generated ${new Date(D.generated_at_ms).toLocaleString()}`;
+
+/* hero: PB + tiles */
+const pbRow = D.pb_history[D.pb_history.length - 1];
+const s = D.summaries.find(x => x.game === D.current_game) || D.summaries[0] || {};
+const LABEL = D.record_label || 'PB';
+const trackedBest = pbRow ? pbRow.time_ms : s.best_ms;
+const baseline = D.baseline_best_ms;
+// The record may predate tracking (read off the LiveSplit comparison).
+const recordMs = baseline != null && trackedBest != null
+  ? Math.min(baseline, trackedBest) : (trackedBest ?? baseline);
+const recordIsBaseline = baseline != null && (trackedBest == null || baseline < trackedBest);
+document.getElementById('pb-label').textContent =
+  LABEL.toLowerCase() === 'pb' ? 'Personal best' : LABEL;
+document.getElementById('pb-value').textContent = fmt(recordMs);
+document.getElementById('pb-meta').innerHTML = recordIsBaseline
+  ? `set before tracking began${pbRow ? ` · best tracked run <b>${fmt(trackedBest)}</b> (attempt #${pbRow.attempt_number}, ${dshort(pbRow.at_ms)})` : ''}`
+  : (pbRow ? `<b>attempt #${pbRow.attempt_number}</b> · ${dshort(pbRow.at_ms)} · fallen ${D.pb_history.length}× on record` : '');
+if (D.references && D.references.length) {
+  document.getElementById('pb-refs').innerHTML = D.references
+    .map(r => `${r.label} <b>${fmt(r.ms)}</b>`).join(' · ');
+}
+
+const closedSessions = D.sessions.filter(x => x.ended_at_ms);
+const hours = closedSessions.reduce((a, x) => a + (x.ended_at_ms - x.started_at_ms), 0) / 3.6e6;
+const tiles = [
+  ['Attempts', D.streaks.attempts, `${D.streaks.finished} finished`],
+  ['Attempts per finish', D.streaks.attempts_per_finish ? D.streaks.attempts_per_finish.toFixed(1) : '—', 'the grind ratio'],
+  ['Longest reset streak', D.streaks.longest_reset_streak, `current: ${D.streaks.current_reset_streak}`],
+  ['Hours tracked', hours.toFixed(1), `${D.sessions.length} sessions`],
+];
+document.getElementById('tiles').innerHTML = tiles.map(([l, v, sub]) =>
+  `<div class="tile"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`).join('');
+const tiles2 = [
+  ['Today', `${D.today.attempts}`, `${D.today.finished} finished, ${D.today.resets} resets`],
+  ['Best today', fmt(D.today.best_ms), D.today.best_ms && recordMs ? (D.today.best_ms <= recordMs ? `the new ${LABEL}!` : `+${((D.today.best_ms - recordMs)/1000).toFixed(1)}s to ${LABEL}`) : ' '],
+  ['Sum of best', (() => { const g = D.golds; return g.length ? fmt(g.reduce((a,x)=>a+x.gold_ms,0)) : '—'; })(), 'from recorded golds'],
+];
+document.getElementById('tiles2').innerHTML = tiles2.map(([l, v, sub]) =>
+  `<div class="tile"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`).join('');
+
+/* death chart */
+const totalDeaths = D.death_chart.reduce((a, x) => a + x.deaths, 0);
+document.getElementById('death-sub').textContent =
+  `${totalDeaths} resets, bucketed by the act the timer died in.`;
+const maxD = Math.max(...D.death_chart.map(x => x.deaths), 1);
+document.getElementById('death-chart').innerHTML = D.death_chart.map(x => `
+  <div class="drow" title="${x.label}: ${x.deaths} resets (${x.pct.toFixed(1)}%)">
+    <span class="act">${x.label.toUpperCase()}</span>
+    <span class="dtrack"><span class="dbar" style="width:${(x.deaths / maxD * 100).toFixed(1)}%"></span></span>
+    <span class="dval"><b>${x.deaths}</b> · ${x.pct.toFixed(0)}%</span>
+  </div>`).join('');
+if (D.survival.length) {
+  const fin = D.survival[D.survival.length - 1];
+  const act1 = D.survival[0];
+  document.getElementById('surv-note').textContent =
+    `Survive Act 1 (${act1.pct.toFixed(0)}% do) and the odds transform: ${fin.pct.toFixed(0)}% of all attempts finish.`;
+}
+
+/* daily grind */
+const maxA = Math.max(...D.daily.map(x => x.attempts), 1);
+document.getElementById('daily').innerHTML = D.daily.map(x => {
+  const w = x.attempts / maxA * 100;
+  const finW = x.finished / x.attempts * w;
+  const resW = w - finW;
+  return `<div class="day" title="${x.day}: ${x.attempts} attempts, ${x.finished} finished">
+    <span class="date">${x.day.slice(5)}</span>
+    <span style="display:flex;align-items:center">
+      <span class="stack" style="width:${w.toFixed(1)}%">
+        ${x.finished ? `<span class="seg fin" style="flex:${x.finished}"></span>` : ''}
+        <span class="seg res" style="flex:${x.resets}"></span>
+      </span>
+      <span class="daycount">${x.finished}/${x.attempts}</span>
+    </span>
+    <span class="best">${fmt(x.best_ms)}</span>
+  </div>`;
+}).join('');
+
+/* finish scatter + PB step line */
+(function scatter() {
+  const finishes = D.finishes;
+  if (!finishes.length) return;
+  const svg = document.getElementById('scatter');
+  const W = svg.clientWidth || 980, H = 240, L = 58, R = 16, T = 14, B = 30;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const xs = finishes.map(f => f.attempt_number);
+  const ys = finishes.map(f => f.final_time_ms);
+  const refs = (D.references || []).filter(r => r.ms);
+  if (D.baseline_best_ms != null && (!D.pb_history.length || D.baseline_best_ms < D.pb_history[D.pb_history.length-1].time_ms)) {
+    refs.push({ label: D.record_label || 'best', ms: D.baseline_best_ms });
+  }
+  const xmin = 0, xmax = Math.max(...xs) + 4;
+  const pad = 10000;
+  const ymin = Math.min(...ys, ...D.pb_history.map(p => p.time_ms), ...refs.map(r => r.ms)) - pad;
+  const ymax = Math.max(...ys) + pad;
+  const X = v => L + (v - xmin) / (xmax - xmin) * (W - L - R);
+  const Y = v => T + (v - ymin) / (ymax - ymin) * (H - T - B);
+  let out = '';
+  // y grid at clean 20s steps
+  const step = 20000;
+  for (let v = Math.ceil(ymin / step) * step; v <= ymax; v += step) {
+    out += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)" stroke-width="1"/>`;
+    out += `<text x="${L - 8}" y="${Y(v) + 3.5}" text-anchor="end">${fmt(v)}</text>`;
+  }
+  out += `<text x="${(L + W - R) / 2}" y="${H - 6}" text-anchor="middle">attempt №</text>`;
+  // reference lines (WR, lifetime PB, ...)
+  for (const r of refs) {
+    out += `<line x1="${L}" x2="${W - R}" y1="${Y(r.ms)}" y2="${Y(r.ms)}" stroke="var(--behind)" stroke-width="1" opacity=".6"/>`;
+    out += `<text x="${L + 4}" y="${Y(r.ms) - 5}" fill="var(--behind)">${r.label} ${fmt(r.ms)}</text>`;
+  }
+  // PB step line (gold)
+  if (D.pb_history.length) {
+    let d = '', prev = null;
+    for (const p of D.pb_history) {
+      if (prev == null) d += `M ${X(p.attempt_number)} ${Y(p.time_ms)}`;
+      else d += ` L ${X(p.attempt_number)} ${Y(prev)} L ${X(p.attempt_number)} ${Y(p.time_ms)}`;
+      prev = p.time_ms;
+    }
+    d += ` L ${W - R} ${Y(prev)}`;
+    out += `<path d="${d}" fill="none" stroke="var(--gold)" stroke-width="2" stroke-linejoin="round"/>`;
+    out += `<text x="${W - R}" y="${Y(prev) - 7}" text-anchor="end" fill="var(--gold)">PB ${fmt(prev)}</text>`;
+  }
+  // finish dots (surface ring via stroke)
+  finishes.forEach((f, i) => {
+    const isPB = D.pb_history.some(p => p.attempt_number === f.attempt_number);
+    out += `<circle data-i="${i}" cx="${X(f.attempt_number)}" cy="${Y(f.final_time_ms)}" r="5"
+      fill="${isPB ? 'var(--gold)' : 'var(--series)'}" stroke="var(--card)" stroke-width="2"/>`;
+    out += `<circle data-i="${i}" cx="${X(f.attempt_number)}" cy="${Y(f.final_time_ms)}" r="13" fill="transparent" style="cursor:pointer"/>`;
+  });
+  svg.innerHTML = out;
+  const tip = document.getElementById('tip');
+  svg.addEventListener('pointerover', e => {
+    const i = e.target.dataset && e.target.dataset.i;
+    if (i == null) { tip.style.opacity = 0; return; }
+    const f = finishes[+i];
+    tip.innerHTML = `<span class="t">${fmt(f.final_time_ms)}</span><div class="m">attempt #${f.attempt_number} · ${dshort(f.started_at_ms)}</div>`;
+    const box = svg.getBoundingClientRect();
+    tip.style.left = (X(f.attempt_number) / W * box.width) + 'px';
+    tip.style.top = (Y(f.final_time_ms) / H * box.height) + 'px';
+    tip.style.opacity = 1;
+  });
+  svg.addEventListener('pointerleave', () => tip.style.opacity = 0);
+})();
+
+/* the daily log: every run of every day, browsable and clickable */
+(function dailyLog() {
+  const all = D.runs || [];
+  if (!all.length) return;
+  document.getElementById('heartbeat-card').hidden = false;
+  const depth = r => r.final_time_ms ?? r.last_timer_ms ?? 0;
+  const goldByAct = Object.fromEntries(D.golds.map(g => [g.act_index, g.gold_ms]));
+  const isPB = r => D.pb_history.some(p => p.attempt_number === r.attempt_number);
+  const dayKey = ms => { const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
+  const byDay = new Map();
+  for (const r of all) {
+    const k = dayKey(r.started_at_ms);
+    if (!byDay.has(k)) byDay.set(k, []);
+    byDay.get(k).push(r);
+  }
+  const days = [...byDay.keys()].sort();
+
+  const detail = document.getElementById('run-detail');
+  let openRun = null;
+  function toggleDetail(r) {
+    if (openRun === r.id) { detail.hidden = true; openRun = null; return; }
+    openRun = r.id;
+    const splits = (D.splits_by_run || {})[String(r.id)] || [];
+    const head = r.outcome === 'finished'
+      ? `<span class="pill ${isPB(r) ? 'pb' : 'fin'}">${isPB(r) ? 'record' : 'finished'}</span> <span class="tnum" style="font-size:16px;font-weight:600"> ${fmt(r.final_time_ms)}</span>`
+      : `<span class="pill res">${r.reset_reason || 'reset'}</span> <span class="tnum" style="font-size:16px"> † ${fmt(r.last_timer_ms)}</span>`;
+    let rows = '';
+    if (splits.length) {
+      rows = `<table style="margin-top:10px;max-width:520px">
+        <tr><th>Act</th><th class="num">Time</th><th class="num">Segment</th><th class="num">vs gold</th></tr>` +
+        splits.map(s => {
+          const g = goldByAct[s.act_index];
+          let vs = '—';
+          if (s.segment_ms != null && g != null) {
+            const d = (s.segment_ms - g) / 1000;
+            vs = d <= 0.05
+              ? `<span style="color:var(--gold);font-weight:600">gold</span>`
+              : `<span style="color:var(--behind)">+${d.toFixed(1)}</span>`;
+          }
+          return `<tr><td>${s.act_name}</td><td class="num tnum">${fmt(s.cumulative_ms)}</td>
+            <td class="num tnum">${s.segment_ms != null ? fmt(s.segment_ms) : '—'}</td>
+            <td class="num tnum">${vs}</td></tr>`;
+        }).join('') + '</table>';
+    } else {
+      rows = `<p class="subnote" style="margin:8px 0 0">No splits recorded${r.outcome === 'finished' ? '' : ' — died before the first act change was seen'}.</p>`;
+    }
+    detail.innerHTML =
+      `<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+        <strong>Attempt #${r.attempt_number}</strong>
+        <span class="subnote" style="margin:0">${dtime(r.started_at_ms)} – ${dtime(r.ended_at_ms)}</span>
+        ${head}
+      </div>${rows}`;
+    detail.hidden = false;
+    detail.scrollIntoView({ block: 'nearest' });
+  }
+
+  const chips = document.getElementById('day-chips');
+  chips.innerHTML = days.map(d =>
+    `<button class="daychip" data-day="${d}" aria-pressed="false">${d.slice(5)}</button>`).join('');
+  chips.addEventListener('click', e => {
+    const d = e.target.dataset && e.target.dataset.day;
+    if (d) renderDay(d);
+  });
+
+  const svg = document.getElementById('heartbeat');
+  const tip2 = document.getElementById('tip2');
+  let runs = [], X = () => 0, Yd = () => 0;
+
+  function renderDay(key) {
+    for (const b of chips.children) b.setAttribute('aria-pressed', String(b.dataset.day === key));
+    runs = byDay.get(key);
+    detail.hidden = true; openRun = null;
+    const fin = runs.filter(r => r.outcome === 'finished');
+    const bestOfDay = fin.length ? Math.min(...fin.map(depth)) : null;
+    const deepest = Math.max(0, ...runs.filter(r => r.outcome !== 'finished').map(depth));
+    const spanH = Math.max(0, runs[runs.length-1].ended_at_ms - runs[0].started_at_ms) / 3.6e6;
+    document.getElementById('hb-sub').textContent =
+      `${runs.length} attempts across ${spanH.toFixed(1)} hours — ${fin.length} finished` +
+      (deepest > 0 ? `, deepest heartbreak † ${fmt(deepest)}` : '') + '.';
+
+    // every completed run of the day, at a glance
+    document.getElementById('day-finishes').innerHTML = fin.map(r =>
+      `<button class="finchip${depth(r) === bestOfDay ? ' best' : ''}" data-fin="${runs.indexOf(r)}">
+        <b>${fmt(r.final_time_ms)}</b><span class="att">#${r.attempt_number} · ${dtime(r.started_at_ms)}</span>
+      </button>`).join('');
+
+    const W = svg.clientWidth || 980, H = 190, L = 46, R = 12, T = 10, B = 26;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const t0 = runs[0].started_at_ms - 4*60e3, t1 = runs[runs.length-1].ended_at_ms + 4*60e3;
+    X = v => L + (v - t0) / (t1 - t0) * (W - L - R);
+    const dmax = Math.max(720000, ...runs.map(depth));
+    Yd = v => (H - B) - v / dmax * (H - T - B);
+    let out = '';
+    for (let m = 4; m*60000 <= dmax; m += 4) {
+      out += `<line x1="${L}" x2="${W-R}" y1="${Yd(m*60000)}" y2="${Yd(m*60000)}" stroke="var(--grid)" stroke-width="1"/>`;
+      out += `<text x="${L-6}" y="${Yd(m*60000)+3.5}" text-anchor="end">${m}m</text>`;
+    }
+    out += `<line x1="${L}" x2="${W-R}" y1="${H-B}" y2="${H-B}" stroke="var(--grid)" stroke-width="1"/>`;
+    const hStep = 3600e3;
+    for (let h = Math.ceil(t0/hStep)*hStep; h <= t1; h += hStep) {
+      out += `<text x="${X(h)}" y="${H-8}" text-anchor="middle">${new Date(h).toLocaleTimeString(undefined,{hour:'numeric'})}</text>`;
+    }
+    runs.forEach((r, i) => {
+      const d = depth(r), x = X(r.started_at_ms), y = Yd(d);
+      const finished = r.outcome === 'finished';
+      out += `<rect data-i="${i}" x="${x-2}" y="${y}" width="4" height="${(H-B)-y}" rx="2" fill="${finished ? 'var(--series)' : 'var(--deemph)'}" opacity="${finished ? 1 : .55}"/>`;
+      if (finished) out += `<circle data-i="${i}" cx="${x}" cy="${y}" r="5" fill="${d === bestOfDay ? 'var(--gold)' : 'var(--series)'}" stroke="var(--card)" stroke-width="2"/>`;
+      out += `<rect data-i="${i}" x="${x-6}" y="${T}" width="12" height="${H-T-B}" fill="transparent" style="cursor:pointer"/>`;
+    });
+    svg.innerHTML = out;
+
+    document.getElementById('day-table').innerHTML =
+      `<tr><th>№</th><th>Start</th><th>Result</th><th class="num">Time</th><th class="num">Splits seen</th></tr>` +
+      runs.map((r, i) => {
+        const finished = r.outcome === 'finished';
+        const nsplits = ((D.splits_by_run || {})[String(r.id)] || []).length;
+        const pill = finished
+          ? (isPB(r) ? '<span class="pill pb">record</span>' : '<span class="pill fin">finished</span>')
+          : `<span class="pill res">${r.reset_reason || 'reset'}</span>`;
+        return `<tr class="rowbtn" data-i="${i}" tabindex="0"><td class="tnum">#${r.attempt_number}</td>
+          <td>${dtime(r.started_at_ms)}</td><td>${pill}</td>
+          <td class="num tnum">${finished ? fmt(r.final_time_ms) : '† ' + fmt(r.last_timer_ms)}</td>
+          <td class="num tnum">${nsplits || '—'}</td></tr>`;
+      }).join('');
+  }
+
+  svg.addEventListener('pointerover', e => {
+    const i = e.target.dataset && e.target.dataset.i;
+    if (i == null) { tip2.style.opacity = 0; return; }
+    const r = runs[+i];
+    const label = r.outcome === 'finished' ? fmt(r.final_time_ms) : `† ${fmt(r.last_timer_ms)}`;
+    tip2.innerHTML = `<span class="t">${label}</span><div class="m">attempt #${r.attempt_number} · ${dtime(r.started_at_ms)}</div>`;
+    const box = svg.getBoundingClientRect();
+    const W = svg.viewBox.baseVal.width || box.width, H = svg.viewBox.baseVal.height || box.height;
+    tip2.style.left = (X(r.started_at_ms) / W * box.width) + 'px';
+    tip2.style.top = (Yd(depth(r)) / H * box.height) + 'px';
+    tip2.style.opacity = 1;
+  });
+  svg.addEventListener('pointerleave', () => tip2.style.opacity = 0);
+  svg.addEventListener('click', e => {
+    const i = e.target.dataset && e.target.dataset.i;
+    if (i != null) toggleDetail(runs[+i]);
+  });
+  document.getElementById('day-finishes').addEventListener('click', e => {
+    const b = e.target.closest('button[data-fin]');
+    if (b) toggleDetail(runs[+b.dataset.fin]);
+  });
+  const dayTable = document.getElementById('day-table');
+  dayTable.addEventListener('click', e => {
+    const tr = e.target.closest('tr[data-i]');
+    if (tr) toggleDetail(runs[+tr.dataset.i]);
+  });
+  dayTable.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const tr = e.target.closest('tr[data-i]');
+    if (tr) { e.preventDefault(); toggleDetail(runs[+tr.dataset.i]); }
+  });
+
+  renderDay(days[days.length - 1]);
+})();
+
+/* golds table */
+(function golds() {
+  const g = D.golds;
+  const el = document.getElementById('golds-table');
+  if (!g.length) { el.outerHTML = '<p class="subnote">No split data recorded yet.</p>'; return; }
+  const sob = g.reduce((a, x) => a + x.gold_ms, 0);
+  el.innerHTML = `<tr><th>Act</th><th class="num">Gold</th><th class="num">Runs sampled</th></tr>` +
+    g.map(x => `<tr><td>${x.act_name}</td><td class="num tnum gold-t">${fmt(x.gold_ms)}</td><td class="num tnum">${x.samples}</td></tr>`).join('') +
+    `<tr class="sobrow"><td>Sum of best</td><td class="num tnum gold-t">${fmt(sob)}</td><td></td></tr>`;
+})();
+
+/* sessions table */
+(function sessions() {
+  const rows = D.sessions || [];
+  const el = document.getElementById('sessions-table');
+  if (!rows.length) { el.outerHTML = '<p class="subnote">No sessions yet.</p>'; return; }
+  el.innerHTML = `<tr><th>Start</th><th>Length</th><th class="num">Attempts</th><th class="num">Finished</th><th class="num">Best</th></tr>` +
+    rows.map(s => {
+      const dur = s.ended_at_ms
+        ? (() => { const m = Math.max(0, s.ended_at_ms - s.started_at_ms) / 60000;
+                   return `${Math.floor(m/60)}h${String(Math.round(m%60)).padStart(2,'0')}m`; })()
+        : 'live';
+      return `<tr><td>${dshort(s.started_at_ms)} ${dtime(s.started_at_ms)}</td><td class="tnum">${dur}</td>
+        <td class="num tnum">${s.attempts}</td><td class="num tnum">${s.finished}</td>
+        <td class="num tnum">${s.best_ms != null ? fmt(s.best_ms) : '—'}</td></tr>`;
+    }).join('');
+})();
+</script>

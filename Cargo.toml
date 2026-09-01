@@ -1,0 +1,32 @@
+[package]
+name = "ngtwitchtimer"
+version = "0.1.0"
+edition = "2021"
+description = "Tracks a Twitch streamer's speedrun attempts by OCR-reading the on-screen LiveSplit timer"
+
+[features]
+default = []
+# In-process OCR via libtesseract/libleptonica (needs those dev libraries at
+# build time). Without this feature the `tesseract` CLI binary is invoked at
+# runtime instead — same OCR engine, slightly more per-frame overhead.
+leptess-ocr = ["dep:leptess"]
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+libc = "0.2"
+leptess = { version = "0.14", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time", "signal"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+twitch-irc = { version = "5", default-features = false, features = ["transport-tcp-rustls-webpki-roots"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,22 @@
+/target
+
+# Local config with chat credentials — copy config.example.toml instead.
+/config.toml
+
+# Data: databases, per-frame observation logs, runtime logs
+*.db
+*.db-shm
+*.db-wal
+*.jsonl
+/logs/
+/backfill-logs/
+/calibration/
+
+# Generated site output (index.html is built from template.html + the db)
+/site/index.html
+/site/data.json
+
+# Local screenshots / scratch
+*.png
+/.playwright-mcp/
+nohup.out

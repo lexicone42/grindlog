@@ -1,0 +1,71 @@
+# ngtwitchtimer configuration. Copy to config.toml and edit.
+# Every field except stream.channel has a sensible default; the commented
+# values below show the defaults.
+
+[stream]
+channel = "somestreamer"        # twitch.tv/<channel>  (REQUIRED)
+# quality = "best"              # "best", "worst", or e.g. "720p60"
+# source = "hls"                # "hls" (pure Rust + ffmpeg, default)
+                                # "streamlink" (pipes streamlink --stdout)
+                                # "vod"  (Twitch VOD; set vod_id) - for testing
+                                # "file" (local video/clip; set input) - for testing
+# vod_id = ""                   # twitch.tv/videos/<id> when source = "vod"
+# input = ""                    # path/URL when source = "file"
+# fps = 1                       # frames per second fed to OCR
+# canvas_w = 1920               # stream is scaled to this canvas before
+# canvas_h = 1080               #   cropping, so crop coords are stable
+# offline_poll_secs = 120       # re-check cadence while the channel is offline
+# restart_delay_secs = 5        # backoff after a mid-stream pipeline death
+# frame_timeout_secs = 30       # no frame for this long -> restart pipeline
+
+[timer]
+# Crop rectangle around the LiveSplit timer, in canvas coordinates.
+# Workflow: `ngtwitchtimer calibrate --full-frame` saves calibration/full.png;
+# find x/y/w/h there, set them here, then `ngtwitchtimer calibrate` and tune
+# threshold/invert until the printed OCR readings parse cleanly.
+crop_x = 1550
+crop_y = 40
+crop_w = 330
+crop_h = 90
+# upscale = 4                   # 3-4x upscaling helps tesseract a lot
+# threshold = 140               # gray cutoff 0-255 for black/white
+# invert = true                 # true for light digits on dark background
+
+[ocr]
+# engine = "auto"               # "auto" | "cli" | "leptess"
+# lang = "eng"
+# tesseract_cmd = "tesseract"   # binary used by the cli engine
+# tessdata_path = ""            # leptess only; empty = system default
+
+[detection]                     # defaults assume fps = 1
+# start_epsilon_ms = 500        # timer must exceed this to count as started
+# start_confirmations = 3       # advancing readings to declare RUNNING
+# stall_confirmations = 5       # frozen readings to declare FINISHED
+# stall_tolerance_ms = 150
+# reset_epsilon_ms = 1500       # readings below this count as "at zero"
+# reset_confirmations = 2       # zero readings to declare RESET
+# illegible_reset_count = 180   # unreadable frames (~seconds) before DNF;
+                                #   generous so ad breaks don't kill runs
+# max_jump_ms = 5000            # larger deviations are misreads, skipped
+# desync_confirmations = 3      # consistent "misreads" before re-syncing
+# smoothing_window = 5          # readings in the smoothed current time
+
+[game]
+name = "Super Mario Bros."     # overridden by !setgame (persisted in the DB)
+category = "Any%"
+
+[database]
+# path = "ngtimer.db"
+
+[chat]
+# enabled = false               # everything works without chat; enable later
+# username = "mybotaccount"
+# oauth_token = "oauth:..."     # IRC token for the bot account
+# announce = true               # announce finished runs (+PB) in chat
+# command_cooldown_secs = 10    # shared cooldown for viewer commands
+# mods = []                     # extra logins allowed to use mod commands
+
+[debug]
+# obs_log = "observations.jsonl"  # one JSON line per analyzed frame:
+                                  # ocr text, parsed ms, phase, events.
+                                  # Great with source = "vod"/"file".

@@ -1,0 +1,77 @@
+# Live shadow-mode config: watches twitch.tv/arcus, logs into the shared
+# ninja-gaiden.db. Polls every 2 minutes while he's offline and starts
+# capturing automatically when he goes live.
+#
+#   RUST_LOG=info ./target/release/ngtwitchtimer --config live.toml run
+#
+# Watch it work:   tail -f obs-live.jsonl
+# Check the data:  ./target/release/ngtwitchtimer --config live.toml report
+
+[stream]
+channel = "arcus"
+# source = "hls" (default): pure-Rust resolver + ffmpeg
+# Only capture his Ninja Gaiden days — Arcathlon and other streams are
+# skipped (the bot keeps polling in case he switches mid-day).
+title_filter = "ninja gaiden"
+
+[timer]
+# Calibrated against his VODs; sized for the widest time ("12:09.17").
+crop_x = 285
+crop_y = 800
+crop_w = 390
+crop_h = 100
+threshold = 60
+
+[splits]
+# LiveSplit's per-act cumulative-time column: detected splits enable
+# !pace / !golds / !splits and per-act stats.
+enabled = true
+crop_x = 535
+crop_y = 498
+crop_w = 135
+crop_h = 288
+
+[game]
+name = "Ninja Gaiden (NES)"
+category = "Any%"
+# The tracked best only spans what the bot has seen; his LiveSplit comparison
+# is seasonal, so call it what it is.
+record_label = "season best"
+# His actual season best predates tracking — read off the LiveSplit
+# comparison column. NEW-record announcements must beat this.
+baseline_best = "11:35.1"
+# Reference times shown on the records site / finish chart.
+references = [
+  { label = "WR", time = "11:32.183" },
+  # From speedrun.com (user Arcus, run date 2025-11-13, world rank 2)
+  { label = "Lifetime PB", time = "11:33.933" },
+]
+# Cumulative act-end boundaries (padded above his PB splits) for the death
+# chart / !deaths. Final act unbounded.
+acts = [
+  { name = "Act 1", end_ms = 58000 },
+  { name = "Act 2", end_ms = 175000 },
+  { name = "Act 3", end_ms = 262000 },
+  { name = "Act 4", end_ms = 425000 },
+  { name = "Act 5", end_ms = 585000 },
+  { name = "Act 6" },
+]
+
+[database]
+path = "ninja-gaiden.db"
+
+[chat]
+# To test chat WITHOUT posting in arcus' channel: create a bot account,
+# get an IRC token, and point `channel` at YOUR OWN channel — the bot keeps
+# watching arcus' stream but talks only where you say.
+enabled = false
+# channel = "yourchannel"
+# username = "yourbotaccount"
+# oauth_token = "oauth:..."
+# mods = ["yourlogin"]
+# Namespace for a shared channel: commands become !ngrust-pb, !ngrust-deaths,
+# !ngrust-pace, !ngrust-status... (bare !pb is left to other bots).
+command_prefix = "ngrust-"
+
+[debug]
+obs_log = "obs-live.jsonl"

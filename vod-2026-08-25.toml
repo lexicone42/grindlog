@@ -1,0 +1,51 @@
+# Session 1: VOD v2856167316, broadcast 2026-08-25 (7.56h).
+[stream]
+channel = "arcus"
+source = "file"
+input = "/datar/download/arcus/Ninja Gaiden speedruns-v2856167316.mp4"
+recorded_start = "2026-08-25T16:59:36Z"   # from Twitch's createdAt
+
+[timer]
+# Wide enough for "12:09.17" — see README: size the crop for the widest
+# time the timer will ever show.
+crop_x = 285
+crop_y = 800
+crop_w = 390
+crop_h = 100
+threshold = 60
+
+[game]
+name = "Ninja Gaiden (NES)"
+category = "Any%"
+
+[database]
+path = "ninja-gaiden-rebuild.db"
+
+[debug]
+obs_log = "obs-2026-08-25.jsonl"
+
+# Act boundaries for the death chart (cumulative, padded above PB splits).
+[[game.acts]]
+name = "Act 1"
+end_ms = 58000
+[[game.acts]]
+name = "Act 2"
+end_ms = 175000
+[[game.acts]]
+name = "Act 3"
+end_ms = 262000
+[[game.acts]]
+name = "Act 4"
+end_ms = 425000
+[[game.acts]]
+name = "Act 5"
+end_ms = 585000
+[[game.acts]]
+name = "Act 6"
+
+[splits]
+enabled = true
+crop_x = 535
+crop_y = 498
+crop_w = 135
+crop_h = 288
