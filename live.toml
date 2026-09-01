@@ -75,3 +75,11 @@ command_prefix = "ngrust-"
 
 [debug]
 obs_log = "obs-live.jsonl"
+
+[attempts_counter]
+# LiveSplit lifetime attempt counter in the layout header.
+enabled = true
+crop_x = 552
+crop_y = 462
+crop_w = 120
+crop_h = 34

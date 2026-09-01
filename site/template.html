@@ -5,67 +5,76 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=Instrument+Sans:wght@400;500;600&family=Martian+Mono:wght@400;600;700&display=swap">
 <style>
+  /* Ninja Gaiden (NES) palette: night-sky violet ground (the cutscene dusk),
+     Act-1 teal, NES salmon #f87858, gold for records. Chart series colors
+     stay on the validated data-viz blues. */
   :root {
     color-scheme: dark;
-    --bg: #0c0e14;
-    --card: #151824;
-    --card2: #1b1f30;
-    --ink: #eef0f6;
-    --ink2: #9aa3b8;
-    --muted: #6a7189;
-    --grid: #262b3d;
-    --hairline: rgba(255,255,255,.08);
+    --bg: #0d0b20;
+    --bg2: #141031;
+    --card: #161230;
+    --card2: #1e1940;
+    --ink: #eceefc;
+    --ink2: #a2a6c8;
+    --muted: #6d7194;
+    --grid: #272348;
+    --hairline: rgba(130,140,255,.13);
     --series: #3987e5;
-    --series-soft: rgba(57,135,229,.12);
-    --deemph: #565d75;
-    --gold: #e0a832;
-    --gold-soft: rgba(224,168,50,.12);
-    --behind: #e66767;
-    --ahead: #58b96b;
+    --series-soft: rgba(57,135,229,.14);
+    --deemph: #575d85;
+    --gold: #e8b23a;
+    --gold-soft: rgba(232,178,58,.13);
+    --behind: #f87858;
+    --ahead: #58d8a0;
+    --nesteal: #3cd6c4;
   }
   @media (prefers-color-scheme: light) {
     :root:not([data-theme="dark"]) {
       color-scheme: light;
-      --bg: #f5f5f2;
+      --bg: #f2f2ec;
+      --bg2: #eaeaf2;
       --card: #ffffff;
-      --card2: #eef0f5;
-      --ink: #14161f;
-      --ink2: #4d5468;
-      --muted: #868da0;
-      --grid: #e4e5ec;
-      --hairline: rgba(11,11,20,.10);
+      --card2: #edeef6;
+      --ink: #171425;
+      --ink2: #4e5170;
+      --muted: #83879f;
+      --grid: #e2e3ee;
+      --hairline: rgba(20,15,60,.11);
       --series: #2a78d6;
       --series-soft: rgba(42,120,214,.10);
-      --deemph: #b3b8c8;
+      --deemph: #b3b7cc;
       --gold: #a3730f;
       --gold-soft: rgba(163,115,15,.12);
-      --behind: #d03b3b;
+      --behind: #c8542c;
       --ahead: #1e7e34;
+      --nesteal: #0f8d80;
     }
   }
   :root[data-theme="light"] {
     color-scheme: light;
-    --bg: #f5f5f2;
+    --bg: #f2f2ec;
+    --bg2: #eaeaf2;
     --card: #ffffff;
-    --card2: #eef0f5;
-    --ink: #14161f;
-    --ink2: #4d5468;
-    --muted: #868da0;
-    --grid: #e4e5ec;
-    --hairline: rgba(11,11,20,.10);
+    --card2: #edeef6;
+    --ink: #171425;
+    --ink2: #4e5170;
+    --muted: #83879f;
+    --grid: #e2e3ee;
+    --hairline: rgba(20,15,60,.11);
     --series: #2a78d6;
     --series-soft: rgba(42,120,214,.10);
-    --deemph: #b3b8c8;
+    --deemph: #b3b7cc;
     --gold: #a3730f;
     --gold-soft: rgba(163,115,15,.12);
-    --behind: #d03b3b;
+    --behind: #c8542c;
     --ahead: #1e7e34;
+    --nesteal: #0f8d80;
   }
 
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    background: var(--bg);
+    background: linear-gradient(180deg, var(--bg) 0, var(--bg2) 520px, var(--bg2));
     color: var(--ink);
     font-family: "Instrument Sans", system-ui, -apple-system, sans-serif;
     font-size: 15px;
@@ -77,9 +86,14 @@
   .px { font-family: "Silkscreen", "Martian Mono", monospace; }
 
   /* ---------- masthead ---------- */
-  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px 18px; margin-bottom: 28px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px 18px; margin-bottom: 10px; }
   .wordmark { font-family: "Silkscreen", monospace; font-weight: 700; font-size: 22px; letter-spacing: .02em; }
-  .wordmark span { color: var(--series); }
+  .wordmark span { color: var(--nesteal); }
+  /* The Act 1 horizon: teal ground meeting brick, in one quiet strip. */
+  .horizon {
+    height: 4px; margin-bottom: 24px; border-radius: 2px;
+    background: linear-gradient(90deg, var(--nesteal), var(--nesteal) 34%, var(--behind) 60%, transparent 92%);
+  }
   .chip {
     font-family: "Silkscreen", monospace; font-size: 10px; letter-spacing: .08em;
     padding: 4px 9px 3px; border: 1px solid var(--hairline); border-radius: 3px;
@@ -101,6 +115,14 @@
   .pbvalue { font-family: "Martian Mono", monospace; font-weight: 700; font-size: clamp(40px, 6vw, 58px); line-height: 1.05; letter-spacing: -.01em; }
   .pbmeta { color: var(--ink2); font-size: 13px; margin-top: 8px; }
   .pbmeta b { color: var(--gold); font-weight: 600; }
+  .top5 { list-style: none; margin: 12px 0 0; padding: 0; }
+  .top5 li {
+    display: flex; align-items: baseline; gap: 10px;
+    border-top: 1px solid var(--hairline); padding: 5px 0; font-size: 13px;
+  }
+  .top5 .rank { font-family: "Silkscreen", monospace; font-size: 9px; color: var(--muted); width: 14px; }
+  .top5 .t { font-family: "Martian Mono", monospace; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .top5 .who { color: var(--muted); font-size: 12px; }
 
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 14px; }
   .tile { background: var(--card); border: 1px solid var(--hairline); border-radius: 8px; padding: 14px 16px; }
@@ -200,12 +222,14 @@
     <span class="chip" id="chip-updated"></span>
     <div class="tagline">Every attempt, split, and heartbreak — read off the stream by OCR, no cooperation required.</div>
   </header>
+  <div class="horizon"></div>
 
   <div class="hero">
     <div class="card pbcard">
-      <p class="eyebrow" id="pb-label">Personal best</p>
+      <p class="eyebrow" id="pb-label">Fastest runs</p>
       <div class="pbvalue" id="pb-value">–:––.–</div>
       <div class="pbmeta" id="pb-meta"></div>
+      <ol class="top5" id="pb-top5"></ol>
       <div class="pbmeta" id="pb-refs"></div>
     </div>
     <div>
@@ -316,13 +340,20 @@ const baseline = D.baseline_best_ms;
 // The record may predate tracking (read off the LiveSplit comparison).
 const recordMs = baseline != null && trackedBest != null
   ? Math.min(baseline, trackedBest) : (trackedBest ?? baseline);
-const recordIsBaseline = baseline != null && (trackedBest == null || baseline < trackedBest);
-document.getElementById('pb-label').textContent =
-  LABEL.toLowerCase() === 'pb' ? 'Personal best' : LABEL;
-document.getElementById('pb-value').textContent = fmt(recordMs);
-document.getElementById('pb-meta').innerHTML = recordIsBaseline
-  ? `set before tracking began${pbRow ? ` · best tracked run <b>${fmt(trackedBest)}</b> (attempt #${pbRow.attempt_number}, ${dshort(pbRow.at_ms)})` : ''}`
-  : (pbRow ? `<b>attempt #${pbRow.attempt_number}</b> · ${dshort(pbRow.at_ms)} · fallen ${D.pb_history.length}× on record` : '');
+// Fastest-runs board: all tracked finishes plus the pre-tracking record.
+const board = [...(D.finishes || [])]
+  .map(f => ({ t: f.final_time_ms, who: `#${f.attempt_number} · ${dshort(f.started_at_ms)}` }));
+if (baseline != null) board.push({ t: baseline, who: 'pre-tracking' });
+board.sort((a, b) => a.t - b.t);
+const topFive = board.slice(0, 5);
+document.getElementById('pb-label').textContent = `Fastest runs · ${LABEL} first`;
+if (topFive.length) {
+  document.getElementById('pb-value').textContent = fmt(topFive[0].t);
+  document.getElementById('pb-meta').innerHTML = topFive[0].who;
+  document.getElementById('pb-top5').innerHTML = topFive.slice(1).map((e, i) =>
+    `<li><span class="rank">${i + 2}</span><span class="t">${fmt(e.t)}</span><span class="who">${e.who}</span></li>`
+  ).join('');
+}
 if (D.references && D.references.length) {
   document.getElementById('pb-refs').innerHTML = D.references
     .map(r => `${r.label} <b>${fmt(r.ms)}</b>`).join(' · ');
@@ -499,6 +530,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     detail.innerHTML =
       `<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
         <strong>Attempt #${r.attempt_number}</strong>
+        ${r.ls_attempt != null ? `<span class="subnote" style="margin:0">his lifetime #${r.ls_attempt.toLocaleString()}</span>` : ''}
         <span class="subnote" style="margin:0">${dtime(r.started_at_ms)} – ${dtime(r.ended_at_ms)}</span>
         ${head}
       </div>${rows}`;

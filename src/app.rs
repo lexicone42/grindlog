@@ -47,6 +47,7 @@ struct CurrentRun {
     attempt_number: i64,
     started_unix_ms: i64,
     session_id: Option<i64>,
+    ls_attempt: Option<i64>,
     splits: Vec<crate::splits::RecordedSplit>,
 }
 
@@ -58,26 +59,35 @@ pub struct Regions {
     pub union: (u32, u32, u32, u32), // x, y, w, h in canvas coords
     pub timer: (u32, u32, u32, u32), // relative to union
     pub splits: Option<(u32, u32, u32, u32)>, // relative to union
+    pub counter: Option<(u32, u32, u32, u32)>, // relative to union
 }
 
 pub fn regions(cfg: &Config) -> Regions {
     let t = &cfg.timer;
-    if !cfg.splits.enabled {
-        return Regions {
-            union: (t.crop_x, t.crop_y, t.crop_w, t.crop_h),
-            timer: (0, 0, t.crop_w, t.crop_h),
-            splits: None,
-        };
-    }
+    let mut rects: Vec<(u32, u32, u32, u32)> = vec![(t.crop_x, t.crop_y, t.crop_w, t.crop_h)];
     let s = &cfg.splits;
-    let ux = t.crop_x.min(s.crop_x);
-    let uy = t.crop_y.min(s.crop_y);
-    let uw = (t.crop_x + t.crop_w).max(s.crop_x + s.crop_w) - ux;
-    let uh = (t.crop_y + t.crop_h).max(s.crop_y + s.crop_h) - uy;
+    if cfg.splits.enabled {
+        rects.push((s.crop_x, s.crop_y, s.crop_w, s.crop_h));
+    }
+    let c = &cfg.attempts_counter;
+    if c.enabled {
+        rects.push((c.crop_x, c.crop_y, c.crop_w, c.crop_h));
+    }
+    let ux = rects.iter().map(|r| r.0).min().unwrap();
+    let uy = rects.iter().map(|r| r.1).min().unwrap();
+    let uw = rects.iter().map(|r| r.0 + r.2).max().unwrap() - ux;
+    let uh = rects.iter().map(|r| r.1 + r.3).max().unwrap() - uy;
+    let rel = |r: &(u32, u32, u32, u32)| (r.0 - ux, r.1 - uy, r.2, r.3);
     Regions {
         union: (ux, uy, uw, uh),
-        timer: (t.crop_x - ux, t.crop_y - uy, t.crop_w, t.crop_h),
-        splits: Some((s.crop_x - ux, s.crop_y - uy, s.crop_w, s.crop_h)),
+        timer: rel(&rects[0]),
+        splits: cfg
+            .splits
+            .enabled
+            .then(|| rel(&(s.crop_x, s.crop_y, s.crop_w, s.crop_h))),
+        counter: c
+            .enabled
+            .then(|| rel(&(c.crop_x, c.crop_y, c.crop_w, c.crop_h))),
     }
 }
 
@@ -183,6 +193,14 @@ pub async fn run(cfg: Config) -> Result<()> {
         threshold: cfg.splits.threshold,
         invert: cfg.splits.invert,
     };
+    let pre_counter = ocr::PreprocessCfg {
+        upscale: cfg.timer.upscale,
+        threshold: cfg.attempts_counter.threshold,
+        invert: cfg.attempts_counter.invert,
+    };
+    // (last stable counter value, consecutive sightings)
+    let mut counter_stable: Option<(i64, u32)> = None;
+    let mut last_counter_read_t: i64 = i64::MIN / 2;
 
     // Recorded sources (vod/file) may decode much faster than realtime, so
     // the state machine is ticked by frame index instead of wall clock —
@@ -395,6 +413,28 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
         }
 
+        // LiveSplit attempt-counter pass: only while a run needs one, on the
+        // slow cadence; requires two matching reads before it's trusted.
+        if let (Some((cx, cy, cw2, ch2)), Some(cr)) = (reg.counter, current.as_mut()) {
+            if cr.ls_attempt.is_none() && t - last_counter_read_t >= splits_every_ms {
+                last_counter_read_t = t;
+                let cimg = image::imageops::crop_imm(&union_img, cx, cy, cw2, ch2).to_image();
+                let cp = ocr::preprocess(&cimg, &pre_counter);
+                if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&cp)?).await {
+                    if let Some(v) = crate::timeparse::parse_counter(txt.trim()) {
+                        counter_stable = match counter_stable {
+                            Some((pv, n)) if pv == v => Some((v, n + 1)),
+                            _ => Some((v, 1)),
+                        };
+                        if matches!(counter_stable, Some((_, n)) if n >= 2) {
+                            info!("livesplit attempt counter: {v}");
+                            cr.ls_attempt = Some(v);
+                        }
+                    }
+                }
+            }
+        }
+
         {
             let mut st = shared.status.write().await;
             st.phase = tracker.phase_name().to_string();
@@ -487,6 +527,7 @@ async fn handle_event(
                 // began that long ago (also correct when joining mid-run).
                 started_unix_ms: now - timer_ms,
                 session_id: None, // patched in by the frame loop
+                ls_attempt: None,
                 splits: Vec::new(),
             });
         }
@@ -531,6 +572,7 @@ async fn handle_event(
                     final_time_ms: Some(final_ms),
                     last_timer_ms: Some(final_ms),
                     session_id: run.session_id,
+                    ls_attempt: run.ls_attempt,
                 },
             )
             .await?;
@@ -607,6 +649,7 @@ async fn handle_event(
                     final_time_ms: None,
                     last_timer_ms: Some(last_ms),
                     session_id: run.session_id,
+                    ls_attempt: run.ls_attempt,
                 },
             )
             .await?;

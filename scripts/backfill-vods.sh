@@ -44,6 +44,13 @@ acts = [
   { name = "Act 6" },
 ]
 
+[attempts_counter]
+enabled = true
+crop_x = 552
+crop_y = 462
+crop_w = 120
+crop_h = 34
+
 [database]
 path = "ninja-gaiden-full.db"
 

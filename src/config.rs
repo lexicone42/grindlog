@@ -32,6 +32,37 @@ pub struct Config {
     pub debug: DebugCfg,
     #[serde(default)]
     pub splits: SplitsCfg,
+    #[serde(default)]
+    pub attempts_counter: CounterCfg,
+}
+
+/// LiveSplit's lifetime attempt counter (the number in the layout header).
+/// Read once per run and stored on the run row — correlates our per-category
+/// numbering with the runner's own lifetime count.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CounterCfg {
+    pub enabled: bool,
+    pub crop_x: u32,
+    pub crop_y: u32,
+    pub crop_w: u32,
+    pub crop_h: u32,
+    pub threshold: u8,
+    pub invert: bool,
+}
+
+impl Default for CounterCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            crop_x: 0,
+            crop_y: 0,
+            crop_w: 120,
+            crop_h: 34,
+            threshold: 150,
+            invert: true,
+        }
+    }
 }
 
 /// Second OCR region: the splits panel's cumulative-time column, one act per
@@ -422,6 +453,16 @@ impl Config {
         }
         if self.game.baseline_best.is_some() && self.game.baseline_best_ms().is_none() {
             bail!("game.baseline_best {:?} is unparseable", self.game.baseline_best);
+        }
+        if self.attempts_counter.enabled {
+            let c = &self.attempts_counter;
+            if c.crop_w == 0
+                || c.crop_h == 0
+                || c.crop_x + c.crop_w > self.stream.canvas_w
+                || c.crop_y + c.crop_h > self.stream.canvas_h
+            {
+                bail!("attempts_counter crop rectangle is invalid for the canvas");
+            }
         }
         if self.splits.enabled {
             let s = &self.splits;

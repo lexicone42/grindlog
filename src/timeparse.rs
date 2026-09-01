@@ -69,6 +69,17 @@ pub fn parse_time(raw: &str) -> Option<i64> {
     Some(((h * 60 + m) * 60 + sec) * 1000 + frac_ms)
 }
 
+/// Parse LiveSplit's attempt counter: a bare integer, tolerating stray
+/// whitelist punctuation OCR sometimes appends.
+pub fn parse_counter(raw: &str) -> Option<i64> {
+    let s: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let s = s.trim_matches(|c| c == '.' || c == ':');
+    if s.is_empty() || s.len() > 7 || !s.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
 /// Format milliseconds the way LiveSplit displays them: `H:MM:SS.t` past an
 /// hour, `M:SS.t` below it.
 pub fn format_ms(ms: i64) -> String {
@@ -137,6 +148,15 @@ mod tests {
         assert_eq!(parse_time("1:60:00"), None);
         assert_eq!(parse_time("0:00:61"), None);
         assert_eq!(parse_time("600:00"), None);
+    }
+
+    #[test]
+    fn parses_attempt_counter() {
+        assert_eq!(parse_counter("96008"), Some(96008));
+        assert_eq!(parse_counter(" 96034.\n"), Some(96034));
+        assert_eq!(parse_counter("96:034"), None);
+        assert_eq!(parse_counter(""), None);
+        assert_eq!(parse_counter("12345678"), None);
     }
 
     #[test]

@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS runs (
   reset_reason TEXT,              -- 'zeroed' | 'disappeared' | 'desync'
   final_time_ms INTEGER,          -- set when finished (or corrected)
   last_timer_ms INTEGER,          -- last timer value seen (context for resets)
-  session_id INTEGER              -- broadcast this run belongs to
+  session_id INTEGER,             -- broadcast this run belongs to
+  ls_attempt INTEGER              -- LiveSplit's lifetime attempt counter
 );
 CREATE INDEX IF NOT EXISTS idx_runs_game ON runs (game, category);
 CREATE INDEX IF NOT EXISTS idx_runs_started ON runs (started_at_ms);
@@ -71,16 +72,18 @@ pub async fn open(path: &str) -> Result<SqlitePool> {
         .connect_with(opts)
         .await?;
     sqlx::raw_sql(SCHEMA).execute(&pool).await?;
-    // Migration for databases created before the sessions feature.
-    let has_col: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM pragma_table_info('runs') WHERE name = 'session_id'",
-    )
-    .fetch_optional(&pool)
-    .await?;
-    if has_col.is_none() {
-        sqlx::query("ALTER TABLE runs ADD COLUMN session_id INTEGER")
-            .execute(&pool)
-            .await?;
+    // Migrations for databases created before newer columns existed.
+    for col in ["session_id", "ls_attempt"] {
+        let has: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM pragma_table_info('runs') WHERE name = ?")
+                .bind(col)
+                .fetch_optional(&pool)
+                .await?;
+        if has.is_none() {
+            sqlx::query(&format!("ALTER TABLE runs ADD COLUMN {col} INTEGER"))
+                .execute(&pool)
+                .await?;
+        }
     }
     Ok(pool)
 }
@@ -98,6 +101,7 @@ pub struct RunRow {
     pub final_time_ms: Option<i64>,
     pub last_timer_ms: Option<i64>,
     pub session_id: Option<i64>,
+    pub ls_attempt: Option<i64>,
 }
 
 pub struct NewRun<'a> {
@@ -111,13 +115,14 @@ pub struct NewRun<'a> {
     pub final_time_ms: Option<i64>,
     pub last_timer_ms: Option<i64>,
     pub session_id: Option<i64>,
+    pub ls_attempt: Option<i64>,
 }
 
 pub async fn insert_run(pool: &SqlitePool, r: NewRun<'_>) -> Result<i64> {
     let res = sqlx::query(
         "INSERT INTO runs (game, category, attempt_number, started_at_ms, ended_at_ms, \
-         outcome, reset_reason, final_time_ms, last_timer_ms, session_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         outcome, reset_reason, final_time_ms, last_timer_ms, session_id, ls_attempt) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(r.game)
     .bind(r.category)
@@ -129,6 +134,7 @@ pub async fn insert_run(pool: &SqlitePool, r: NewRun<'_>) -> Result<i64> {
     .bind(r.final_time_ms)
     .bind(r.last_timer_ms)
     .bind(r.session_id)
+    .bind(r.ls_attempt)
     .execute(pool)
     .await?;
     Ok(res.last_insert_rowid())
@@ -619,6 +625,7 @@ mod tests {
             final_time_ms: final_ms,
             last_timer_ms: final_ms.or(Some(42_000)),
             session_id: None,
+            ls_attempt: None,
         }
     }
 
