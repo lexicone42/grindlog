@@ -88,6 +88,6 @@ crop_h = 34
 # LiveSplit "Sum of Best Segments" row.
 enabled = true
 crop_x = 540
-crop_y = 946
+crop_y = 912
 crop_w = 130
-crop_h = 40
+crop_h = 36

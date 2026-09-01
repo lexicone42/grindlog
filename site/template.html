@@ -282,7 +282,8 @@
 
   <section class="card" style="margin-top:14px">
     <h2>Every finish</h2>
-    <p class="subnote">Finished runs by attempt number — faster is higher. The gold line tracks the best tracked run as it falls.</p>
+    <p class="subnote">Finished runs by attempt number — faster is higher. The gold line tracks the best tracked run as it falls.
+      <span id="scatter-sub" style="display:block"></span></p>
     <div class="chartbox">
       <svg id="scatter" width="100%" height="240" role="img" aria-label="Finish times by attempt number"></svg>
       <div class="tooltip" id="tip"></div>
@@ -368,14 +369,14 @@ const tiles = [
   ['Longest reset streak', D.streaks.longest_reset_streak, `current: ${D.streaks.current_reset_streak}`],
   ['Hours tracked', hours.toFixed(1), `${D.sessions.length} sessions`],
 ];
-document.getElementById('tiles').innerHTML = tiles.map(([l, v, sub]) =>
-  `<div class="tile"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`).join('');
+// One grid for every stat tile — no orphan rows.
+document.getElementById('tiles2').remove();
 const tiles2 = [
   ['Today', `${D.today.attempts}`, `${D.today.finished} finished, ${D.today.resets} resets`],
   ['Best today', fmt(D.today.best_ms), D.today.best_ms && recordMs ? (D.today.best_ms <= recordMs ? `the new ${LABEL}!` : `+${((D.today.best_ms - recordMs)/1000).toFixed(1)}s to ${LABEL}`) : ' '],
   ['Sum of best', (() => { const g = D.golds; return g.length ? fmt(g.reduce((a,x)=>a+x.gold_ms,0)) : '—'; })(), 'from recorded golds'],
 ];
-document.getElementById('tiles2').innerHTML = tiles2.map(([l, v, sub]) =>
+document.getElementById('tiles').innerHTML = [...tiles, ...tiles2].map(([l, v, sub]) =>
   `<div class="tile"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`).join('');
 
 /* death chart */
@@ -428,7 +429,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   if (pts.length < 2) return;
   const svg = document.getElementById('trend');
   svg.hidden = false;
-  const W = svg.clientWidth || 460, H = 110, L = 52, R = 14, T = 10, B = 8;
+  const W = svg.clientWidth || 460, H = 110, L = 64, R = 14, T = 10, B = 8;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   const ys = pts.map(p => p.best_ms);
   const pad = 4000;
@@ -477,10 +478,16 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     out += `<text x="${L - 8}" y="${Y(v) + 3.5}" text-anchor="end">${fmt(v)}</text>`;
   }
   out += `<text x="${(L + W - R) / 2}" y="${H - 6}" text-anchor="middle">attempt №</text>`;
-  // reference lines (WR, lifetime PB, ...)
-  for (const r of refs) {
-    out += `<line x1="${L}" x2="${W - R}" y1="${Y(r.ms)}" y2="${Y(r.ms)}" stroke="var(--behind)" stroke-width="1" opacity=".6"/>`;
-    out += `<text x="${L + 4}" y="${Y(r.ms) - 5}" fill="var(--behind)">${r.label} ${fmt(r.ms)}</text>`;
+  // Reference times cluster within seconds of each other — render them as
+  // one shaded "target zone" band (labels live in the caption instead).
+  if (refs.length) {
+    const lo = Math.min(...refs.map(r => r.ms)), hi = Math.max(...refs.map(r => r.ms));
+    out += `<rect x="${L}" y="${Y(lo)}" width="${W - L - R}" height="${Math.max(2, Y(hi) - Y(lo))}"
+      fill="var(--behind)" opacity=".14"/>`;
+    out += `<line x1="${L}" x2="${W - R}" y1="${Y(lo)}" y2="${Y(lo)}" stroke="var(--behind)" stroke-width="1" opacity=".6"/>`;
+    const cap = document.querySelector('#scatter-sub');
+    if (cap) cap.textContent = 'Target zone: ' +
+      [...refs].sort((a, b) => a.ms - b.ms).map(r => `${r.label} ${fmt(r.ms)}`).join(' · ');
   }
   // PB step line (gold)
   if (D.pb_history.length) {
@@ -696,7 +703,8 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
 
 /* sessions table */
 (function sessions() {
-  const rows = D.sessions || [];
+  // Hide zero-attempt micro-sessions (bot restarts, brief blips).
+  const rows = (D.sessions || []).filter(s => s.attempts > 0 || !s.ended_at_ms);
   const el = document.getElementById('sessions-table');
   if (!rows.length) { el.outerHTML = '<p class="subnote">No sessions yet.</p>'; return; }
   el.innerHTML = `<tr><th>Start</th><th>Length</th><th class="num">Attempts</th><th class="num">Finished</th><th class="num">Best</th></tr>` +

@@ -456,7 +456,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                 let bimg = image::imageops::crop_imm(&union_img, bx, by, bw2, bh2).to_image();
                 let bp = ocr::preprocess(&bimg, &pre_counter);
                 if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&bp)?).await {
-                    if let Some(v) = parse_time(txt.trim()) {
+                    // Plausibility: a Sum of Best can never exceed the record
+                    // (and can't be wildly below it) — this rejects consistent
+                    // misreads when the layout shifts under the crop.
+                    let bound = shared.baseline_best_ms.unwrap_or(i64::MAX);
+                    if let Some(v) = parse_time(txt.trim())
+                        .filter(|&v| v <= bound && v > bound / 2)
+                    {
                         sob_stable = match sob_stable {
                             Some((pv, n)) if pv == v => Some((v, n + 1)),
                             _ => Some((v, 1)),
