@@ -8,6 +8,8 @@ use serde::Serialize;
 pub struct RunBrief {
     pub started_at_ms: i64,
     pub attempt_number: i64,
+    /// The runner's own LiveSplit attempt counter, when read.
+    pub ls_attempt: Option<i64>,
     pub finished: bool,
     pub final_time_ms: Option<i64>,
     pub last_timer_ms: Option<i64>,
@@ -74,6 +76,7 @@ pub fn death_chart(runs: &[RunBrief], acts: &[Act]) -> Vec<DeathBucket> {
 pub struct PbPoint {
     pub at_ms: i64,
     pub attempt_number: i64,
+    pub ls_attempt: Option<i64>,
     pub time_ms: i64,
 }
 
@@ -88,6 +91,7 @@ pub fn pb_history(runs: &[RunBrief]) -> Vec<PbPoint> {
                 out.push(PbPoint {
                     at_ms: r.started_at_ms,
                     attempt_number: r.attempt_number,
+                    ls_attempt: r.ls_attempt,
                     time_ms: t,
                 });
             }
@@ -164,6 +168,7 @@ mod tests {
         RunBrief {
             started_at_ms: n * 1000,
             attempt_number: n,
+            ls_attempt: None,
             finished: fin.is_some(),
             final_time_ms: fin,
             last_timer_ms: Some(fin.unwrap_or(last)),

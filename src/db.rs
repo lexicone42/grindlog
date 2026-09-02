@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   started_at_ms INTEGER NOT NULL,
   ended_at_ms INTEGER,            -- NULL while the broadcast is ongoing
   source TEXT NOT NULL,           -- 'hls' | 'streamlink' | 'vod' | 'file'
-  label TEXT NOT NULL             -- channel name, vod id, or file path
+  label TEXT NOT NULL,            -- channel name, vod id, or file path
+  tag TEXT                        -- e.g. 'arcathlon' for marathon broadcasts
 );
 "#;
 
@@ -73,14 +74,19 @@ pub async fn open(path: &str) -> Result<SqlitePool> {
         .await?;
     sqlx::raw_sql(SCHEMA).execute(&pool).await?;
     // Migrations for databases created before newer columns existed.
-    for col in ["session_id", "ls_attempt"] {
-        let has: Option<i64> =
-            sqlx::query_scalar("SELECT 1 FROM pragma_table_info('runs') WHERE name = ?")
-                .bind(col)
-                .fetch_optional(&pool)
-                .await?;
+    for (table, col, ty) in [
+        ("runs", "session_id", "INTEGER"),
+        ("runs", "ls_attempt", "INTEGER"),
+        ("sessions", "tag", "TEXT"),
+    ] {
+        let has: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?"
+        ))
+        .bind(col)
+        .fetch_optional(&pool)
+        .await?;
         if has.is_none() {
-            sqlx::query(&format!("ALTER TABLE runs ADD COLUMN {col} INTEGER"))
+            sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {col} {ty}"))
                 .execute(&pool)
                 .await?;
         }
@@ -145,13 +151,15 @@ pub async fn open_session(
     started_at_ms: i64,
     source: &str,
     label: &str,
+    tag: Option<&str>,
 ) -> Result<i64> {
     let res = sqlx::query(
-        "INSERT INTO sessions (started_at_ms, source, label) VALUES (?, ?, ?)",
+        "INSERT INTO sessions (started_at_ms, source, label, tag) VALUES (?, ?, ?, ?)",
     )
     .bind(started_at_ms)
     .bind(source)
     .bind(label)
+    .bind(tag)
     .execute(pool)
     .await?;
     Ok(res.last_insert_rowid())
@@ -173,6 +181,7 @@ pub struct SessionSummary {
     pub ended_at_ms: Option<i64>,
     pub source: String,
     pub label: String,
+    pub tag: Option<String>,
     pub attempts: i64,
     pub finished: i64,
     pub best_ms: Option<i64>,
@@ -180,7 +189,7 @@ pub struct SessionSummary {
 
 pub async fn recent_sessions(pool: &SqlitePool, limit: i64) -> Result<Vec<SessionSummary>> {
     let rows = sqlx::query(
-        "SELECT s.id, s.started_at_ms, s.ended_at_ms, s.source, s.label, \
+        "SELECT s.id, s.started_at_ms, s.ended_at_ms, s.source, s.label, s.tag, \
          COUNT(r.id) AS attempts, \
          COALESCE(SUM(CASE WHEN r.outcome = 'finished' THEN 1 ELSE 0 END), 0) AS finished, \
          MIN(CASE WHEN r.outcome = 'finished' THEN r.final_time_ms END) AS best_ms \
@@ -198,6 +207,7 @@ pub async fn recent_sessions(pool: &SqlitePool, limit: i64) -> Result<Vec<Sessio
             ended_at_ms: r.get("ended_at_ms"),
             source: r.get("source"),
             label: r.get("label"),
+            tag: r.get("tag"),
             attempts: r.get("attempts"),
             finished: r.get("finished"),
             best_ms: r.get("best_ms"),
@@ -557,7 +567,7 @@ pub async fn runs_brief(
     category: &str,
 ) -> Result<Vec<crate::stats::RunBrief>> {
     let rows = sqlx::query(
-        "SELECT started_at_ms, attempt_number, outcome, final_time_ms, last_timer_ms \
+        "SELECT started_at_ms, attempt_number, ls_attempt, outcome, final_time_ms, last_timer_ms \
          FROM runs WHERE game = ? AND category = ? ORDER BY id",
     )
     .bind(game)
@@ -569,6 +579,7 @@ pub async fn runs_brief(
         .map(|r| crate::stats::RunBrief {
             started_at_ms: r.get("started_at_ms"),
             attempt_number: r.get("attempt_number"),
+            ls_attempt: r.get("ls_attempt"),
             finished: r.get::<String, _>("outcome") == OUTCOME_FINISHED,
             final_time_ms: r.get("final_time_ms"),
             last_timer_ms: r.get("last_timer_ms"),
@@ -686,7 +697,7 @@ mod tests {
     #[tokio::test]
     async fn session_lifecycle_and_summary() {
         let (_dir, pool) = test_pool().await;
-        let sid = open_session(&pool, 1000, "hls", "somechannel").await.unwrap();
+        let sid = open_session(&pool, 1000, "hls", "somechannel", None).await.unwrap();
         let mut r = run("smb", 1, 2000, Some(300_000));
         r.session_id = Some(sid);
         insert_run(&pool, r).await.unwrap();

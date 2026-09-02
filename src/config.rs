@@ -164,6 +164,10 @@ pub struct StreamCfg {
     /// polling, so it catches a mid-day switch to the tracked game.
     #[serde(default)]
     pub title_filter: Option<String>,
+    /// Free-form tag stored on the session (e.g. "arcathlon") so the site can
+    /// mark runs from special broadcasts.
+    #[serde(default)]
+    pub session_tag: Option<String>,
     /// When the recording started, RFC3339 (e.g. "2026-08-25T16:59:36Z").
     /// Recorded runs are then logged on the original broadcast timeline
     /// instead of the analysis time. For source = "vod" this is fetched from

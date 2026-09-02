@@ -8,7 +8,7 @@
 # on the original timeline. Run under `nice` so the live bot keeps priority.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-mkdir -p backfill-logs
+mkdir -p backfill-logs backfill-db
 
 for id in "$@"; do
   cfg=$(mktemp /tmp/ngbackfill-XXXXXX.toml)
@@ -55,7 +55,9 @@ crop_w = 120
 crop_h = 34
 
 [database]
-path = "ninja-gaiden-full.db"
+# One db per VOD so several chains can run in parallel; merge chronologically
+# afterwards (attempt numbers are assigned per db, so the merge renumbers).
+path = "backfill-db/vod-$id.db"
 
 [debug]
 obs_log = "backfill-logs/obs-$id.jsonl"

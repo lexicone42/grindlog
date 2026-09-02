@@ -187,6 +187,7 @@
   .pill.fin { background: var(--series-soft); color: var(--series); }
   .pill.pb { background: var(--gold-soft); color: var(--gold); }
   .pill.res { color: var(--muted); border: 1px solid var(--hairline); }
+  .pill.tag { background: var(--gold-soft); color: var(--gold); border: 1px solid var(--gold); font-family: "Silkscreen", monospace; font-size: 9px; letter-spacing: .06em; text-transform: uppercase; vertical-align: 1px; }
   .sobrow td { border-top: 1px solid var(--grid); font-weight: 600; }
 
   .daychip {
@@ -326,6 +327,15 @@ const fmt = ms => {
 };
 const dshort = ms => new Date(ms).toLocaleDateString(undefined, {month:'short', day:'numeric'});
 const dtime = ms => new Date(ms).toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+// The run's identity is the runner's own LiveSplit counter; our tracked
+// number is only a muted fallback for runs where it wasn't read.
+const runNo = r => r.ls_attempt != null
+  ? `run ${r.ls_attempt.toLocaleString()}`
+  : `<span style="color:var(--muted)">tracked #${r.attempt_number}</span>`;
+// Sessions can carry a tag (e.g. "arcathlon") that marks their runs.
+const sessionTag = Object.fromEntries((D.sessions || []).filter(s => s.tag).map(s => [s.id, s.tag]));
+const tagPill = r => sessionTag[r.session_id]
+  ? `<span class="pill tag">${sessionTag[r.session_id]}</span>` : '';
 
 /* masthead */
 document.getElementById('chip-cat').textContent = `${D.current_category} · NES`;
@@ -344,7 +354,7 @@ const recordMs = baseline != null && trackedBest != null
   ? Math.min(baseline, trackedBest) : (trackedBest ?? baseline);
 // Fastest-runs board: all tracked finishes plus the pre-tracking record.
 const board = [...(D.finishes || [])]
-  .map(f => ({ t: f.final_time_ms, who: `#${f.attempt_number} · ${dshort(f.started_at_ms)}` }));
+  .map(f => ({ t: f.final_time_ms, who: `${runNo(f)} · ${dshort(f.started_at_ms)}` }));
 if (baseline != null) board.push({ t: baseline, who: 'pre-tracking' });
 board.sort((a, b) => a.t - b.t);
 const topFive = board.slice(0, 5);
@@ -458,7 +468,10 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   const svg = document.getElementById('scatter');
   const W = svg.clientWidth || 980, H = 240, L = 58, R = 16, T = 14, B = 30;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  const xs = finishes.map(f => f.attempt_number);
+  // X axis: his LiveSplit counter once every finish carries one, else ours.
+  const useLs = finishes.every(f => f.ls_attempt != null) && D.pb_history.every(p => p.ls_attempt != null);
+  const xOf = r => useLs ? r.ls_attempt : r.attempt_number;
+  const xs = finishes.map(xOf);
   const ys = finishes.map(f => f.final_time_ms);
   const refs = (D.references || []).filter(r => r.ms);
   if (D.baseline_best_ms != null && (!D.pb_history.length || D.baseline_best_ms < D.pb_history[D.pb_history.length-1].time_ms)) {
@@ -477,7 +490,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     out += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)" stroke-width="1"/>`;
     out += `<text x="${L - 8}" y="${Y(v) + 3.5}" text-anchor="end">${fmt(v)}</text>`;
   }
-  out += `<text x="${(L + W - R) / 2}" y="${H - 6}" text-anchor="middle">attempt №</text>`;
+  out += `<text x="${(L + W - R) / 2}" y="${H - 6}" text-anchor="middle">${useLs ? "his run №" : "tracked attempt №"}</text>`;
   // Reference times cluster within seconds of each other — render them as
   // one shaded "target zone" band (labels live in the caption instead).
   if (refs.length) {
@@ -493,8 +506,8 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   if (D.pb_history.length) {
     let d = '', prev = null;
     for (const p of D.pb_history) {
-      if (prev == null) d += `M ${X(p.attempt_number)} ${Y(p.time_ms)}`;
-      else d += ` L ${X(p.attempt_number)} ${Y(prev)} L ${X(p.attempt_number)} ${Y(p.time_ms)}`;
+      if (prev == null) d += `M ${X(xOf(p))} ${Y(p.time_ms)}`;
+      else d += ` L ${X(xOf(p))} ${Y(prev)} L ${X(xOf(p))} ${Y(p.time_ms)}`;
       prev = p.time_ms;
     }
     d += ` L ${W - R} ${Y(prev)}`;
@@ -504,9 +517,9 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   // finish dots (surface ring via stroke)
   finishes.forEach((f, i) => {
     const isPB = D.pb_history.some(p => p.attempt_number === f.attempt_number);
-    out += `<circle data-i="${i}" cx="${X(f.attempt_number)}" cy="${Y(f.final_time_ms)}" r="5"
+    out += `<circle data-i="${i}" cx="${X(xOf(f))}" cy="${Y(f.final_time_ms)}" r="5"
       fill="${isPB ? 'var(--gold)' : 'var(--series)'}" stroke="var(--card)" stroke-width="2"/>`;
-    out += `<circle data-i="${i}" cx="${X(f.attempt_number)}" cy="${Y(f.final_time_ms)}" r="13" fill="transparent" style="cursor:pointer"/>`;
+    out += `<circle data-i="${i}" cx="${X(xOf(f))}" cy="${Y(f.final_time_ms)}" r="13" fill="transparent" style="cursor:pointer"/>`;
   });
   svg.innerHTML = out;
   const tip = document.getElementById('tip');
@@ -514,9 +527,9 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     const i = e.target.dataset && e.target.dataset.i;
     if (i == null) { tip.style.opacity = 0; return; }
     const f = finishes[+i];
-    tip.innerHTML = `<span class="t">${fmt(f.final_time_ms)}</span><div class="m">attempt #${f.attempt_number} · ${dshort(f.started_at_ms)}</div>`;
+    tip.innerHTML = `<span class="t">${fmt(f.final_time_ms)}</span><div class="m">${runNo(f)} · ${dshort(f.started_at_ms)}</div>`;
     const box = svg.getBoundingClientRect();
-    tip.style.left = (X(f.attempt_number) / W * box.width) + 'px';
+    tip.style.left = (X(xOf(f)) / W * box.width) + 'px';
     tip.style.top = (Y(f.final_time_ms) / H * box.height) + 'px';
     tip.style.opacity = 1;
   });
@@ -575,7 +588,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     }
     detail.innerHTML =
       `<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
-        <strong>Attempt #${r.attempt_number}</strong>
+        <strong style="text-transform:capitalize">${runNo(r)}</strong> ${tagPill(r)}
         ${r.ls_attempt != null ? `<span class="subnote" style="margin:0">his lifetime #${r.ls_attempt.toLocaleString()}</span>` : ''}
         <span class="subnote" style="margin:0">${dtime(r.started_at_ms)} – ${dtime(r.ended_at_ms)}</span>
         ${head}
@@ -606,12 +619,12 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     const spanH = Math.max(0, runs[runs.length-1].ended_at_ms - runs[0].started_at_ms) / 3.6e6;
     document.getElementById('hb-sub').textContent =
       `${runs.length} attempts across ${spanH.toFixed(1)} hours — ${fin.length} finished` +
-      (deepest > 0 ? `, deepest heartbreak † ${fmt(deepest)}` : '') + '.';
+      '.';
 
     // every completed run of the day, at a glance
     document.getElementById('day-finishes').innerHTML = fin.map(r =>
       `<button class="finchip${depth(r) === bestOfDay ? ' best' : ''}" data-fin="${runs.indexOf(r)}">
-        <b>${fmt(r.final_time_ms)}</b><span class="att">#${r.attempt_number} · ${dtime(r.started_at_ms)}</span>
+        <b>${fmt(r.final_time_ms)}</b><span class="att">${runNo(r)} · ${dtime(r.started_at_ms)}</span>
       </button>`).join('');
 
     const W = svg.clientWidth || 980, H = 190, L = 46, R = 12, T = 10, B = 26;
@@ -640,7 +653,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     svg.innerHTML = out;
 
     document.getElementById('day-table').innerHTML =
-      `<tr><th>Run №</th><th>Tracked №</th><th>Start</th><th>Result</th><th class="num">Time</th><th class="num">Splits seen</th></tr>` +
+      `<tr><th>Run №</th><th>Start</th><th>Result</th><th class="num">Time</th><th class="num">Splits seen</th></tr>` +
       runs.map((r, i) => {
         const finished = r.outcome === 'finished';
         const nsplits = ((D.splits_by_run || {})[String(r.id)] || []).length;
@@ -648,8 +661,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
           ? (isPB(r) ? '<span class="pill pb">record</span>' : '<span class="pill fin">finished</span>')
           : `<span class="pill res">${r.reset_reason || 'reset'}</span>`;
         return `<tr class="rowbtn" data-i="${i}" tabindex="0">
-          <td class="tnum" style="font-weight:600">${r.ls_attempt != null ? r.ls_attempt.toLocaleString() : '—'}</td>
-          <td class="tnum" style="color:var(--muted)">#${r.attempt_number}</td>
+          <td class="tnum" style="font-weight:600">${r.ls_attempt != null ? r.ls_attempt.toLocaleString() : `<span style="color:var(--muted)">#${r.attempt_number}</span>`} ${tagPill(r)}</td>
           <td>${dtime(r.started_at_ms)}</td><td>${pill}</td>
           <td class="num tnum">${finished ? fmt(r.final_time_ms) : '† ' + fmt(r.last_timer_ms)}</td>
           <td class="num tnum">${nsplits || '—'}</td></tr>`;
@@ -661,7 +673,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     if (i == null) { tip2.style.opacity = 0; return; }
     const r = runs[+i];
     const label = r.outcome === 'finished' ? fmt(r.final_time_ms) : `† ${fmt(r.last_timer_ms)}`;
-    tip2.innerHTML = `<span class="t">${label}</span><div class="m">attempt #${r.attempt_number} · ${dtime(r.started_at_ms)}</div>`;
+    tip2.innerHTML = `<span class="t">${label}</span><div class="m">${runNo(r)} · ${dtime(r.started_at_ms)}</div>`;
     const box = svg.getBoundingClientRect();
     const W = svg.viewBox.baseVal.width || box.width, H = svg.viewBox.baseVal.height || box.height;
     tip2.style.left = (X(r.started_at_ms) / W * box.width) + 'px';

@@ -43,6 +43,7 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
             .map(|r| {
                 serde_json::json!({
                     "attempt_number": r.attempt_number,
+                    "ls_attempt": r.ls_attempt,
                     "started_at_ms": r.started_at_ms,
                     "final_time_ms": r.final_time_ms,
                 })

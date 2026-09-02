@@ -206,9 +206,16 @@ pub async fn run(cfg: Config) -> Result<()> {
         threshold: cfg.attempts_counter.threshold,
         invert: cfg.attempts_counter.invert,
     };
-    // (last stable counter value, consecutive sightings)
+    // (candidate counter value, consecutive sightings) — reset at every run
+    // start so a stale display can't inherit the previous run's streak.
     let mut counter_stable: Option<(i64, u32)> = None;
     let mut last_counter_read_t: i64 = i64::MIN / 2;
+    // The lifetime counter only ever increases; a read at or below the last
+    // recorded value is the previous attempt's number still on screen.
+    let mut last_ls_attempt: Option<i64> =
+        sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(ls_attempt) FROM runs")
+            .fetch_one(&pool)
+            .await?;
     let mut sob_stable: Option<(i64, u32)> = None;
     let mut sob_recorded: Option<i64> = db::get_setting(&pool, "ls_sob_ms")
         .await?
@@ -346,7 +353,15 @@ pub async fn run(cfg: Config) -> Result<()> {
 
         if session_id.is_none() {
             let started = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
-            match db::open_session(&pool, started, session_source, &session_label).await {
+            match db::open_session(
+                &pool,
+                started,
+                session_source,
+                &session_label,
+                cfg.stream.session_tag.as_deref(),
+            )
+            .await
+            {
                 Ok(id) => {
                     info!("session #{id} opened ({session_source}: {session_label})");
                     session_id = Some(id);
@@ -434,7 +449,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                 let cimg = image::imageops::crop_imm(&union_img, cx, cy, cw2, ch2).to_image();
                 let cp = ocr::preprocess(&cimg, &pre_counter);
                 if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&cp)?).await {
-                    if let Some(v) = crate::timeparse::parse_counter(txt.trim()) {
+                    if let Some(v) = crate::timeparse::parse_counter(txt.trim())
+                        .filter(|&v| last_ls_attempt.map(|p| v > p && v < p + 500).unwrap_or(true))
+                    {
                         counter_stable = match counter_stable {
                             Some((pv, n)) if pv == v => Some((v, n + 1)),
                             _ => Some((v, 1)),
@@ -442,6 +459,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         if matches!(counter_stable, Some((_, n)) if n >= 2) {
                             info!("livesplit attempt counter: {v}");
                             cr.ls_attempt = Some(v);
+                            last_ls_attempt = Some(v);
                         }
                     }
                 }
@@ -499,6 +517,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             // run, dropped when the run ends.
             match &ev {
                 Event::Started { .. } => {
+                    counter_stable = None;
                     if cfg.splits.enabled {
                         splits_tracker = Some(crate::splits::SplitsTracker::new(
                             shared.acts.len(),
@@ -639,21 +658,24 @@ async fn handle_event(
             )
             .await?;
             let label = &shared.record_label;
+            // His own LiveSplit counter is the run's identity when we have it.
+            let run_no = match run.ls_attempt {
+                Some(n) => format!("run {n}"),
+                None => format!("tracked #{}", run.attempt_number),
+            };
             let msg = if is_pb {
                 format!(
-                    "Run finished in {} — NEW {label} for {} [{}]! (attempt #{})",
+                    "Run finished in {} — NEW {label} for {} [{}]! ({run_no})",
                     format_ms(final_ms),
                     run.game,
                     run.category,
-                    run.attempt_number
                 )
             } else {
                 format!(
-                    "Run finished in {} ({} [{}], attempt #{}; {label} is {})",
+                    "Run finished in {} ({} [{}], {run_no}; {label} is {})",
                     format_ms(final_ms),
                     run.game,
                     run.category,
-                    run.attempt_number,
                     format_ms(prior_pb.unwrap_or(0))
                 )
             };
