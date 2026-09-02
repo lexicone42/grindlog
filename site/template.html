@@ -186,6 +186,7 @@
   .pill { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 10px; }
   .pill.fin { background: var(--series-soft); color: var(--series); }
   .pill.pb { background: var(--gold-soft); color: var(--gold); }
+  .pill.day { background: var(--gold-soft); color: var(--ink2); border: 1px solid var(--gold-soft); }
   .pill.res { color: var(--muted); border: 1px solid var(--hairline); }
   .pill.tag { background: var(--gold-soft); color: var(--gold); border: 1px solid var(--gold); font-family: "Silkscreen", monospace; font-size: 9px; letter-spacing: .06em; text-transform: uppercase; vertical-align: 1px; }
   .sobrow td { border-top: 1px solid var(--grid); font-weight: 600; }
@@ -529,11 +530,14 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     }
     d += ` L ${W - R} ${Y(prev)}`;
     out += `<path d="${d}" fill="none" stroke="var(--gold)" stroke-width="2" stroke-linejoin="round"/>`;
-    out += `<text x="${W - R}" y="${Y(prev) - 7}" text-anchor="end" fill="var(--gold)">PB ${fmt(prev)}</text>`;
+    out += `<text x="${W - R}" y="${Y(prev) - 7}" text-anchor="end" fill="var(--gold)">best tracked ${fmt(prev)}</text>`;
   }
   // finish dots (surface ring via stroke)
   finishes.forEach((f, i) => {
-    const isPB = D.pb_history.some(p => p.attempt_number === f.attempt_number);
+    // Gold only for a true record: a tracked best that also beats his real
+    // season best (the pre-tracking baseline).
+    const isPB = D.pb_history.some(p => p.attempt_number === f.attempt_number)
+      && (D.baseline_best_ms == null || f.final_time_ms < D.baseline_best_ms);
     out += `<circle data-i="${i}" cx="${X(xOf(f))}" cy="${Y(f.final_time_ms)}" r="5"
       fill="${isPB ? 'var(--gold)' : 'var(--series)'}" stroke="var(--card)" stroke-width="2"/>`;
     out += `<circle data-i="${i}" cx="${X(xOf(f))}" cy="${Y(f.final_time_ms)}" r="13" fill="transparent" style="cursor:pointer"/>`;
@@ -560,7 +564,19 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   document.getElementById('heartbeat-card').hidden = false;
   const depth = r => r.final_time_ms ?? r.last_timer_ms ?? 0;
   const goldByAct = Object.fromEntries(D.golds.map(g => [g.act_index, g.gold_ms]));
-  const isPB = r => D.pb_history.some(p => p.attempt_number === r.attempt_number);
+  // "record" means beating his real season best (the pre-tracking baseline
+  // included), not merely the best run the tracker has seen so far.
+  const isPB = r => D.pb_history.some(p => p.attempt_number === r.attempt_number)
+    && (D.baseline_best_ms == null || r.final_time_ms < D.baseline_best_ms);
+  const dayBestMs = new Map();
+  for (const [k, list] of byDay) {
+    const f = list.filter(r => r.outcome === 'finished').map(r => r.final_time_ms);
+    if (f.length) dayBestMs.set(k, Math.min(...f));
+  }
+  const isDayBest = r => r.outcome === 'finished' && dayBestMs.get(dayKey(r.started_at_ms)) === r.final_time_ms;
+  const finPill = r => isPB(r) ? '<span class="pill pb">record</span>'
+    : isDayBest(r) ? '<span class="pill day">day best</span>'
+    : '<span class="pill fin">finished</span>';
   const dayKey = ms => { const d = new Date(ms);
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
   const byDay = new Map();
@@ -591,7 +607,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     openRun = r.id;
     const splits = (D.splits_by_run || {})[String(r.id)] || [];
     const head = r.outcome === 'finished'
-      ? `<span class="pill ${isPB(r) ? 'pb' : 'fin'}">${isPB(r) ? 'record' : 'finished'}</span> <span class="tnum" style="font-size:16px;font-weight:600"> ${fmt(r.final_time_ms)}</span>`
+      ? `${finPill(r)} <span class="tnum" style="font-size:16px;font-weight:600"> ${fmt(r.final_time_ms)}</span>`
       : `<span class="pill res">${r.reset_reason || 'reset'}</span> <span class="tnum" style="font-size:16px"> † ${fmt(r.last_timer_ms)}</span>`;
     let rows = '';
     if (splits.length) {
@@ -771,7 +787,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
         const finished = r.outcome === 'finished';
         const nsplits = ((D.splits_by_run || {})[String(r.id)] || []).length;
         const pill = finished
-          ? (isPB(r) ? '<span class="pill pb">record</span>' : '<span class="pill fin">finished</span>')
+          ? finPill(r)
           : `<span class="pill res">${r.reset_reason || 'reset'}</span>`;
         return `<tr class="rowbtn" data-i="${i}" tabindex="0">
           <td class="tnum" style="font-weight:600">${r.ls_attempt != null ? r.ls_attempt.toLocaleString() : `<span style="color:var(--muted)">—</span>`} ${tagPill(r)}</td>
