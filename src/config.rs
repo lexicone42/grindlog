@@ -322,7 +322,7 @@ impl RefTime {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActCfg {
     pub name: String,

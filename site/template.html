@@ -209,6 +209,10 @@
   .finchip .att { color: var(--muted); font-size: 11px; margin-left: 6px; }
   .finchip.best { background: var(--gold-soft); border-color: var(--gold); }
   .finchip:hover { border-color: var(--series); }
+  .finchip.deep { background: transparent; border-color: var(--hairline); color: var(--ink2); }
+  .finchip.deep b { color: var(--behind); }
+  .finchip.deep:hover { border-color: var(--behind); }
+  .striplabel { font-family: "Silkscreen", monospace; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-right: 4px; }
 
   footer { margin-top: 36px; color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
   footer .px { font-size: 9px; letter-spacing: .1em; }
@@ -230,7 +234,8 @@
       <div id="day-chips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
     </div>
     <p class="subnote" id="hb-sub"></p>
-    <div id="day-finishes" style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px"></div>
+    <div id="day-finishes" style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px"></div>
+    <div id="day-deep" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 14px"></div>
     <div class="legend">
       <span><span class="key" style="background:var(--series)"></span>Finished</span>
       <span><span class="key" style="background:var(--deemph);opacity:.55"></span>Reset (bar height = how far it got)</span>
@@ -627,6 +632,19 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
         <b>${fmt(r.final_time_ms)}</b><span class="att">${runNo(r)} · ${dtime(r.started_at_ms)}</span>
       </button>`).join('');
 
+    // Near-misses: resets that reached the final act.
+    const acts = D.acts || [];
+    const finalStart = acts.length >= 2 ? acts[acts.length - 2].end_ms : null;
+    const deep = finalStart == null ? [] :
+      runs.filter(r => r.outcome !== 'finished' && depth(r) >= finalStart);
+    const deepEl = document.getElementById('day-deep');
+    deepEl.innerHTML = deep.length
+      ? `<span class="striplabel">${acts[acts.length - 1].name} resets</span>` + deep.map(r =>
+          `<button class="finchip deep" data-fin="${runs.indexOf(r)}">
+            <b>† ${fmt(r.last_timer_ms)}</b><span class="att">${runNo(r)} · ${dtime(r.started_at_ms)}</span>
+          </button>`).join('')
+      : '';
+
     const W = svg.clientWidth || 980, H = 190, L = 46, R = 12, T = 10, B = 26;
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
     const t0 = runs[0].started_at_ms - 4*60e3, t1 = runs[runs.length-1].ended_at_ms + 4*60e3;
@@ -686,6 +704,11 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     if (i != null) toggleDetail(runs[+i]);
   });
   document.getElementById('day-finishes').addEventListener('click', e => {
+    const b = e.target.closest('button[data-fin]');
+    if (b) toggleDetail(runs[+b.dataset.fin]);
+  });
+
+  document.getElementById('day-deep').addEventListener('click', e => {
     const b = e.target.closest('button[data-fin]');
     if (b) toggleDetail(runs[+b.dataset.fin]);
   });

@@ -73,6 +73,7 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
             "sessions": sessions,
             "death_chart": deaths,
             "survival": survival,
+            "acts": cfg.game.acts,
             "golds": golds,
             "pb_history": pbs,
             "streaks": streaks,
