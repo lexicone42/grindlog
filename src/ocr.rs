@@ -145,6 +145,16 @@ impl OcrEngine {
         }
     }
 
+    /// Sparse-text pass with word boxes (CLI engine only; other engines
+    /// report no words).
+    pub async fn recognize_words(&mut self, png: &[u8], whitelist: Option<&str>) -> Result<Vec<Word>> {
+        match self {
+            Self::Cli(c) => c.recognize_words(png, whitelist).await,
+            #[cfg(feature = "leptess-ocr")]
+            Self::Leptess(_) => Ok(Vec::new()),
+        }
+    }
+
     /// Like `recognize`, plus the bounding box of the recognized text in
     /// image pixels (x, y, w, h) when the engine can report one.
     pub async fn recognize_boxed(&mut self, png: &[u8]) -> Result<(String, Option<(u32, u32, u32, u32)>)> {

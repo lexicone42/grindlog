@@ -218,6 +218,180 @@ fn ink_anchor(proc: &GrayImage, text_left: Option<u32>, upscale: u32) -> Option<
     Some((((right + 1.0) / up).round() as i32, ((top + bottom) / 2.0 / up).round() as i32))
 }
 
+/// Pane geometry measured from the frame itself, relative to the timer
+/// rectangle's top-left corner: where the splits column and the attempt
+/// counter really are. The streamer resizes the LiveSplit window between
+/// days, which changes the row pitch — something no translation of the
+/// configured rectangles can follow.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PaneGeometry {
+    /// Splits column: (dx, dy, w, h) from the timer's top-left.
+    splits: (i32, i32, u32, u32),
+    /// Attempt counter, same convention.
+    counter: Option<(i32, i32, u32, u32)>,
+    rows_read: usize,
+    pitch: u32,
+}
+
+impl PaneGeometry {
+    /// Rebuild `regs`' splits/counter rectangles from the geometry (union
+    /// coordinates, clamped to the union).
+    fn apply(&self, regs: &mut Regions) {
+        let (_, _, uw, uh) = regs.union;
+        let place = |(dx, dy, w, h): (i32, i32, u32, u32)| -> Option<R> {
+            let x = regs.timer.0 as i64 + dx as i64;
+            let y = regs.timer.1 as i64 + dy as i64;
+            let inside = x >= 0 && y >= 0 && x + w as i64 <= uw as i64 && y + h as i64 <= uh as i64;
+            inside.then_some((x as u32, y as u32, w, h))
+        };
+        if let Some(r) = place(self.splits) {
+            regs.splits = Some(r);
+        }
+        if let Some(r) = self.counter.and_then(place) {
+            regs.counter = Some(r);
+        }
+    }
+}
+
+fn time_shaped(text: &str) -> bool {
+    let t = text.trim().trim_end_matches('.');
+    t.contains([':', '.']) && parse_time(t).is_some()
+}
+
+/// Derive the pane geometry from the split rows visible above the timer:
+/// time-shaped words grouped into rows, rightmost word per row (LiveSplit's
+/// cumulative column), median row pitch; the column block is anchored at the
+/// lowest row and spans `acts` rows. A bare integer above the block is the
+/// attempt counter. None when fewer than two rows read or the pitch is
+/// implausible.
+fn pane_geometry(words: &[ocr::Word], scale: u32, timer: R, acts: u32) -> Option<PaneGeometry> {
+    let sc = scale.max(1);
+    let band_x0 = timer.0.saturating_sub(timer.2 / 2) as i64;
+    let band_x1 = (timer.0 + timer.2 + timer.2 / 2) as i64;
+    let boxes: Vec<(R, &ocr::Word)> = words
+        .iter()
+        .filter(|w| w.conf >= 30.0)
+        .map(|w| ((w.x / sc, w.y / sc, w.w.max(1) / sc, w.h.max(1) / sc), w))
+        .collect();
+    let cy = |r: R| r.1 as i64 + r.3 as i64 / 2;
+    let mut above: Vec<R> = boxes
+        .iter()
+        .filter(|(r, w)| {
+            time_shaped(&w.text)
+                && r.1 + r.3 <= timer.1 + 4
+                && (r.0 + r.2) as i64 > band_x0
+                && (r.0 as i64) < band_x1
+                && r.3 >= 10
+                && r.3 < timer.3
+        })
+        .map(|(r, _)| *r)
+        .collect();
+    above.sort_by_key(|r| cy(*r));
+    let mut rows: Vec<Vec<R>> = Vec::new();
+    for r in above {
+        match rows.last_mut() {
+            Some(row) if (cy(row[0]) - cy(r)).abs() <= (r.3 as i64 / 2).max(4) => row.push(r),
+            _ => rows.push(vec![r]),
+        }
+    }
+    let col: Vec<R> = rows.iter().map(|row| *row.iter().max_by_key(|r| r.0 + r.2).unwrap()).collect();
+    if col.len() < 2 {
+        return None;
+    }
+    let mut gaps: Vec<i64> = col.windows(2).map(|w| cy(w[1]) - cy(w[0])).collect();
+    gaps.sort_unstable();
+    let pitch = gaps[gaps.len() / 2];
+    if !(24..=80).contains(&pitch) {
+        return None;
+    }
+    // The cumulative column is right-aligned: its x-extent comes from the
+    // words that share the rightmost edge, so a row where only the segment
+    // time was read cannot widen the column leftwards.
+    let right_edge = col.iter().map(|r| r.0 + r.2).max()? as i64;
+    let left = col
+        .iter()
+        .filter(|r| right_edge - (r.0 + r.2) as i64 <= 12)
+        .map(|r| r.0)
+        .min()? as i64
+        - 8;
+    let right = right_edge + 8;
+    let bottom = cy(*col.last()?) + pitch / 2;
+    let top = bottom - pitch * acts.max(1) as i64;
+    let splits = (
+        (left - timer.0 as i64) as i32,
+        (top - timer.1 as i64) as i32,
+        (right - left).max(1) as u32,
+        (bottom - top) as u32,
+    );
+    let counter = boxes
+        .iter()
+        .filter(|(r, w)| {
+            let t = w.text.trim();
+            t.len() >= 3
+                && t.chars().all(|c| c.is_ascii_digit())
+                && (r.1 + r.3) as i64 <= top + 4
+                && (r.0 + r.2) as i64 > band_x0
+                && (r.0 as i64) < band_x1
+                && r.3 < timer.3
+        })
+        .map(|(r, _)| *r)
+        .max_by_key(|r| r.1)
+        .map(|r| {
+            (
+                r.0 as i64 - 12 - timer.0 as i64,
+                r.1 as i64 - 6 - timer.1 as i64,
+                r.2 as i64 + 24,
+                r.3 as i64 + 12,
+            )
+        })
+        .map(|(dx, dy, w, h)| (dx as i32, dy as i32, w as u32, h as u32));
+    Some(PaneGeometry { splits, counter, rows_read: col.len(), pitch: pitch as u32 })
+}
+
+/// Measure the pane geometry from the current union crop (see
+/// `pane_geometry`): one sparse-text OCR pass at 2x.
+async fn measure_pane(
+    ocr_engine: &mut OcrEngine,
+    union_img: &GrayImage,
+    timer: R,
+    acts: u32,
+    pre: &PreprocessCfg,
+) -> Result<Option<PaneGeometry>> {
+    const UP: u32 = 2;
+    let pre2 = PreprocessCfg { upscale: UP, threshold: pre.threshold, invert: pre.invert };
+    let proc = ocr::preprocess(union_img, &pre2);
+    let words = ocr_engine.recognize_words(&ocr::to_png(&proc)?, Some("0123456789:.")).await?;
+    Ok(pane_geometry(&words, UP, timer, acts))
+}
+
+/// OCR the splits column as `rows` equal-height rows: one parsed time (or
+/// None) per act row.
+async fn read_splits_rows(
+    ocr_engine: &mut OcrEngine,
+    union_img: &GrayImage,
+    (sx, sy, sw, sh): R,
+    rows: u32,
+    pre: &PreprocessCfg,
+) -> Result<Vec<Option<i64>>> {
+    let panel = image::imageops::crop_imm(union_img, sx, sy, sw, sh).to_image();
+    let rows = rows.max(1);
+    let row_h = (sh / rows).max(1);
+    let mut values = Vec::with_capacity(rows as usize);
+    for i in 0..rows {
+        let row = image::imageops::crop_imm(&panel, 0, i * row_h, sw, row_h).to_image();
+        let rp = ocr::preprocess(&row, pre);
+        let txt = match ocr_engine.recognize(&ocr::to_png(&rp)?).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("splits ocr failed: {e:#}");
+                String::new()
+            }
+        };
+        values.push(parse_time(txt.trim()));
+    }
+    Ok(values)
+}
+
 /// One position where a timer might be: a layout plus a pixel offset.
 struct Candidate {
     layout: usize,
@@ -377,6 +551,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut anchors = vec![None::<(i32, i32)>; regs.len()];
     let mut drift_hits: Vec<(i32, i32)> = Vec::new();
     let mut drift_warned = false;
+    // Splits/counter rectangles measured from the frame at the last lock.
+    let mut pane_geom: Option<PaneGeometry> = None;
     let fine_drift = cfg.layout_search.drift_px > 0;
     let epoch = Instant::now();
     let mut current: Option<CurrentRun> = None;
@@ -606,23 +782,89 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
             if let Some((ci, winner_text)) = winner {
                 text = winner_text;
-                let c = &cands[ci];
-                let name = &layout_names[c.layout];
-                if c.layout != active_layout {
-                    info!("layout switched to {name:?} (offset {:+},{:+})", c.off.0, c.off.1);
+                let (mut new_layout, mut new_off, mut new_regs) =
+                    (cands[ci].layout, cands[ci].off, cands[ci].regs.clone());
+                // Layouts whose timer rectangles overlap can both explain the
+                // same digits, but their splits columns sit differently: put
+                // every layout's timer where the winner's is and keep the one
+                // whose column reads most like times (ties keep the winner).
+                if regs.len() > 1 && new_regs.splits.is_some() {
+                    let rows = shared.acts.len().max(1) as u32;
+                    let win_t = new_regs.timer;
+                    let mut best: Option<usize> = None;
+                    let mut choice = (new_layout, new_off, new_regs.clone());
+                    for (li, r) in regs.iter().enumerate() {
+                        let off = (
+                            (win_t.0 as i64 - r.timer.0 as i64) as i32,
+                            (win_t.1 as i64 - r.timer.1 as i64) as i32,
+                        );
+                        let Some(sr) = shifted(r, off) else { continue };
+                        let Some(splits_rect) = sr.splits else { continue };
+                        let n = read_splits_rows(&mut ocr_engine, &union_img, splits_rect, rows, &pre_splits)
+                            .await?
+                            .iter()
+                            .filter(|v| v.is_some())
+                            .count();
+                        debug!("layout {:?} at {:+},{:+}: {n}/{rows} split rows read", layout_names[li], off.0, off.1);
+                        let better = match best {
+                            None => true,
+                            Some(b) => n > b || (n == b && li == new_layout),
+                        };
+                        if better {
+                            best = Some(n);
+                            choice = (li, off, sr);
+                        }
+                    }
+                    if choice.0 != new_layout {
+                        info!(
+                            "layout {:?} explains the timer too, but its splits column reads ({}/{rows} rows); taking it over {:?}",
+                            layout_names[choice.0], best.unwrap_or(0), layout_names[new_layout]
+                        );
+                    }
+                    (new_layout, new_off, new_regs) = choice;
+                }
+                // Measure where the split rows and counter really are; the
+                // configured rectangles are only the fallback.
+                if new_regs.splits.is_some() {
+                    let acts = shared.acts.len().max(1) as u32;
+                    match measure_pane(&mut ocr_engine, &union_img, new_regs.timer, acts, &pre_splits).await {
+                        Ok(Some(g)) => {
+                            g.apply(&mut new_regs);
+                            let (ux, uy) = (new_regs.union.0, new_regs.union.1);
+                            let s = new_regs.splits.unwrap();
+                            info!(
+                                "pane geometry: {}/{acts} split rows read, pitch {}px; splits at {},{} {}x{} (canvas){}",
+                                g.rows_read, g.pitch, ux + s.0, uy + s.1, s.2, s.3,
+                                match new_regs.counter {
+                                    Some(c) if g.counter.is_some() => format!(", counter at {},{} {}x{}", ux + c.0, uy + c.1, c.2, c.3),
+                                    _ => String::new(),
+                                }
+                            );
+                            pane_geom = Some(g);
+                        }
+                        Ok(None) => {
+                            debug!("pane geometry not measurable here; using configured rectangles");
+                            pane_geom = None;
+                        }
+                        Err(e) => warn!("pane geometry pass failed: {e:#}"),
+                    }
+                }
+                let name = &layout_names[new_layout];
+                if new_layout != active_layout {
+                    info!("layout switched to {name:?} (offset {:+},{:+})", new_off.0, new_off.1);
                     // A layout change invalidates any splits baseline.
                     splits_tracker = None;
-                } else if c.off != active_off {
+                } else if new_off != active_off {
                     info!(
                         "layout {name:?} re-anchored: LiveSplit moved {:+},{:+} px (was {:+},{:+})",
-                        c.off.0, c.off.1, active_off.0, active_off.1
+                        new_off.0, new_off.1, active_off.0, active_off.1
                     );
                 } else {
-                    info!("layout locked: {name:?} (offset {:+},{:+})", c.off.0, c.off.1);
+                    info!("layout locked: {name:?} (offset {:+},{:+})", new_off.0, new_off.1);
                 }
-                active_layout = c.layout;
-                active_off = c.off;
-                active_regs = c.regs.clone();
+                active_layout = new_layout;
+                active_off = new_off;
+                active_regs = new_regs;
                 layout_locked = true;
                 ever_locked = true;
                 drift_hits.clear();
@@ -675,11 +917,14 @@ pub async fn run(cfg: Config) -> Result<()> {
                         let d = (xs[xs.len() / 2], ys[ys.len() / 2]);
                         let new_off = (active_off.0 + d.0, active_off.1 + d.1);
                         match shifted(&regs[active_layout], new_off) {
-                            Some(nr) => {
+                            Some(mut nr) => {
                                 info!(
                                     "layout {:?} re-anchored: LiveSplit moved {:+},{:+} px (now {:+},{:+} from configured)",
                                     layout_names[active_layout], d.0, d.1, new_off.0, new_off.1
                                 );
+                                if let Some(g) = pane_geom {
+                                    g.apply(&mut nr);
+                                }
                                 active_off = new_off;
                                 active_regs = nr;
                             }
@@ -730,26 +975,12 @@ pub async fn run(cfg: Config) -> Result<()> {
         // Splits panel pass: only while a run is in progress, on a slow
         // cadence (splits change at most once per act).
         let mut splits_values: Option<Vec<Option<i64>>> = None;
-        if let (Some(st), Some((sx, sy, sw, sh))) = (splits_tracker.as_mut(), reg.splits) {
+        if let (Some(st), Some(splits_rect)) = (splits_tracker.as_mut(), reg.splits) {
             if t - last_splits_read_t >= splits_every_ms {
                 last_splits_read_t = t;
-                let panel = image::imageops::crop_imm(&union_img, sx, sy, sw, sh).to_image();
                 let rows = shared.acts.len().max(1) as u32;
-                let row_h = (sh / rows).max(1);
-                let mut values = Vec::with_capacity(rows as usize);
-                for i in 0..rows {
-                    let row =
-                        image::imageops::crop_imm(&panel, 0, i * row_h, sw, row_h).to_image();
-                    let rp = ocr::preprocess(&row, &pre_splits);
-                    let txt = match ocr_engine.recognize(&ocr::to_png(&rp)?).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            warn!("splits ocr failed: {e:#}");
-                            String::new()
-                        }
-                    };
-                    values.push(parse_time(txt.trim()));
-                }
+                let values =
+                    read_splits_rows(&mut ocr_engine, &union_img, splits_rect, rows, &pre_splits).await?;
                 for (idx, cum) in st.observe(&values, tracker.smoothed_now(t)) {
                     let act_name = shared
                         .acts
@@ -1147,6 +1378,42 @@ mod tests {
         assert!(shifted(&r, (0, 24)).is_none());
         // The SoB row starts at x=10: -12 left leaves the union.
         assert!(shifted(&r, (-12, 0)).is_none());
+    }
+
+    fn word(x: u32, y: u32, w: u32, h: u32, text: &str) -> ocr::Word {
+        ocr::Word { x, y, w, h, conf: 90.0, text: text.into() }
+    }
+
+    #[test]
+    fn pane_geometry_from_split_rows() {
+        // Union-relative, scale 1. Timer at (60, 400, 300, 90); six rows of
+        // 45px above it with delta + cumulative columns, counter on top.
+        let timer = (60, 400, 300, 90);
+        let mut words = vec![word(330, 60, 60, 20, "96454")];
+        for i in 0..6u32 {
+            let y = 100 + i * 45;
+            words.push(word(180, y, 50, 20, "+0.2"));
+            words.push(word(260, y, 70, 20, &format!("{}:47.6", i + 1)));
+        }
+        // Noise: the timer itself, an integer far to the right, a tiny time.
+        words.push(word(120, 410, 220, 70, "1:41.26"));
+        words.push(word(900, 60, 60, 20, "12345"));
+        words.push(word(270, 380, 20, 6, "0.1"));
+        let g = pane_geometry(&words, 1, timer, 6).expect("geometry");
+        assert_eq!(g.pitch, 45);
+        assert_eq!(g.rows_read, 6);
+        // Column spans the cumulative words (260..330) with 8px margins.
+        assert_eq!(g.splits.0, 252 - 60);
+        assert_eq!(g.splits.2, 86);
+        // Block: bottom = last row centre (335) + 22 = 357; top = 357 - 270 = 87.
+        assert_eq!(g.splits.3, 270);
+        assert_eq!(g.splits.1, 87 - 400);
+        let c = g.counter.expect("counter");
+        assert_eq!((c.0, c.1, c.2, c.3), (330 - 12 - 60, 60 - 6 - 400, 84, 32));
+        // One row is not enough; an absurd pitch is rejected.
+        assert!(pane_geometry(&words[..2], 1, timer, 6).is_none());
+        let far = vec![word(260, 100, 70, 20, "0:47.6"), word(260, 300, 70, 20, "2:44.2")];
+        assert!(pane_geometry(&far, 1, timer, 6).is_none());
     }
 
     #[test]

@@ -168,6 +168,17 @@ silently losing runs. The union of every rectangle (plus the drift margin)
 is the only crop ffmpeg decodes, so extra layouts cost OCR calls only while
 probing.
 
+**Pane geometry.** A resized LiveSplit window changes the row pitch, which
+no shift of the configured rectangles can follow, so at every lock the bot
+measures the pane itself: one sparse-text OCR pass over the decoded crop
+finds the time-shaped words above the timer, groups them into rows, takes
+the median pitch and the right-aligned cumulative column, and derives the
+splits rectangle (and the attempt counter above it) from that. The
+configured `splits`/`attempts_counter` rectangles are the fallback when
+fewer than two rows can be read (`pane geometry: 6/6 split rows read, pitch
+45px; …` in the log). Layouts whose timer rectangles overlap are told apart
+the same way: the one whose splits column reads as times wins.
+
 ## Maintenance notes
 
 - Twitch occasionally rotates the web player client-id or retires the GraphQL
