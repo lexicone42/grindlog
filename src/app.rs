@@ -175,8 +175,8 @@ fn to_bright(rgb: &RgbImage) -> GrayImage {
 
 /// Did anything inside `rect` change between two frames? Compression noise
 /// nudges pixels by a few levels; a digit changing moves hundreds of pixels
-/// by a lot. Counts pixels that moved more than 40 levels and calls the
-/// region changed once they exceed 0.2% of its area (at least 40 pixels).
+/// by a lot. Counts pixels that moved more than 30 levels and calls the
+/// region changed once they exceed 0.1% of its area (at least 20 pixels).
 /// Every tesseract call costs ~120ms of process startup before it reads a
 /// single glyph, so OCR-ing a crop that is pixel-for-pixel the same as the
 /// last one is the most expensive way to learn nothing.
@@ -616,9 +616,9 @@ async fn read_splits_rows(
             .concat();
         values[row] = parse_time(joined.trim_end_matches('.'));
     }
-    if words.is_empty() {
-        // Sparse mode occasionally returns nothing for a column it would
-        // read row by row; pay the six calls rather than lose the read.
+    if values.iter().all(|v| v.is_none()) {
+        // The block pass read nothing usable (no words, or only junk); pay
+        // the per-row calls rather than lose the read.
         for (i, slot) in values.iter_mut().enumerate() {
             let row = image::imageops::crop_imm(&panel, 0, i as u32 * row_h, sw, row_h).to_image();
             let rp = ocr::preprocess(&row, pre);
@@ -825,6 +825,9 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut prev_bright: Option<GrayImage> = None;
     let mut last_text = String::new();
     let mut ocr_skipped: u64 = 0;
+    // Consecutive probe frames skipped as static; capped so a frozen timer
+    // is still found.
+    let mut static_probe_skips: u32 = 0;
     // The splits column as of its last read, and what it said: while the
     // column hasn't changed the previous values are fed again (the tracker
     // still gets its confirmations) without another six OCR calls.
@@ -1012,6 +1015,10 @@ pub async fn run(cfg: Config) -> Result<()> {
         let mut text = String::new();
         let mut ink: Option<(i32, i32)> = None;
         let mut frame_static = false;
+        // An OCR failure must not be cached as "the reading": forget the
+        // previous frame so the next one is read again.
+        let mut ocr_failed = false;
+        let running = tracker.phase_name() == "RUNNING";
         if layout_locked {
             let r = active_regs.timer;
             if prev_bright
@@ -1028,6 +1035,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 match ocr_engine.recognize_boxed(&ocr::to_png(&proc)?).await {
                     Ok((t, bbox)) => {
                         text = t.trim().to_string();
+                        last_text = text.clone();
                         // A trailing "1" is a narrow glyph: its ink ends ~9px
                         // short of the other digits' right edge, and at 2 fps the
                         // hundredths digit repeats for many frames, which would
@@ -1036,19 +1044,28 @@ pub async fn run(cfg: Config) -> Result<()> {
                             ink = ink_anchor(&proc, bbox.map(|b| b.0), pre.upscale);
                         }
                     }
-                    Err(e) => warn!("ocr failed: {e:#}"),
+                    Err(e) => {
+                        warn!("ocr failed: {e:#}");
+                        ocr_failed = true;
+                    }
                 }
-                last_text = text.clone();
             }
-        } else if prev_bright
-            .as_ref()
-            .is_some_and(|p| !region_changed(p, &union_bright, (0, 0, uw, uh)))
+        } else if !running
+            && static_probe_skips < 3
+            && prev_bright
+                .as_ref()
+                .is_some_and(|p| !region_changed(p, &union_bright, (0, 0, uw, uh)))
         {
-            // Nothing on screen changed since the last probe: whatever the
-            // candidates would read, they read last frame. Skip the probe.
+            // Nothing on screen changed since the last probe. Skip it — but
+            // not indefinitely: a frozen timer (idle at -5.00, or a finish
+            // that happened during an ad) is static too and must still be
+            // found, so the probe runs at least every fourth frame, and every
+            // frame while a run is in progress.
             frame_static = true;
             ocr_skipped += 1;
+            static_probe_skips += 1;
         } else {
+            static_probe_skips = 0;
             let mut to_read: Vec<usize> = Vec::new();
             for (ci, c) in cands.iter().enumerate() {
                 let base = c.off == (0, 0);
@@ -1114,6 +1131,8 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
             if let Some((ci, winner_text)) = winner {
                 text = winner_text;
+                // The lock frame's reading is what a static next frame reuses.
+                last_text = text.clone();
                 let (mut new_layout, mut new_off, mut new_regs) =
                     (cands[ci].layout, cands[ci].off, cands[ci].regs.clone());
                 // Layouts whose timer rectangles overlap can both explain the
@@ -1266,7 +1285,11 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
             }
         }
-        prev_bright = Some(union_bright.clone());
+        prev_bright = if ocr_failed {
+            None
+        } else {
+            Some(union_bright.clone())
+        };
         let parsed = parse_time(&text);
         // Resume probing after a dark stretch on the active position: either
         // the scene changed or the LiveSplit window was nudged.
@@ -1409,8 +1432,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                         &pre_splits,
                     )
                     .await?;
-                    last_splits_crop = Some(crop);
-                    last_splits_values = v.clone();
+                    // Only a read that produced something is worth replaying
+                    // on static frames; an empty read is retried next time.
+                    if v.iter().any(|x| x.is_some()) {
+                        last_splits_crop = Some(crop);
+                        last_splits_values = v.clone();
+                    } else {
+                        last_splits_crop = None;
+                        last_splits_values.clear();
+                    }
                     v
                 };
                 for (idx, cum) in st.observe(&values, tracker.smoothed_now(t)) {
