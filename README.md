@@ -75,7 +75,19 @@ field commented with its default):
     one-line wrapper at `~/.local/bin/tesseract`:
     `exec "$HOME/.local/opt/tesseract-appimage/AppRun" "$@"`;
   - or build with `cargo build --release --features leptess-ocr` for
-    in-process OCR (needs libtesseract + libleptonica dev libraries).
+    in-process OCR (needs libtesseract + libleptonica dev libraries). This
+    is **2-3x faster overall**: ~70% of a CLI call is process startup and
+    loading the language model, which the in-process engine pays once.
+    Without system dev packages you can build against the AppImage's own
+    shared libraries: fetch the matching `tesseract` and `leptonica` headers
+    from their source releases into `~/.local/opt/ocr-dev/include/`, symlink
+    `libtesseract.so.5` / `libleptonica.so.6` (and `libgif.so.7`) from the
+    extracted AppImage into `~/.local/opt/ocr-dev/rt/`, write small
+    `tesseract.pc` / `lept.pc` files pointing at them, then
+    `PKG_CONFIG_PATH=~/.local/opt/ocr-dev/lib/pkgconfig RUSTFLAGS="-C link-arg=-Wl,-rpath,$HOME/.local/opt/ocr-dev/rt" cargo build --release --features leptess-ocr`.
+    Never put the whole AppImage `usr/lib` on `LD_LIBRARY_PATH` — it carries
+    its own glibc. Set `ocr.engine = "leptess"` and `ocr.tessdata_path` to
+    the AppImage's `usr/share/tesseract-ocr/5/tessdata`.
 - *(optional)* **streamlink**, only if you set `source = "streamlink"`.
   The default `hls` source resolves the stream URL itself in Rust.
 
@@ -230,6 +242,7 @@ the same way: the one whose splits column reads as times wins.
 
 | script | purpose |
 |---|---|
+| `scripts/build-release.sh` | build `target/release/ngtwitchtimer`, with the in-process OCR engine when the `~/.local/opt/ocr-dev` toolchain is staged (see Requirements), else the CLI engine |
 | `scripts/run-live.sh` | supervise the live bot (restart on exit, log rotation, `logs/live.log`); run it inside tmux |
 | `scripts/backfill-vods.sh <vod_id>...` | analyze Twitch VODs straight from Twitch, one database each in `backfill-db/`; run several chains in parallel |
 | `scripts/import-vod.sh <vod_id> [--deploy]` | replace one broadcast day in the live database from its completed VOD database |

@@ -151,11 +151,14 @@ impl OcrEngine {
         &mut self,
         png: &[u8],
         whitelist: Option<&str>,
+        psm: u32,
     ) -> Result<Vec<Word>> {
         match self {
-            Self::Cli(c) => c.recognize_words(png, whitelist).await,
+            Self::Cli(c) => c.recognize_words(png, whitelist, psm).await,
             #[cfg(feature = "leptess-ocr")]
-            Self::Leptess(_) => Ok(Vec::new()),
+            Self::Leptess(l) => Ok(parse_tsv(
+                &l.recognize_words_tsv(png, whitelist, psm).await?,
+            )),
         }
     }
 
@@ -168,7 +171,7 @@ impl OcrEngine {
         match self {
             Self::Cli(c) => c.recognize_boxed(png).await,
             #[cfg(feature = "leptess-ocr")]
-            Self::Leptess(l) => l.recognize(png).await.map(|t| (t, None)),
+            Self::Leptess(l) => Ok(words_to_line(&parse_tsv(&l.recognize_tsv(png).await?))),
         }
     }
 }
@@ -250,9 +253,17 @@ impl CliOcr {
     /// Sparse-text pass over a whole image (`--psm 11`, TSV output): every
     /// word tesseract finds, with its bounding box in image pixels. Used by
     /// `locate` to find the LiveSplit pane; `whitelist` restricts glyphs.
-    pub async fn recognize_words(&self, png: &[u8], whitelist: Option<&str>) -> Result<Vec<Word>> {
+    pub async fn recognize_words(
+        &self,
+        png: &[u8],
+        whitelist: Option<&str>,
+        psm: u32,
+    ) -> Result<Vec<Word>> {
+        // psm 11 = sparse text anywhere (whole frames / the pane); psm 6 =
+        // one uniform block of lines (a column of split times).
+        let psm = psm.to_string();
         let mut args: Vec<String> = [
-            "stdin", "stdout", "--dpi", "96", "--psm", "11", "-l", &self.lang,
+            "stdin", "stdout", "--dpi", "96", "--psm", &psm, "-l", &self.lang,
         ]
         .iter()
         .map(|s| s.to_string())
@@ -335,7 +346,17 @@ pub mod leptess_worker {
     use super::WHITELIST;
     use crate::config::OcrCfg;
 
-    type Job = (Vec<u8>, oneshot::Sender<Result<String>>);
+    /// One OCR request: the image, which glyphs to allow (None = any), the
+    /// page segmentation mode, and whether to return TSV (word boxes) instead
+    /// of plain text.
+    pub struct Req {
+        pub png: Vec<u8>,
+        pub whitelist: Option<String>,
+        pub psm: u32,
+        pub tsv: bool,
+    }
+
+    type Job = (Req, oneshot::Sender<Result<String>>);
 
     pub struct LeptessWorker {
         tx: mpsc::Sender<Job>,
@@ -360,8 +381,9 @@ pub mod leptess_worker {
                             return;
                         }
                     };
-                    while let Some((png, reply)) = rx.blocking_recv() {
-                        let res = recognize_one(&mut lt, &png);
+                    let mut state = (String::new(), 0u32);
+                    while let Some((req, reply)) = rx.blocking_recv() {
+                        let res = recognize_one(&mut lt, &mut state, &req);
                         let _ = reply.send(res);
                     }
                 })
@@ -372,14 +394,52 @@ pub mod leptess_worker {
             Ok(Self { tx })
         }
 
-        pub async fn recognize(&mut self, png: &[u8]) -> Result<String> {
+        async fn request(&mut self, req: Req) -> Result<String> {
             let (otx, orx) = oneshot::channel();
             self.tx
-                .send((png.to_vec(), otx))
+                .send((req, otx))
                 .await
                 .map_err(|_| anyhow!("leptess worker is gone"))?;
             orx.await
                 .map_err(|_| anyhow!("leptess worker dropped the job"))?
+        }
+
+        /// Single-line digits read (the timer and its kin).
+        pub async fn recognize(&mut self, png: &[u8]) -> Result<String> {
+            self.request(Req {
+                png: png.to_vec(),
+                whitelist: Some(WHITELIST.to_string()),
+                psm: 7,
+                tsv: false,
+            })
+            .await
+        }
+
+        /// Single-line digits read with word boxes (TSV).
+        pub async fn recognize_tsv(&mut self, png: &[u8]) -> Result<String> {
+            self.request(Req {
+                png: png.to_vec(),
+                whitelist: Some(WHITELIST.to_string()),
+                psm: 7,
+                tsv: true,
+            })
+            .await
+        }
+
+        /// Word boxes for a whole crop in the given segmentation mode.
+        pub async fn recognize_words_tsv(
+            &mut self,
+            png: &[u8],
+            whitelist: Option<&str>,
+            psm: u32,
+        ) -> Result<String> {
+            self.request(Req {
+                png: png.to_vec(),
+                whitelist: whitelist.map(str::to_string),
+                psm,
+                tsv: true,
+            })
+            .await
         }
     }
 
@@ -393,10 +453,33 @@ pub mod leptess_worker {
         Ok(lt)
     }
 
-    fn recognize_one(lt: &mut leptess::LepTess, png: &[u8]) -> Result<String> {
-        lt.set_image_from_mem(png)
+    /// Run one request; `state` remembers the whitelist/psm currently set so
+    /// they are only re-applied when a request differs (variables persist
+    /// across images on one engine).
+    fn recognize_one(
+        lt: &mut leptess::LepTess,
+        state: &mut (String, u32),
+        req: &Req,
+    ) -> Result<String> {
+        let wl = req.whitelist.clone().unwrap_or_default();
+        if state.0 != wl {
+            lt.set_variable(leptess::Variable::TesseditCharWhitelist, &wl)
+                .map_err(|e| anyhow!("setting whitelist: {e}"))?;
+            state.0 = wl;
+        }
+        if state.1 != req.psm {
+            lt.set_variable(leptess::Variable::TesseditPagesegMode, &req.psm.to_string())
+                .map_err(|e| anyhow!("setting psm: {e}"))?;
+            state.1 = req.psm;
+        }
+        lt.set_image_from_mem(&req.png)
             .map_err(|e| anyhow!("loading image: {e}"))?;
-        lt.get_utf8_text().map_err(|e| anyhow!("ocr: {e}"))
+        lt.set_source_resolution(96);
+        if req.tsv {
+            lt.get_tsv_text(0).map_err(|e| anyhow!("ocr tsv: {e}"))
+        } else {
+            lt.get_utf8_text().map_err(|e| anyhow!("ocr: {e}"))
+        }
     }
 }
 

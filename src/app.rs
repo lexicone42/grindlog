@@ -173,6 +173,34 @@ fn to_bright(rgb: &RgbImage) -> GrayImage {
     })
 }
 
+/// Did anything inside `rect` change between two frames? Compression noise
+/// nudges pixels by a few levels; a digit changing moves hundreds of pixels
+/// by a lot. Counts pixels that moved more than 40 levels and calls the
+/// region changed once they exceed 0.2% of its area (at least 40 pixels).
+/// Every tesseract call costs ~120ms of process startup before it reads a
+/// single glyph, so OCR-ing a crop that is pixel-for-pixel the same as the
+/// last one is the most expensive way to learn nothing.
+fn region_changed(prev: &GrayImage, cur: &GrayImage, (x, y, w, h): R) -> bool {
+    if prev.dimensions() != cur.dimensions() {
+        return true;
+    }
+    let limit = ((w as usize * h as usize) / 1000).max(20);
+    let mut moved = 0usize;
+    for yy in y..y + h {
+        for xx in x..x + w {
+            let a = prev.get_pixel(xx, yy).0[0] as i16;
+            let b = cur.get_pixel(xx, yy).0[0] as i16;
+            if (a - b).abs() > 30 {
+                moved += 1;
+                if moved > limit {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Every rectangle of a layout moved by a pixel offset (the LiveSplit window
 /// nudged), or None if any of them would leave the union crop.
 fn shifted(reg: &Regions, (dx, dy): (i32, i32)) -> Option<Regions> {
@@ -368,8 +396,11 @@ fn pane_geometry(
     // Room for one more digit on the left than the widest value read: the
     // rows read at lock time may all be sub-10-minute, and "11:35.1" is a
     // digit wider than "8:38.6" — clipped, it reads as "1:35.1".
+    // Two digits of headroom: sparse-mode OCR drops a glyph that touches the
+    // crop edge, and the rows read at lock time may all be narrower than the
+    // widest value the column will show.
     let digit_w = aligned.iter().map(|r| r.2 / 6).max().unwrap_or(12) as i64;
-    let left = aligned.iter().map(|r| r.0).min()? as i64 - 8 - digit_w;
+    let left = aligned.iter().map(|r| r.0).min()? as i64 - 8 - 2 * digit_w;
     let right = right_edge + 8;
     // The last act's row sits directly above the timer. If the lowest row
     // that was read is more than a row and a half above the timer crop, the
@@ -402,10 +433,12 @@ fn pane_geometry(
         .map(|(r, _)| *r)
         .max_by_key(|r| r.1)
         .map(|r| {
+            // Right-aligned number: generous headroom on the left so a
+            // leading digit never sits on the crop edge (96621 -> 6621).
             (
-                r.0 as i64 - 12 - timer.0 as i64,
+                r.0 as i64 - 30 - timer.0 as i64,
                 r.1 as i64 - 6 - timer.1 as i64,
-                r.2 as i64 + 24,
+                r.2 as i64 + 42,
                 r.3 as i64 + 12,
             )
         })
@@ -501,12 +534,12 @@ async fn measure_pane(
     let proc = ocr::preprocess(union_img, &pre2);
     let png = ocr::to_png(&proc)?;
     let words = ocr_engine
-        .recognize_words(&png, Some("0123456789:."))
+        .recognize_words(&png, Some("0123456789:."), 11)
         .await?;
     // The letters pass only serves the SoB label; skip it when not wanted.
     let letters = if want_sob {
         ocr_engine
-            .recognize_words(&png, None)
+            .recognize_words(&png, None, 11)
             .await
             .unwrap_or_default()
     } else {
@@ -535,7 +568,10 @@ async fn measure_pane(
 }
 
 /// OCR the splits column as `rows` equal-height rows: one parsed time (or
-/// None) per act row.
+/// None) per act row. One tesseract call for the whole column (sparse-text
+/// mode with word boxes); each word lands in the row its centre falls in,
+/// and the rightmost time-shaped word of a row is that row's value. Falls
+/// back to one call per row if the column pass produced no words at all.
 async fn read_splits_rows(
     ocr_engine: &mut OcrEngine,
     union_img: &GrayImage,
@@ -546,18 +582,50 @@ async fn read_splits_rows(
     let panel = image::imageops::crop_imm(union_img, sx, sy, sw, sh).to_image();
     let rows = rows.max(1);
     let row_h = (sh / rows).max(1);
-    let mut values = Vec::with_capacity(rows as usize);
-    for i in 0..rows {
-        let row = image::imageops::crop_imm(&panel, 0, i * row_h, sw, row_h).to_image();
-        let rp = ocr::preprocess(&row, pre);
-        let txt = match ocr_engine.recognize(&ocr::to_png(&rp)?).await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("splits ocr failed: {e:#}");
-                String::new()
+    let proc = ocr::preprocess(&panel, pre);
+    let up = pre.upscale.max(1);
+    let words = match ocr_engine
+        .recognize_words(&ocr::to_png(&proc)?, Some("0123456789:."), 6)
+        .await
+    {
+        Ok(w) => w,
+        Err(e) => {
+            warn!("splits ocr failed: {e:#}");
+            Vec::new()
+        }
+    };
+    // Sparse mode likes to split "2:41.0" at the colon into "2:" and
+    // "41.0" — and "41.0" parses as a time on its own. The crop is the
+    // cumulative column alone, so a row's words joined in x order are its
+    // one value.
+    let mut per_row: Vec<Vec<&ocr::Word>> = vec![Vec::new(); rows as usize];
+    for w in &words {
+        let cy = (w.y + w.h / 2) / up;
+        let row = (cy / row_h) as usize;
+        if row < rows as usize {
+            per_row[row].push(w);
+        }
+    }
+    let mut values: Vec<Option<i64>> = vec![None; rows as usize];
+    for (row, ws) in per_row.iter_mut().enumerate() {
+        ws.sort_by_key(|w| w.x);
+        let joined: String = ws
+            .iter()
+            .map(|w| w.text.trim())
+            .collect::<Vec<_>>()
+            .concat();
+        values[row] = parse_time(joined.trim_end_matches('.'));
+    }
+    if words.is_empty() {
+        // Sparse mode occasionally returns nothing for a column it would
+        // read row by row; pay the six calls rather than lose the read.
+        for (i, slot) in values.iter_mut().enumerate() {
+            let row = image::imageops::crop_imm(&panel, 0, i as u32 * row_h, sw, row_h).to_image();
+            let rp = ocr::preprocess(&row, pre);
+            if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&rp)?).await {
+                *slot = parse_time(txt.trim());
             }
-        };
-        values.push(parse_time(txt.trim()));
+        }
     }
     Ok(values)
 }
@@ -751,6 +819,17 @@ pub async fn run(cfg: Config) -> Result<()> {
         .collect();
     let mut drift_hits: Vec<(i32, i32)> = Vec::new();
     let mut drift_warned = false;
+    // Previous frame (brightest-channel union) and what the timer read on it:
+    // an unchanged timer crop reuses the reading instead of paying for OCR,
+    // and a fully static union skips the probe entirely.
+    let mut prev_bright: Option<GrayImage> = None;
+    let mut last_text = String::new();
+    let mut ocr_skipped: u64 = 0;
+    // The splits column as of its last read, and what it said: while the
+    // column hasn't changed the previous values are fed again (the tracker
+    // still gets its confirmations) without another six OCR calls.
+    let mut last_splits_crop: Option<GrayImage> = None;
+    let mut last_splits_values: Vec<Option<i64>> = Vec::new();
     // Splits/counter rectangles measured from the frame at the last lock.
     let mut pane_geom: Option<PaneGeometry> = None;
     // Capture health for the open session, flushed to its row every minute.
@@ -897,10 +976,11 @@ pub async fn run(cfg: Config) -> Result<()> {
                         warn!("failed to close session {id}: {e:#}");
                     } else {
                         info!(
-                            "session #{id} closed ({} of {} frames read, {} layout events)",
+                            "session #{id} closed ({} of {} frames read, {} layout events, {} OCR passes skipped as static)",
                             health.parsed,
                             health.frames,
-                            health.events.len()
+                            health.events.len(),
+                            ocr_skipped
                         );
                     }
                 }
@@ -931,23 +1011,43 @@ pub async fn run(cfg: Config) -> Result<()> {
         };
         let mut text = String::new();
         let mut ink: Option<(i32, i32)> = None;
+        let mut frame_static = false;
         if layout_locked {
             let r = active_regs.timer;
-            let g = image::imageops::crop_imm(&union_bright, r.0, r.1, r.2, r.3).to_image();
-            let proc = ocr::preprocess(&g, &pre);
-            match ocr_engine.recognize_boxed(&ocr::to_png(&proc)?).await {
-                Ok((t, bbox)) => {
-                    text = t.trim().to_string();
-                    // A trailing "1" is a narrow glyph: its ink ends ~9px
-                    // short of the other digits' right edge, and at 2 fps the
-                    // hundredths digit repeats for many frames, which would
-                    // read as a consistent shift. Measure on other digits.
-                    if fine_drift && parse_time(&text).is_some() && !text.ends_with('1') {
-                        ink = ink_anchor(&proc, bbox.map(|b| b.0), pre.upscale);
+            if prev_bright
+                .as_ref()
+                .is_some_and(|p| !region_changed(p, &union_bright, r))
+            {
+                // Same pixels as last frame: same reading, no OCR.
+                text = last_text.clone();
+                frame_static = true;
+                ocr_skipped += 1;
+            } else {
+                let g = image::imageops::crop_imm(&union_bright, r.0, r.1, r.2, r.3).to_image();
+                let proc = ocr::preprocess(&g, &pre);
+                match ocr_engine.recognize_boxed(&ocr::to_png(&proc)?).await {
+                    Ok((t, bbox)) => {
+                        text = t.trim().to_string();
+                        // A trailing "1" is a narrow glyph: its ink ends ~9px
+                        // short of the other digits' right edge, and at 2 fps the
+                        // hundredths digit repeats for many frames, which would
+                        // read as a consistent shift. Measure on other digits.
+                        if fine_drift && parse_time(&text).is_some() && !text.ends_with('1') {
+                            ink = ink_anchor(&proc, bbox.map(|b| b.0), pre.upscale);
+                        }
                     }
+                    Err(e) => warn!("ocr failed: {e:#}"),
                 }
-                Err(e) => warn!("ocr failed: {e:#}"),
+                last_text = text.clone();
             }
+        } else if prev_bright
+            .as_ref()
+            .is_some_and(|p| !region_changed(p, &union_bright, (0, 0, uw, uh)))
+        {
+            // Nothing on screen changed since the last probe: whatever the
+            // candidates would read, they read last frame. Skip the probe.
+            frame_static = true;
+            ocr_skipped += 1;
         } else {
             let mut to_read: Vec<usize> = Vec::new();
             for (ci, c) in cands.iter().enumerate() {
@@ -1166,6 +1266,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
             }
         }
+        prev_bright = Some(union_bright.clone());
         let parsed = parse_time(&text);
         // Resume probing after a dark stretch on the active position: either
         // the scene changed or the LiveSplit window was nudged.
@@ -1288,9 +1389,30 @@ pub async fn run(cfg: Config) -> Result<()> {
             if t - last_splits_read_t >= splits_every_ms {
                 last_splits_read_t = t;
                 let rows = shared.acts.len().max(1) as u32;
-                let values =
-                    read_splits_rows(&mut ocr_engine, &union_img, splits_rect, rows, &pre_splits)
-                        .await?;
+                let (sx, sy, sw, sh) = splits_rect;
+                let crop = image::imageops::crop_imm(&union_img, sx, sy, sw, sh).to_image();
+                let unchanged = last_splits_crop
+                    .as_ref()
+                    .is_some_and(|p| !region_changed(p, &crop, (0, 0, sw, sh)))
+                    && last_splits_values.len() == rows as usize;
+                let values = if unchanged {
+                    // Column unchanged since the last read: same values, no
+                    // OCR — the tracker still gets its confirmation.
+                    ocr_skipped += 1;
+                    last_splits_values.clone()
+                } else {
+                    let v = read_splits_rows(
+                        &mut ocr_engine,
+                        &union_img,
+                        splits_rect,
+                        rows,
+                        &pre_splits,
+                    )
+                    .await?;
+                    last_splits_crop = Some(crop);
+                    last_splits_values = v.clone();
+                    v
+                };
                 for (idx, cum) in st.observe(&values, tracker.smoothed_now(t)) {
                     let act_name = shared
                         .acts
@@ -1369,6 +1491,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 "offset": [active_off.0, active_off.1],
                 "ink": ink.map(|(r, cy)| vec![r, cy]),
                 "anchor": anchors[active_layout].map(|(r, cy)| vec![r, cy]),
+                "static": frame_static,
             });
             if let Some(v) = &splits_values {
                 line["splits"] = serde_json::json!(v);
@@ -1388,17 +1511,26 @@ pub async fn run(cfg: Config) -> Result<()> {
                 last_counter_read_t = t;
                 let cimg = image::imageops::crop_imm(&union_bright, cx, cy, cw2, ch2).to_image();
                 let cp = ocr::preprocess(&cimg, &pre_counter);
+                if std::env::var_os("NG_DUMP_PANE").is_some() {
+                    let _ = cp.save("calibration/counter.png");
+                }
                 if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&cp)?).await {
-                    if let Some(v) = crate::timeparse::parse_counter(txt.trim()).filter(|&v| {
-                        last_ls_attempt
-                            .map(|p| v > p && v < p + 500)
-                            .unwrap_or(true)
-                    }) {
+                    debug!("counter ocr: {:?} (crop {cx},{cy} {cw2}x{ch2})", txt.trim());
+                    // The counter only ever grows, by a little per run. A
+                    // value that jumps far ahead (or the very first value of
+                    // a session, which nothing vouches for) needs three
+                    // identical reads instead of two, so one garbage read
+                    // can't poison the sequence for the rest of the day.
+                    if let Some(v) = crate::timeparse::parse_counter(txt.trim())
+                        .filter(|&v| last_ls_attempt.is_none_or(|p| v > p))
+                    {
+                        let near = last_ls_attempt.is_some_and(|p| v < p + 500);
+                        let need = if near { 2 } else { 3 };
                         counter_stable = match counter_stable {
                             Some((pv, n)) if pv == v => Some((v, n + 1)),
                             _ => Some((v, 1)),
                         };
-                        if matches!(counter_stable, Some((_, n)) if n >= 2) {
+                        if matches!(counter_stable, Some((_, n)) if n >= need) {
                             info!("livesplit attempt counter: {v}");
                             if cr.ls_attempt.is_none() {
                                 health.counter_reads += 1;
@@ -1817,14 +1949,17 @@ mod tests {
         assert_eq!(g.pitch, 45);
         assert_eq!(g.rows_read, 6);
         // Column spans the cumulative words (260..330) with 8px margins plus
-        // one digit's width (70/6 = 11px) of headroom on the left.
-        assert_eq!(g.splits.0, 260 - 8 - 11 - 60);
-        assert_eq!(g.splits.2, 338 - (260 - 8 - 11));
+        // two digits' width (2 x 70/6 = 22px) of headroom on the left.
+        assert_eq!(g.splits.0, 260 - 8 - 22 - 60);
+        assert_eq!(g.splits.2, 338 - (260 - 8 - 22));
         // Block: bottom = last row centre (335) + 22 = 357; top = 357 - 270 = 87.
         assert_eq!(g.splits.3, 270);
         assert_eq!(g.splits.1, 87 - 400);
         let c = g.counter.expect("counter");
-        assert_eq!((c.0, c.1, c.2, c.3), (330 - 12 - 60, 60 - 6 - 400, 84, 32));
+        assert_eq!(
+            (c.0, c.1, c.2, c.3),
+            (330 - 30 - 60, 60 - 6 - 400, 60 + 42, 32)
+        );
         // One row is not enough; an absurd pitch is rejected.
         assert!(pane_geometry(&words[..2], &[], 1, timer, 6).is_none());
         let far = vec![
@@ -1832,6 +1967,27 @@ mod tests {
             word(260, 300, 70, 20, "2:44.2"),
         ];
         assert!(pane_geometry(&far, &[], 1, timer, 6).is_none());
+    }
+
+    #[test]
+    fn region_changed_ignores_noise_but_sees_a_digit() {
+        let a = GrayImage::from_pixel(400, 100, image::Luma([20]));
+        // Compression noise: every pixel wobbles by a few levels.
+        let noisy = GrayImage::from_fn(400, 100, |x, y| image::Luma([20 + ((x + y) % 7) as u8]));
+        assert!(!region_changed(&a, &noisy, (0, 0, 400, 100)));
+        // A hundredths digit flipping: a 20x40 block goes bright.
+        let mut digit = a.clone();
+        for y in 30..70 {
+            for x in 360..380 {
+                digit.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        assert!(region_changed(&a, &digit, (0, 0, 400, 100)));
+        // ...but not if the rectangle we care about excludes it.
+        assert!(!region_changed(&a, &digit, (0, 0, 300, 100)));
+        // Different dimensions can't be compared: treat as changed.
+        let small = GrayImage::from_pixel(10, 10, image::Luma([20]));
+        assert!(region_changed(&a, &small, (0, 0, 10, 10)));
     }
 
     #[test]
