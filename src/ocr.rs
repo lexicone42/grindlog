@@ -63,6 +63,42 @@ pub fn to_png(img: &GrayImage) -> Result<Vec<u8>> {
     Ok(buf.into_inner())
 }
 
+/// One word from a tesseract TSV pass, box in image pixels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Word {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub conf: f32,
+    pub text: String,
+}
+
+/// Parse tesseract's TSV output (level 5 rows are words):
+/// `level page block par line word left top width height conf text`.
+pub fn parse_tsv(tsv: &str) -> Vec<Word> {
+    tsv.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            if f.len() < 12 || f[0] != "5" {
+                return None;
+            }
+            let text = f[11].trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(Word {
+                x: f[6].parse().ok()?,
+                y: f[7].parse().ok()?,
+                w: f[8].parse().ok()?,
+                h: f[9].parse().ok()?,
+                conf: f[10].parse().unwrap_or(-1.0),
+                text: text.to_string(),
+            })
+        })
+        .collect()
+}
+
 pub enum OcrEngine {
     Cli(CliOcr),
     #[cfg(feature = "leptess-ocr")]
@@ -144,6 +180,39 @@ impl CliOcr {
         tokio::time::timeout(std::time::Duration::from_secs(15), self.recognize_inner(png))
             .await
             .map_err(|_| anyhow::anyhow!("tesseract timed out after 15s"))?
+    }
+
+    /// Sparse-text pass over a whole image (`--psm 11`, TSV output): every
+    /// word tesseract finds, with its bounding box in image pixels. Used by
+    /// `locate` to find the LiveSplit pane; `whitelist` restricts glyphs.
+    pub async fn recognize_words(&self, png: &[u8], whitelist: Option<&str>) -> Result<Vec<Word>> {
+        let mut args: Vec<String> = ["stdin", "stdout", "--dpi", "96", "--psm", "11", "-l", &self.lang]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if let Some(w) = whitelist {
+            args.push("-c".into());
+            args.push(format!("tessedit_char_whitelist={w}"));
+        }
+        args.push("tsv".into());
+        let mut child = tokio::process::Command::new(&self.cmd)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("spawning tesseract")?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        stdin.write_all(png).await?;
+        drop(stdin);
+        let out = tokio::time::timeout(std::time::Duration::from_secs(120), child.wait_with_output())
+            .await
+            .map_err(|_| anyhow::anyhow!("tesseract timed out after 120s"))??;
+        if !out.status.success() {
+            bail!("tesseract exited with {}", out.status);
+        }
+        Ok(parse_tsv(&String::from_utf8_lossy(&out.stdout)))
     }
 
     async fn recognize_inner(&self, png: &[u8]) -> Result<String> {

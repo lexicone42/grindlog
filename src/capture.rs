@@ -33,6 +33,8 @@ pub struct CaptureCfg {
     pub vod_id: String,
     /// Local path / URL for SourceKind::File.
     pub input: String,
+    /// Seek this far into a recording before decoding (Vod/File only).
+    pub start_secs: f64,
     /// Exact byte length of one output frame.
     pub frame_len: usize,
     pub frame_timeout_secs: u64,
@@ -173,13 +175,16 @@ async fn run_once(
                 Resolved::Offline => return Ok(Session::Offline),
                 Resolved::Live { variant_url, name } => {
                     info!("vod {} resolved ({name}); starting ffmpeg", cfg.vod_id);
-                    ff.args(["-rw_timeout", "15000000", "-i", &variant_url]);
+                    ff.args(["-rw_timeout", "15000000"]);
+                    seek_args(&mut ff, cfg.start_secs);
+                    ff.args(["-i", &variant_url]);
                     ff.stdin(Stdio::null());
                 }
             }
         }
         SourceKind::File => {
             info!("reading {}", cfg.input);
+            seek_args(&mut ff, cfg.start_secs);
             ff.args(["-i", &cfg.input]);
             ff.stdin(Stdio::null());
         }
@@ -206,6 +211,14 @@ async fn run_once(
         }
     }
     finish_pipeline(cfg, ff, streamlink, None, tx).await
+}
+
+/// Input-side seek (`-ss` before `-i`): ffmpeg skips whole HLS segments /
+/// keyframes to get there, so a deep seek into a VOD is nearly free.
+fn seek_args(ff: &mut Command, start_secs: f64) {
+    if start_secs > 0.0 {
+        ff.args(["-ss", &format!("{start_secs:.3}")]);
+    }
 }
 
 async fn finish_pipeline(

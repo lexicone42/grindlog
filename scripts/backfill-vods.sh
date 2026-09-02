@@ -35,6 +35,11 @@ crop_y = 498
 crop_w = 135
 crop_h = 288
 
+[detection]
+# Nobody finishes NG Any% under 11:00 (WR 11:32): a "finish" below that is a
+# frozen timer (stream stall, pause), not a run.
+min_final_ms = 660000
+
 [game]
 name = "Ninja Gaiden (NES)"
 category = "Any%"
@@ -70,6 +75,9 @@ path = "backfill-db/vod-$id.db"
 obs_log = "backfill-logs/obs-$id.jsonl"
 EOF
   echo "=== VOD $id — $(date -Is) ==="
+  # A rerun must replace, not append to, an earlier pass over the same VOD.
+  rm -f "backfill-db/vod-$id.db" "backfill-db/vod-$id.db-wal" "backfill-db/vod-$id.db-shm" \
+        "backfill-logs/obs-$id.jsonl"
   if ! nice -n 15 ./target/release/ngtwitchtimer --config "$cfg" run; then
     echo "!!! VOD $id failed; continuing with the next one"
   fi

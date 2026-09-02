@@ -145,6 +145,18 @@ Misreads are rejected against the *wall clock*: a reading is accepted only if
 it advanced by roughly the elapsed time since the last good reading (±5s), so
 stream drops and ad breaks self-heal instead of poisoning the state.
 
+**Layouts and drift.** Streamers switch OBS scenes and nudge the LiveSplit
+window. Every `[[layouts]]` entry is a set of rectangles for one scene; the
+bot probes each layout's timer (and, around it, a grid of pixel offsets up to
+`layout_search.drift_px`) and locks to the first position that parses
+consistently on five looks — frozen, or advancing with the clock. A locked
+position that goes unreadable for `dark_frames_search` frames starts the
+probe again, so a scene switch or a few-pixel nudge is picked up and logged
+(`layout switched …` / `re-anchored: LiveSplit moved +18,+12 px`) rather than
+silently losing runs. The union of every rectangle (plus the drift margin)
+is the only crop ffmpeg decodes, so extra layouts cost OCR calls only while
+probing.
+
 ## Maintenance notes
 
 - Twitch occasionally rotates the web player client-id or retires the GraphQL

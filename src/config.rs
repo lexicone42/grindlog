@@ -42,6 +42,33 @@ pub struct Config {
     /// consistently, locks to it, and re-probes if the timer goes dark.
     #[serde(default)]
     pub layouts: Vec<LayoutCfg>,
+    #[serde(default)]
+    pub layout_search: LayoutSearchCfg,
+}
+
+/// Tolerance for the streamer nudging the LiveSplit window a few pixels:
+/// when the locked timer goes dark, nearby pixel offsets are probed and, if
+/// one parses consistently, the whole layout is re-anchored at that offset.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LayoutSearchCfg {
+    /// Maximum offset searched in each direction (0 disables the search).
+    pub drift_px: u32,
+    /// Step between probed offsets.
+    pub step_px: u32,
+    /// Dark frames on the locked layout before probing resumes (every layout
+    /// at its configured position, plus nearby offsets).
+    pub dark_frames_search: u32,
+}
+
+impl Default for LayoutSearchCfg {
+    fn default() -> Self {
+        Self {
+            drift_px: 36,
+            step_px: 12,
+            dark_frames_search: 30,
+        }
+    }
 }
 
 /// A crop rectangle in canvas coordinates.
@@ -194,6 +221,9 @@ pub struct StreamCfg {
     /// Local path or ffmpeg-readable URL for source = "file".
     #[serde(default)]
     pub input: String,
+    /// Seconds into a recording (source = "vod"/"file") to start at.
+    #[serde(default)]
+    pub start_secs: f64,
     /// Only capture when the live broadcast title contains this string
     /// (case-insensitive) — the streamer's own labeling separates e.g.
     /// "Ninja Gaiden speedruns" days from other games. Empty/absent = always

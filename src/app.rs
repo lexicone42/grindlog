@@ -67,15 +67,15 @@ type R = (u32, u32, u32, u32);
 
 /// Absolute canvas rectangles for one layout: layout 0 is the base config
 /// sections; alternates override rectangles they specify and inherit the rest.
-struct LayoutRects {
-    name: String,
-    timer: R,
-    splits: Option<R>,
-    counter: Option<R>,
-    sob: Option<R>,
+pub(crate) struct LayoutRects {
+    pub(crate) name: String,
+    pub(crate) timer: R,
+    pub(crate) splits: Option<R>,
+    pub(crate) counter: Option<R>,
+    pub(crate) sob: Option<R>,
 }
 
-fn layout_rects(cfg: &Config) -> Vec<LayoutRects> {
+pub(crate) fn layout_rects(cfg: &Config) -> Vec<LayoutRects> {
     let t = &cfg.timer;
     let s = &cfg.splits;
     let c = &cfg.attempts_counter;
@@ -115,10 +115,14 @@ pub fn regions(cfg: &Config) -> Vec<Regions> {
                 .chain(l.sob)
         })
         .collect();
-    let ux = rects.iter().map(|r| r.0).min().unwrap();
-    let uy = rects.iter().map(|r| r.1).min().unwrap();
-    let uw = rects.iter().map(|r| r.0 + r.2).max().unwrap() - ux;
-    let uh = rects.iter().map(|r| r.1 + r.3).max().unwrap() - uy;
+    // Pad the union by the drift-search margin (clamped to the canvas) so
+    // offset probes stay inside the decoded frame.
+    let pad = cfg.layout_search.drift_px;
+    let (cw, chh) = (cfg.stream.canvas_w, cfg.stream.canvas_h);
+    let ux = rects.iter().map(|r| r.0).min().unwrap().saturating_sub(pad);
+    let uy = rects.iter().map(|r| r.1).min().unwrap().saturating_sub(pad);
+    let uw = (rects.iter().map(|r| r.0 + r.2).max().unwrap() + pad).min(cw) - ux;
+    let uh = (rects.iter().map(|r| r.1 + r.3).max().unwrap() + pad).min(chh) - uy;
     let rel = |r: R| (r.0 - ux, r.1 - uy, r.2, r.3);
     layouts
         .iter()
@@ -137,6 +141,107 @@ pub fn layout_names(cfg: &Config) -> Vec<String> {
     layout_rects(cfg).into_iter().map(|l| l.name).collect()
 }
 
+/// Every rectangle of a layout moved by a pixel offset (the LiveSplit window
+/// nudged), or None if any of them would leave the union crop.
+fn shifted(reg: &Regions, (dx, dy): (i32, i32)) -> Option<Regions> {
+    let (_, _, uw, uh) = reg.union;
+    let sh = |r: R| -> Option<R> {
+        let x = r.0 as i64 + dx as i64;
+        let y = r.1 as i64 + dy as i64;
+        let inside = x >= 0 && y >= 0 && x + r.2 as i64 <= uw as i64 && y + r.3 as i64 <= uh as i64;
+        inside.then_some((x as u32, y as u32, r.2, r.3))
+    };
+    let opt = |r: Option<R>| -> Option<Option<R>> {
+        match r {
+            Some(r) => sh(r).map(Some),
+            None => Some(None),
+        }
+    };
+    Some(Regions {
+        union: reg.union,
+        timer: sh(reg.timer)?,
+        splits: opt(reg.splits)?,
+        counter: opt(reg.counter)?,
+        sob: opt(reg.sob)?,
+    })
+}
+
+/// Offsets to probe around each layout, nearest first, origin excluded.
+fn drift_offsets(cfg: &crate::config::LayoutSearchCfg) -> Vec<(i32, i32)> {
+    let max = cfg.drift_px as i32;
+    let step = cfg.step_px.max(1) as i32;
+    let axis: Vec<i32> = (-(max / step)..=(max / step)).map(|k| k * step).collect();
+    let mut offs: Vec<(i32, i32)> = axis
+        .iter()
+        .flat_map(|&dx| axis.iter().map(move |&dy| (dx, dy)))
+        .filter(|&o| o != (0, 0))
+        .collect();
+    offs.sort_by_key(|&(dx, dy)| (dx.abs().max(dy.abs()), dx * dx + dy * dy));
+    offs
+}
+
+/// Where the digits sit inside a processed (ink = black) timer crop: the
+/// ink's right edge and vertical centre in un-upscaled crop pixels. LiveSplit
+/// right-aligns the timer, so both stay put while the window does; a shift
+/// means the window moved. Rows/columns with only a few ink pixels are noise.
+fn ink_anchor(proc: &GrayImage, upscale: u32) -> Option<(i32, i32)> {
+    let up = upscale.max(1);
+    let (w, h) = proc.dimensions();
+    let min = 3 * up;
+    let mut cols = vec![0u32; w as usize];
+    for (x, _, p) in proc.enumerate_pixels() {
+        if p.0[0] == 0 {
+            cols[x as usize] += 1;
+        }
+    }
+    // A pane border or the game area's edge inside the crop is ink spanning
+    // (nearly) the full crop height; digits never do. Drop such columns.
+    let digit_col = |c: u32| c >= min && c <= h * 9 / 10;
+    let mut rows = vec![0u32; h as usize];
+    for (x, y, p) in proc.enumerate_pixels() {
+        if p.0[0] == 0 && digit_col(cols[x as usize]) {
+            rows[y as usize] += 1;
+        }
+    }
+    let right = cols.iter().rposition(|&c| digit_col(c))? as f32;
+    let top = rows.iter().position(|&c| c >= min)? as f32;
+    let bottom = rows.iter().rposition(|&c| c >= min)? as f32;
+    let up = up as f32;
+    Some(((right / up).round() as i32, ((top + bottom) / 2.0 / up).round() as i32))
+}
+
+/// One position where a timer might be: a layout plus a pixel offset.
+struct Candidate {
+    layout: usize,
+    off: (i32, i32),
+    regs: Regions,
+    streak: u32,
+    /// Last parsed value and the frame time it was seen at.
+    last: Option<(i64, i64)>,
+}
+
+impl Candidate {
+    /// A real timer's readings are consistent between looks: frozen, or
+    /// advancing by roughly the elapsed time. Garbage jumps around.
+    fn observe(&mut self, v: Option<i64>, t: i64) -> bool {
+        let consistent = match (v, self.last) {
+            (Some(v), Some((p, pt))) => {
+                let elapsed = (t - pt).max(0);
+                (v - p).abs() <= 5000 || (v - p - elapsed).abs() <= 5000
+            }
+            (Some(_), None) => true,
+            _ => false,
+        };
+        self.last = v.map(|v| (v, t));
+        if consistent {
+            self.streak += 1;
+        } else {
+            self.streak = 0;
+        }
+        consistent
+    }
+}
+
 pub fn capture_cfg(cfg: &Config) -> capture::CaptureCfg {
     let s = &cfg.stream;
     let (ux, uy, uw, uh) = regions(cfg)[0].union;
@@ -153,6 +258,7 @@ pub fn capture_cfg(cfg: &Config) -> capture::CaptureCfg {
         title_filter: s.title_filter.clone(),
         vod_id: s.vod_id.clone(),
         input: s.input.clone(),
+        start_secs: s.start_secs,
         frame_len: (uw * uh) as usize,
         frame_timeout_secs: s.frame_timeout_secs,
         offline_poll_secs: s.offline_poll_secs,
@@ -235,13 +341,32 @@ pub async fn run(cfg: Config) -> Result<()> {
     let regs = regions(&cfg);
     let layout_names = layout_names(&cfg);
     let (uw, uh) = (regs[0].union.2, regs[0].union.3);
+    // Probe candidates: each layout at its configured position, then at every
+    // drift offset. Configured positions are read on every probe frame; the
+    // offsets take turns (one per layout per frame), and any offset that has
+    // parsed once is read every frame until it locks or fails.
+    let offsets = drift_offsets(&cfg.layout_search);
+    let mut cands: Vec<Candidate> = Vec::new();
+    for (i, r) in regs.iter().enumerate() {
+        cands.push(Candidate { layout: i, off: (0, 0), regs: r.clone(), streak: 0, last: None });
+        for &off in &offsets {
+            if let Some(sr) = shifted(r, off) {
+                cands.push(Candidate { layout: i, off, regs: sr, streak: 0, last: None });
+            }
+        }
+    }
     let mut active_layout: usize = 0;
-    let mut layout_locked = regs.len() == 1;
-    let mut probe_streak = vec![0u32; regs.len()];
-    // Last parsed value per layout while probing: a real timer's readings are
-    // consistent frame to frame (advancing ~1s or frozen); garbage jumps.
-    let mut probe_last = vec![None::<i64>; regs.len()];
+    let mut active_regs: Regions = regs[0].clone();
+    let mut active_off: (i32, i32) = (0, 0);
+    let mut layout_locked = cands.len() == 1;
+    let mut probe_rr: usize = 0;
     let mut dark_frames: u32 = 0;
+    let dark_frames_search = cfg.layout_search.dark_frames_search.max(1);
+    // Fine drift while locked: where the digits sit inside each layout's
+    // timer crop (learned on first lock), and the recent shifts seen from it.
+    let mut anchors = vec![None::<(i32, i32)>; regs.len()];
+    let mut drift_hits: Vec<(i32, i32)> = Vec::new();
+    let fine_drift = cfg.layout_search.drift_px > 0;
     let epoch = Instant::now();
     let mut current: Option<CurrentRun> = None;
     let mut splits_tracker: Option<crate::splits::SplitsTracker> = None;
@@ -305,6 +430,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     } else {
         None
     };
+    // Frame 0 is `start_secs` into the recording when seeking.
+    let time_base = time_base.map(|b| b + (cfg.stream.start_secs * 1000.0) as i64);
 
     let mut obs_log = match &cfg.debug.obs_log {
         Some(path) => Some(std::io::BufWriter::new(
@@ -381,78 +508,163 @@ pub async fn run(cfg: Config) -> Result<()> {
             warn!("dropped a frame with unexpected size");
             continue;
         };
-        // OCR the timer. When locked, only the active layout is read; while
-        // probing, every layout's timer is read and the first to parse on
-        // three consecutive frames wins.
-        let read_timer = |img: &GrayImage, r: (u32, u32, u32, u32)| {
-            let g = image::imageops::crop_imm(img, r.0, r.1, r.2, r.3).to_image();
-            ocr::to_png(&ocr::preprocess(&g, &pre))
-        };
-        let mut text = String::new();
-        if layout_locked {
-            match ocr_engine.recognize(&read_timer(&union_img, regs[active_layout].timer)?).await {
-                Ok(t) => text = t.trim().to_string(),
-                Err(e) => warn!("ocr failed: {e:#}"),
-            }
-        } else {
-            for (i, r) in regs.iter().enumerate() {
-                let t = match ocr_engine.recognize(&read_timer(&union_img, r.timer)?).await {
-                    Ok(t) => t.trim().to_string(),
-                    Err(_) => String::new(),
-                };
-                let v = parse_time(&t);
-                let consistent = match (v, probe_last[i]) {
-                    (Some(v), Some(p)) => (v - p).abs() <= 5000,
-                    (Some(_), None) => true,
-                    _ => false,
-                };
-                probe_last[i] = v;
-                if consistent {
-                    probe_streak[i] += 1;
-                    if probe_streak[i] >= 5 && !layout_locked {
-                        layout_locked = true;
-                        if i != active_layout {
-                            info!("layout switched to {:?}", layout_names[i]);
-                            // A layout change invalidates any splits baseline.
-                            splits_tracker = None;
-                        } else {
-                            info!("layout locked: {:?}", layout_names[i]);
-                        }
-                        active_layout = i;
-                    }
-                } else {
-                    probe_streak[i] = 0;
-                }
-                if i == active_layout {
-                    text = t;
-                }
-            }
-            if layout_locked {
-                probe_streak.iter_mut().for_each(|s| *s = 0);
-            }
-        }
-        let parsed = parse_time(&text);
-        // Unlock and re-probe after a long dark stretch on the locked layout.
-        if regs.len() > 1 {
-            if parsed.is_some() {
-                dark_frames = 0;
-            } else {
-                dark_frames += 1;
-                if layout_locked && dark_frames >= 120 {
-                    layout_locked = false;
-                    dark_frames = 0;
-                    info!("timer dark for 2 minutes; probing all layouts");
-                }
-            }
-        }
-        let reg = &regs[active_layout];
-        let obs = parsed.map(Obs::Time).unwrap_or(Obs::Illegible);
         let t = if recorded {
             frame_idx * frame_interval_ms
         } else {
             epoch.elapsed().as_millis() as i64
         };
         frame_idx += 1;
+        // OCR the timer. When locked, only the active position is read; while
+        // probing, candidate positions are read too and the first to parse
+        // consistently on five looks becomes the active position.
+        let read_timer = |img: &GrayImage, r: (u32, u32, u32, u32)| {
+            let g = image::imageops::crop_imm(img, r.0, r.1, r.2, r.3).to_image();
+            ocr::to_png(&ocr::preprocess(&g, &pre))
+        };
+        let mut text = String::new();
+        let mut ink: Option<(i32, i32)> = None;
+        if layout_locked {
+            let r = active_regs.timer;
+            let g = image::imageops::crop_imm(&union_img, r.0, r.1, r.2, r.3).to_image();
+            let proc = ocr::preprocess(&g, &pre);
+            match ocr_engine.recognize(&ocr::to_png(&proc)?).await {
+                Ok(t) => text = t.trim().to_string(),
+                Err(e) => warn!("ocr failed: {e:#}"),
+            }
+            if fine_drift && parse_time(&text).is_some() {
+                ink = ink_anchor(&proc, pre.upscale);
+            }
+        } else {
+            let mut to_read: Vec<usize> = Vec::new();
+            for (ci, c) in cands.iter().enumerate() {
+                let base = c.off == (0, 0);
+                let active = c.layout == active_layout && c.off == active_off;
+                let hot = !base && c.streak > 0;
+                if base || active || hot {
+                    to_read.push(ci);
+                }
+            }
+            // One offset candidate per layout takes its turn this frame.
+            let n_off = offsets.len().max(1);
+            let turn = probe_rr % n_off;
+            probe_rr = probe_rr.wrapping_add(1);
+            for li in 0..regs.len() {
+                let pick = cands
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.layout == li && c.off != (0, 0))
+                    .nth(turn)
+                    .map(|(ci, _)| ci);
+                if let Some(ci) = pick {
+                    if !to_read.contains(&ci) {
+                        to_read.push(ci);
+                    }
+                }
+            }
+            let mut winner: Option<(usize, String)> = None;
+            for ci in to_read {
+                let c = &mut cands[ci];
+                let rd = match ocr_engine.recognize(&read_timer(&union_img, c.regs.timer)?).await {
+                    Ok(t) => t.trim().to_string(),
+                    Err(_) => String::new(),
+                };
+                let v = parse_time(&rd);
+                if c.observe(v, t) && c.streak >= 5 && winner.is_none() {
+                    winner = Some((ci, rd.clone()));
+                }
+                if c.layout == active_layout && c.off == active_off {
+                    text = rd;
+                }
+            }
+            if let Some((ci, winner_text)) = winner {
+                text = winner_text;
+                let c = &cands[ci];
+                let name = &layout_names[c.layout];
+                if c.layout != active_layout {
+                    info!("layout switched to {name:?} (offset {:+},{:+})", c.off.0, c.off.1);
+                    // A layout change invalidates any splits baseline.
+                    splits_tracker = None;
+                } else if c.off != active_off {
+                    info!(
+                        "layout {name:?} re-anchored: LiveSplit moved {:+},{:+} px (was {:+},{:+})",
+                        c.off.0, c.off.1, active_off.0, active_off.1
+                    );
+                } else {
+                    info!("layout locked: {name:?} (offset {:+},{:+})", c.off.0, c.off.1);
+                }
+                active_layout = c.layout;
+                active_off = c.off;
+                active_regs = c.regs.clone();
+                layout_locked = true;
+                drift_hits.clear();
+                for c in cands.iter_mut() {
+                    c.streak = 0;
+                    c.last = None;
+                }
+            }
+        }
+        let parsed = parse_time(&text);
+        // Resume probing after a dark stretch on the active position: either
+        // the scene changed or the LiveSplit window was nudged.
+        if cands.len() > 1 {
+            if parsed.is_some() {
+                dark_frames = 0;
+            } else {
+                dark_frames += 1;
+                if layout_locked && dark_frames >= dark_frames_search {
+                    layout_locked = false;
+                    dark_frames = 0;
+                    info!(
+                        "timer dark for {dark_frames_search} frames; probing layouts and offsets"
+                    );
+                }
+            }
+        }
+        // Fine drift: a nudge too small to break the timer still misaligns the
+        // splits/counter crops, so re-anchor on a consistent shift of the ink.
+        if let (true, Some(m)) = (layout_locked, ink) {
+            match anchors[active_layout] {
+                None => anchors[active_layout] = Some(m),
+                Some(a) => {
+                    let d = (m.0 - a.0, m.1 - a.1);
+                    let near_last = drift_hits
+                        .last()
+                        .is_none_or(|l| (l.0 - d.0).abs() <= 2 && (l.1 - d.1).abs() <= 2);
+                    if d.0.abs() < 4 && d.1.abs() < 4 {
+                        drift_hits.clear();
+                    } else if near_last {
+                        drift_hits.push(d);
+                    } else {
+                        drift_hits = vec![d];
+                    }
+                    if drift_hits.len() >= 8 {
+                        let mut xs: Vec<i32> = drift_hits.iter().map(|h| h.0).collect();
+                        let mut ys: Vec<i32> = drift_hits.iter().map(|h| h.1).collect();
+                        xs.sort_unstable();
+                        ys.sort_unstable();
+                        let d = (xs[xs.len() / 2], ys[ys.len() / 2]);
+                        let new_off = (active_off.0 + d.0, active_off.1 + d.1);
+                        match shifted(&regs[active_layout], new_off) {
+                            Some(nr) => {
+                                info!(
+                                    "layout {:?} re-anchored: LiveSplit moved {:+},{:+} px (now {:+},{:+} from configured)",
+                                    layout_names[active_layout], d.0, d.1, new_off.0, new_off.1
+                                );
+                                active_off = new_off;
+                                active_regs = nr;
+                            }
+                            None => warn!(
+                                "LiveSplit moved {:+},{:+} px, beyond layout_search.drift_px; crops stay put",
+                                d.0, d.1
+                            ),
+                        }
+                        drift_hits.clear();
+                    }
+                }
+            }
+        }
+        let reg = &active_regs;
+        let obs = parsed.map(Obs::Time).unwrap_or(Obs::Illegible);
         last_t = t;
 
         if session_id.is_none() {
@@ -535,6 +747,10 @@ pub async fn run(cfg: Config) -> Result<()> {
                 "phase": tracker.phase_name(),
                 "smoothed_ms": tracker.smoothed_now(t),
                 "events": events.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>(),
+                "layout": if layout_locked { layout_names[active_layout].as_str() } else { "probing" },
+                "offset": [active_off.0, active_off.1],
+                "ink": ink.map(|(r, cy)| vec![r, cy]),
+                "anchor": anchors[active_layout].map(|(r, cy)| vec![r, cy]),
             });
             if let Some(v) = &splits_values {
                 line["splits"] = serde_json::json!(v);
@@ -853,4 +1069,61 @@ async fn handle_event(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LayoutSearchCfg;
+
+    fn regs() -> Regions {
+        Regions {
+            union: (0, 0, 500, 300),
+            timer: (40, 40, 100, 50),
+            splits: Some((200, 20, 60, 200)),
+            counter: None,
+            sob: Some((10, 250, 80, 30)),
+        }
+    }
+
+    #[test]
+    fn drift_offsets_nearest_first_without_origin() {
+        let offs = drift_offsets(&LayoutSearchCfg { drift_px: 24, step_px: 12, dark_frames_search: 30 });
+        assert_eq!(offs.len(), 24);
+        assert!(!offs.contains(&(0, 0)));
+        // First ring (Chebyshev distance 12) precedes the second (24); axis
+        // neighbours come before diagonals within a ring.
+        assert_eq!(offs[0].0.abs().max(offs[0].1.abs()), 12);
+        assert!(offs[..8].iter().all(|&(x, y)| x.abs().max(y.abs()) == 12));
+        assert!(offs[8..].iter().all(|&(x, y)| x.abs().max(y.abs()) == 24));
+        assert!(offs[..4].iter().all(|&(x, y)| x == 0 || y == 0));
+        assert!(drift_offsets(&LayoutSearchCfg { drift_px: 0, step_px: 12, dark_frames_search: 30 }).is_empty());
+    }
+
+    #[test]
+    fn shifted_moves_every_rect_or_nothing() {
+        let r = regs();
+        let s = shifted(&r, (12, -12)).unwrap();
+        assert_eq!(s.timer, (52, 28, 100, 50));
+        assert_eq!(s.splits, Some((212, 8, 60, 200)));
+        assert_eq!(s.sob, Some((22, 238, 80, 30)));
+        assert_eq!(s.counter, None);
+        // The SoB row sits 20px above the bottom edge: +24 down leaves the union.
+        assert!(shifted(&r, (0, 24)).is_none());
+        // The SoB row starts at x=10: -12 left leaves the union.
+        assert!(shifted(&r, (-12, 0)).is_none());
+    }
+
+    #[test]
+    fn candidate_accepts_frozen_or_advancing_readings() {
+        let mut c = Candidate { layout: 0, off: (0, 0), regs: regs(), streak: 0, last: None };
+        assert!(c.observe(Some(10_000), 0));
+        assert!(c.observe(Some(10_500), 500)); // advancing with the clock
+        assert!(c.observe(Some(22_400), 12_500)); // advanced ~12s after a 12s gap
+        assert!(c.observe(Some(22_400), 25_000)); // frozen (paused / pre-start)
+        assert_eq!(c.streak, 4);
+        assert!(!c.observe(Some(500_000), 13_000)); // garbage jump
+        assert_eq!(c.streak, 0);
+        assert!(!c.observe(None, 13_500));
+    }
 }

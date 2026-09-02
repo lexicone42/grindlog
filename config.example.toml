@@ -47,12 +47,54 @@ crop_h = 90
 # illegible_reset_count = 180   # unreadable frames (~seconds) before DNF;
                                 #   generous so ad breaks don't kill runs
 # max_jump_ms = 5000            # larger deviations are misreads, skipped
+# min_final_ms = 60000          # a frozen timer below this is a stall, not a
+                                #   finish; set near the category's fastest
+                                #   plausible time (e.g. just under the WR)
 # desync_confirmations = 3      # consistent "misreads" before re-syncing
 # smoothing_window = 5          # readings in the smoothed current time
+
+[splits]                        # optional: OCR LiveSplit's cumulative-time column
+# enabled = false
+# crop_x = 0                    # canvas coords, like [timer]
+# crop_y = 0
+# crop_w = 0
+# crop_h = 0
+# threshold = 150               # its own threshold: the current row is highlighted
+# read_every_secs = 5
+# tolerance_ms = 50             # change vs the comparison column that counts as a split
+# confirmations = 2
+
+[attempts_counter]              # optional: LiveSplit's attempt counter (the run number)
+# enabled = false
+# crop_x = 0 ... crop_h = 0
+
+[lifetime_sob]                  # optional: LiveSplit's sum-of-best row
+# enabled = false
+# crop_x = 0 ... crop_h = 0
+
+# Alternate OBS scenes: each [[layouts]] entry gives the same rectangles at
+# their positions in that scene (omitted ones inherit the base sections
+# above). The bot probes every layout's timer until one parses consistently,
+# locks to it, and probes again if the timer goes dark.
+# [[layouts]]
+# name = "alt-scene"
+# timer = { crop_x = 265, crop_y = 765, crop_w = 360, crop_h = 100 }
+# splits = { crop_x = 515, crop_y = 513, crop_w = 100, crop_h = 252 }
+# attempts_counter = { crop_x = 540, crop_y = 487, crop_w = 80, crop_h = 30 }
+# lifetime_sob = { crop_x = 505, crop_y = 897, crop_w = 110, crop_h = 34 }
+
+[layout_search]                 # tolerance for the streamer nudging LiveSplit
+# drift_px = 36                 # search this far around each layout (0 = off)
+# step_px = 12                  # offset grid step
+# dark_frames_search = 30       # unreadable frames before probing resumes
 
 [game]
 name = "Super Mario Bros."     # overridden by !setgame (persisted in the DB)
 category = "Any%"
+# acts = [ { name = "1-1", end_ms = 40000 }, { name = "8-4" } ]  # split points
+# record_label = "PB"           # what the tracked best is called
+# baseline_best = "4:55.6"      # best from before tracking (a record must beat it)
+# references = [ { label = "WR", time = "4:54.6" } ]
 
 [database]
 # path = "ngtimer.db"

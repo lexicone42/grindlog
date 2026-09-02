@@ -4,6 +4,7 @@ mod capture;
 mod chat;
 mod config;
 mod db;
+mod locate;
 mod ocr;
 mod report;
 mod sanity;
@@ -47,6 +48,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Find the LiveSplit pane in a frame: prints crop rectangles as a
+    /// ready-to-paste [[layouts]] entry and how far it sits from each
+    /// configured layout; saves calibration/locate.png with the boxes drawn
+    Locate {
+        /// Analyze this PNG/JPEG instead of grabbing a frame from the source
+        #[arg(long)]
+        image: Option<std::path::PathBuf>,
+        /// Give up after analyzing this many frames without finding a timer
+        #[arg(long, default_value_t = 12)]
+        frames: u32,
+    },
 }
 
 #[tokio::main]
@@ -68,5 +80,6 @@ async fn main() -> Result<()> {
         Command::Run => app::run(cfg).await,
         Command::Calibrate { full_frame } => calibrate::run(cfg, full_frame).await,
         Command::Report { json } => report::run(cfg, json).await,
+        Command::Locate { image, frames } => locate::run(cfg, image, frames).await,
     }
 }

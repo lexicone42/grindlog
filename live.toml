@@ -39,6 +39,11 @@ crop_y = 498
 crop_w = 135
 crop_h = 288
 
+[detection]
+# Nobody finishes NG Any% under 11:00 (WR 11:32): a "finish" below that is a
+# frozen timer (stream stall, pause), not a run.
+min_final_ms = 660000
+
 [game]
 name = "Ninja Gaiden (NES)"
 category = "Any%"
