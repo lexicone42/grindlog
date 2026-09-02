@@ -24,6 +24,14 @@ days=$(sqlite3 "$f" "SELECT GROUP_CONCAT(DISTINCT quote(date(started_at_ms/1000,
 echo "vod $id covers $days: $(sqlite3 "$f" "SELECT COUNT(*)||' runs, '||SUM(outcome='finished')||' finished, '||COUNT(ls_attempt)||' numbered' FROM runs")"
 echo "replacing in $LIVE: $(sqlite3 "$LIVE" "SELECT COUNT(*)||' runs' FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days)")"
 
+# Capture-health columns exist only in databases written by newer binaries.
+have=$(sqlite3 "$f" "SELECT GROUP_CONCAT(name) FROM pragma_table_info('sessions')")
+hc=""
+for c in frames parsed probing relocks counter_reads events; do
+  case ",$have," in *",$c,"*) hc+="$c, ";; *) hc+="NULL AS $c, ";; esac
+done
+hc="${hc%, }"
+
 sqlite3 "$LIVE" "
   PRAGMA busy_timeout = 20000;
   BEGIN IMMEDIATE;
@@ -31,8 +39,8 @@ sqlite3 "$LIVE" "
   DELETE FROM splits WHERE run_id IN (SELECT id FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days));
   DELETE FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days);
   DELETE FROM sessions WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days);
-  INSERT INTO sessions (started_at_ms, ended_at_ms, source, label, tag)
-    SELECT started_at_ms, ended_at_ms, source, label, tag FROM s.sessions ORDER BY id;
+  INSERT INTO sessions (started_at_ms, ended_at_ms, source, label, tag, frames, parsed, probing, relocks, counter_reads, events)
+    SELECT started_at_ms, ended_at_ms, source, label, tag, $hc FROM s.sessions ORDER BY id;
   -- Sessions/runs are matched back by start time (unique within one VOD).
   INSERT INTO runs (game, category, attempt_number, started_at_ms, ended_at_ms, outcome, reset_reason,
                     final_time_ms, last_timer_ms, ls_attempt, session_id)

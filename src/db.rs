@@ -58,7 +58,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   ended_at_ms INTEGER,            -- NULL while the broadcast is ongoing
   source TEXT NOT NULL,           -- 'hls' | 'streamlink' | 'vod' | 'file'
   label TEXT NOT NULL,            -- channel name, vod id, or file path
-  tag TEXT                        -- e.g. 'arcathlon' for marathon broadcasts
+  tag TEXT,                       -- e.g. 'arcathlon' for marathon broadcasts
+  -- capture health, updated while the session runs
+  frames INTEGER,                 -- frames analyzed
+  parsed INTEGER,                 -- frames whose timer OCR parsed
+  probing INTEGER,                -- frames spent without a locked layout
+  relocks INTEGER,                -- layout locks/switches/re-anchors
+  counter_reads INTEGER,          -- attempt-counter reads accepted
+  events TEXT                     -- JSON [{t, k, d}] of layout events
 );
 "#;
 
@@ -78,6 +85,12 @@ pub async fn open(path: &str) -> Result<SqlitePool> {
         ("runs", "session_id", "INTEGER"),
         ("runs", "ls_attempt", "INTEGER"),
         ("sessions", "tag", "TEXT"),
+        ("sessions", "frames", "INTEGER"),
+        ("sessions", "parsed", "INTEGER"),
+        ("sessions", "probing", "INTEGER"),
+        ("sessions", "relocks", "INTEGER"),
+        ("sessions", "counter_reads", "INTEGER"),
+        ("sessions", "events", "TEXT"),
     ] {
         let has: Option<i64> = sqlx::query_scalar(&format!(
             "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?"
@@ -174,6 +187,47 @@ pub async fn close_session(pool: &SqlitePool, id: i64, ended_at_ms: i64) -> Resu
     Ok(())
 }
 
+/// Capture health of one session: how much of the feed was read and what
+/// the layout machinery did. Persisted on the session row so a bad day shows
+/// up on the site instead of only in a log file.
+#[derive(Debug, Clone, Default)]
+pub struct SessionHealth {
+    pub frames: i64,
+    pub parsed: i64,
+    pub probing: i64,
+    pub relocks: i64,
+    pub counter_reads: i64,
+    pub events: Vec<serde_json::Value>,
+}
+
+impl SessionHealth {
+    /// Record a layout event (lock, switch, drift, geometry); capped so a
+    /// pathological day can't grow the row without bound.
+    pub fn event(&mut self, at_ms: i64, kind: &str, detail: impl Into<String>) {
+        if self.events.len() < 400 {
+            self.events
+                .push(serde_json::json!({"t": at_ms, "k": kind, "d": detail.into()}));
+        }
+    }
+}
+
+pub async fn update_session_health(pool: &SqlitePool, id: i64, h: &SessionHealth) -> Result<()> {
+    sqlx::query(
+        "UPDATE sessions SET frames = ?, parsed = ?, probing = ?, relocks = ?, counter_reads = ?, events = ? \
+         WHERE id = ?",
+    )
+    .bind(h.frames)
+    .bind(h.parsed)
+    .bind(h.probing)
+    .bind(h.relocks)
+    .bind(h.counter_reads)
+    .bind(serde_json::Value::Array(h.events.clone()).to_string())
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionSummary {
     pub id: i64,
@@ -185,11 +239,18 @@ pub struct SessionSummary {
     pub attempts: i64,
     pub finished: i64,
     pub best_ms: Option<i64>,
+    pub frames: Option<i64>,
+    pub parsed: Option<i64>,
+    pub probing: Option<i64>,
+    pub relocks: Option<i64>,
+    pub counter_reads: Option<i64>,
+    pub events: Option<serde_json::Value>,
 }
 
 pub async fn recent_sessions(pool: &SqlitePool, limit: i64) -> Result<Vec<SessionSummary>> {
     let rows = sqlx::query(
         "SELECT s.id, s.started_at_ms, s.ended_at_ms, s.source, s.label, s.tag, \
+         s.frames, s.parsed, s.probing, s.relocks, s.counter_reads, s.events, \
          COUNT(r.id) AS attempts, \
          COALESCE(SUM(CASE WHEN r.outcome = 'finished' THEN 1 ELSE 0 END), 0) AS finished, \
          MIN(CASE WHEN r.outcome = 'finished' THEN r.final_time_ms END) AS best_ms \
@@ -211,6 +272,14 @@ pub async fn recent_sessions(pool: &SqlitePool, limit: i64) -> Result<Vec<Sessio
             attempts: r.get("attempts"),
             finished: r.get("finished"),
             best_ms: r.get("best_ms"),
+            frames: r.get("frames"),
+            parsed: r.get("parsed"),
+            probing: r.get("probing"),
+            relocks: r.get("relocks"),
+            counter_reads: r.get("counter_reads"),
+            events: r
+                .get::<Option<String>, _>("events")
+                .and_then(|s| serde_json::from_str(&s).ok()),
         })
         .collect())
 }

@@ -25,7 +25,8 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
             .push(serde_json::to_value(&split)?);
     }
     let daily = db::daily_stats(&pool, &game, &category).await?;
-    let sessions = db::recent_sessions(&pool, 10).await?;
+    // Every session: the site needs tags and capture health per day.
+    let sessions = db::recent_sessions(&pool, 100_000).await?;
     let recent = db::recent_runs(&pool, 15).await?;
     let brief = db::runs_brief(&pool, &game, &category).await?;
     let acts = cfg.game.act_list();

@@ -292,8 +292,12 @@ async fn build_reply(ctx: &ChatCtx, cmd: &Cmd) -> Result<Option<String>> {
                 Some(s) => format!("last OCR {s:?}"),
                 None => "OCR illegible".to_string(),
             };
+            let health = match st.parse_pct {
+                Some(p) => format!(" | reading {p:.0}% of frames, layout {}", st.layout),
+                None => String::new(),
+            };
             Some(format!(
-                "Tracker: {} | {timer} | {ocr} | updated {age_s}s ago",
+                "Tracker: {} | {timer} | {ocr}{health} | updated {age_s}s ago",
                 st.phase,
             ))
         }

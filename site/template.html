@@ -234,8 +234,10 @@
       <div id="day-chips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
     </div>
     <p class="subnote" id="hb-sub"></p>
+    <p class="subnote" id="hb-health" style="margin-top:-6px" hidden></p>
     <div id="day-finishes" style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px"></div>
     <div id="day-deep" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 14px"></div>
+    <div id="day-deaths" style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin:0 0 14px"></div>
     <div class="legend">
       <span><span class="key" style="background:var(--series)"></span>Finished</span>
       <span><span class="key" style="background:var(--deemph);opacity:.55"></span>Reset (bar height = how far it got)</span>
@@ -285,6 +287,16 @@
       <div id="daily"></div>
     </section>
   </div>
+
+  <section class="card" style="margin-top:14px" id="hours-card">
+    <h2>When the grind happens</h2>
+    <p class="subnote" id="hours-sub">Attempts by hour of day across every tracked broadcast; finishes highlighted.</p>
+    <div class="legend">
+      <span><span class="key" style="background:var(--series)"></span>Finished</span>
+      <span><span class="key" style="background:var(--deemph);opacity:.55"></span>Reset</span>
+    </div>
+    <svg id="hours" width="100%" height="120" role="img" aria-label="Attempts by hour of day"></svg>
+  </section>
 
   <section class="card" style="margin-top:14px">
     <h2>Every finish</h2>
@@ -562,6 +574,16 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   for (const list of byDay.values()) list.sort((a, b) => a.started_at_ms - b.started_at_ms);
   const days = [...byDay.keys()].sort();
 
+  // The fastest finished run that has a full set of splits: the pace
+  // reference for every other run's detail.
+  const finishedWithSplits = all
+    .filter(r => r.outcome === 'finished' && ((D.splits_by_run || {})[String(r.id)] || []).length >= Math.max(1, (D.acts || []).length - 1))
+    .sort((a, b) => a.final_time_ms - b.final_time_ms);
+  function bestRefSplits(excludeId) {
+    const r = finishedWithSplits.find(x => x.id !== excludeId) || finishedWithSplits[0];
+    return r ? { run_id: r.id, final_time_ms: r.final_time_ms, splits: D.splits_by_run[String(r.id)] } : null;
+  }
+
   const detail = document.getElementById('run-detail');
   let openRun = null;
   function toggleDetail(r) {
@@ -573,8 +595,11 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
       : `<span class="pill res">${r.reset_reason || 'reset'}</span> <span class="tnum" style="font-size:16px"> † ${fmt(r.last_timer_ms)}</span>`;
     let rows = '';
     if (splits.length) {
-      rows = `<table style="margin-top:10px;max-width:520px">
-        <tr><th>Act</th><th class="num">Time</th><th class="num">Segment</th><th class="num">vs gold</th></tr>` +
+      // Pace against the fastest tracked finish that has splits.
+      const ref = bestRefSplits(r.id);
+      const refBy = ref ? Object.fromEntries(ref.splits.map(s => [s.act_index, s.cumulative_ms])) : {};
+      rows = `<table style="margin-top:10px;max-width:640px">
+        <tr><th>Act</th><th class="num">Time</th><th class="num">Segment</th><th class="num">vs gold</th>${ref ? `<th class="num" title="cumulative time against the fastest tracked finish (${fmt(ref.final_time_ms)})">vs best ${fmt(ref.final_time_ms)}</th>` : ''}</tr>` +
         splits.map(s => {
           const g = goldByAct[s.act_index];
           let vs = '—';
@@ -584,9 +609,21 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
               ? `<span style="color:var(--gold);font-weight:600">gold</span>`
               : `<span style="color:var(--behind)">+${d.toFixed(1)}</span>`;
           }
+          let pace = '';
+          if (ref) {
+            const rc = refBy[s.act_index];
+            if (rc == null || ref.run_id === r.id) pace = '<td class="num tnum">—</td>';
+            else {
+              const d = (s.cumulative_ms - rc) / 1000;
+              const w = Math.min(60, Math.abs(d) * 4);
+              pace = `<td class="num tnum" style="white-space:nowrap"><span style="display:inline-block;width:60px;text-align:${d < 0 ? 'right' : 'left'};vertical-align:middle">
+                  <span style="display:inline-block;height:8px;width:${w}px;background:${d < 0 ? 'var(--series)' : 'var(--behind)'};border-radius:2px"></span></span>
+                <span style="color:${d < 0 ? 'var(--series)' : 'var(--behind)'}">${d < 0 ? '−' : '+'}${Math.abs(d).toFixed(1)}</span></td>`;
+            }
+          }
           return `<tr><td>${s.act_name}</td><td class="num tnum">${fmt(s.cumulative_ms)}</td>
             <td class="num tnum">${s.segment_ms != null ? fmt(s.segment_ms) : '—'}</td>
-            <td class="num tnum">${vs}</td></tr>`;
+            <td class="num tnum">${vs}</td>${pace}</tr>`;
         }).join('') + '</table>';
     } else {
       rows = `<p class="subnote" style="margin:8px 0 0">No splits recorded${r.outcome === 'finished' ? '' : ' — died before the first act change was seen'}.</p>`;
@@ -602,12 +639,32 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     detail.scrollIntoView({ block: 'nearest' });
   }
 
+  // Per-day capture health from the sessions that ran that day.
+  function dayHealth(key) {
+    const ss = (D.sessions || []).filter(s => dayKey(s.started_at_ms) === key && s.frames);
+    if (!ss.length) return null;
+    const frames = ss.reduce((a, s) => a + (s.frames || 0), 0);
+    const parsed = ss.reduce((a, s) => a + (s.parsed || 0), 0);
+    const relocks = ss.reduce((a, s) => a + (s.relocks || 0), 0);
+    const events = ss.flatMap(s => Array.isArray(s.events) ? s.events : []).sort((a, b) => a.t - b.t);
+    const geo = events.filter(e => e.k === 'geometry').pop();
+    const pitch = geo ? (geo.d.match(/pitch (\d+)px/) || [])[1] : null;
+    const pct = frames ? Math.round(parsed * 100 / frames) : 0;
+    const dayRuns = byDay.get(key) || [];
+    const numbered = dayRuns.filter(r => r.ls_attempt != null).length;
+    const warn = pct < 60 || (dayRuns.length >= 5 && numbered < dayRuns.length / 2);
+    return { frames, parsed, pct, relocks, events, pitch, warn };
+  }
+
   const chips = document.getElementById('day-chips');
-  chips.innerHTML = days.map(d =>
-    `<button class="daychip" data-day="${d}" aria-pressed="false">${dshort(byDay.get(d)[0].started_at_ms)}</button>`).join('');
+  chips.innerHTML = days.map(d => {
+    const h = dayHealth(d);
+    const dot = h && h.warn ? `<span title="capture read only ${h.pct}% of frames" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--behind);margin-left:5px;vertical-align:middle"></span>` : '';
+    return `<button class="daychip" data-day="${d}" aria-pressed="false">${dshort(byDay.get(d)[0].started_at_ms)}${dot}</button>`;
+  }).join('');
   chips.addEventListener('click', e => {
-    const d = e.target.dataset && e.target.dataset.day;
-    if (d) renderDay(d);
+    const b = e.target.closest('button[data-day]');
+    if (b) renderDay(b.dataset.day);
   });
 
   const svg = document.getElementById('heartbeat');
@@ -622,9 +679,47 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     const bestOfDay = fin.length ? Math.min(...fin.map(depth)) : null;
     const deepest = Math.max(0, ...runs.filter(r => r.outcome !== 'finished').map(depth));
     const spanH = Math.max(0, runs[runs.length-1].ended_at_ms - runs[0].started_at_ms) / 3.6e6;
+    // How many resets each finish took: the day's grind in one clause.
+    const gaps = []; let since = 0;
+    for (const r of runs) { if (r.outcome === 'finished') { gaps.push(since); since = 0; } else since++; }
+    const grind = gaps.length
+      ? ` Finishes came after ${gaps.map(g => g.toLocaleString()).join(', ')} reset${gaps.length === 1 && gaps[0] === 1 ? '' : 's'}${since ? `; ${since} since the last one` : ''}.`
+      : (since ? ` ${since} resets without a finish.` : '');
     document.getElementById('hb-sub').textContent =
-      `${runs.length} attempts across ${spanH.toFixed(1)} hours — ${fin.length} finished` +
-      '.';
+      `${runs.length} attempts across ${spanH.toFixed(1)} hours — ${fin.length} finished.` + grind;
+
+    // Where the day's runs died, by act.
+    const actsAll = D.acts || [];
+    const actOf = ms => { let i = 0; while (i < actsAll.length - 1 && actsAll[i].end_ms != null && ms >= actsAll[i].end_ms) i++; return i; };
+    const died = runs.filter(r => r.outcome !== 'finished');
+    const perAct = actsAll.map((a, i) => died.filter(r => actOf(depth(r)) === i).length);
+    const maxAct = Math.max(1, ...perAct);
+    document.getElementById('day-deaths').innerHTML = died.length ? actsAll.map((a, i) =>
+      `<div title="${perAct[i]} reset${perAct[i] === 1 ? '' : 's'} in ${a.name}" style="display:flex;flex-direction:column;align-items:center;gap:4px;min-width:44px">
+        <span class="tnum" style="font-size:12px;color:var(--ink2)">${perAct[i] || ''}</span>
+        <div style="width:28px;height:${Math.max(2, Math.round(perAct[i] / maxAct * 40))}px;background:${perAct[i] ? 'var(--deemph)' : 'var(--hairline)'};opacity:${perAct[i] ? .7 : 1};border-radius:3px 3px 0 0"></div>
+        <span style="font-size:11px;color:var(--muted)">${a.name.replace('Act ', 'A')}</span>
+      </div>`).join('') + `<span class="striplabel" style="align-self:center;margin-left:6px">where the day's ${died.length} resets happened</span>` : '';
+
+    // Capture health: how well the bot actually read this day's feed.
+    const healthEl = document.getElementById('hb-health');
+    const dh = dayHealth(key);
+    if (dh) {
+      const numbered = runs.filter(r => r.ls_attempt != null).length;
+      const parts = [
+        `${dh.pct}% of frames read`,
+        `run numbers on ${numbered}/${runs.length} runs`,
+      ];
+      if (dh.relocks) parts.push(`${dh.relocks} layout ${dh.relocks === 1 ? 'event' : 'events'}`);
+      if (dh.pitch) parts.push(`rows ${dh.pitch}px`);
+      const evText = dh.events.slice(-12).map(e =>
+        `${new Date(e.t).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'})} ${e.k}: ${e.d}`).join('\n');
+      healthEl.innerHTML = `<span style="color:${dh.warn ? 'var(--behind)' : 'inherit'}">capture</span> · ${parts.join(' · ')}` +
+        (dh.events.length ? ` <span title="${evText.replace(/"/g, '&quot;')}" style="cursor:help;text-decoration:underline dotted">details</span>` : '');
+      healthEl.hidden = false;
+    } else {
+      healthEl.hidden = true;
+    }
 
     // every completed run of the day, at a glance
     document.getElementById('day-finishes').innerHTML = fin.map(r =>
@@ -726,6 +821,45 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   renderDay(days[days.length - 1]);
 })();
 
+/* attempts by hour of day */
+(function hours() {
+  const all = D.runs || [];
+  const svg = document.getElementById('hours');
+  if (!all.length) { document.getElementById('hours-card').hidden = true; return; }
+  const slots = 48; // half-hours
+  const tot = new Array(slots).fill(0), fin = new Array(slots).fill(0);
+  for (const r of all) {
+    const d = new Date(r.started_at_ms);
+    const s = d.getHours() * 2 + (d.getMinutes() >= 30 ? 1 : 0);
+    tot[s]++; if (r.outcome === 'finished') fin[s]++;
+  }
+  let lo = tot.findIndex(v => v > 0), hi = slots - 1; while (hi > lo && !tot[hi]) hi--;
+  lo = Math.max(0, lo - 1); hi = Math.min(slots - 1, hi + 1);
+  const n = hi - lo + 1;
+  const W = svg.clientWidth || 980, H = 120, L = 36, R = 10, T = 8, B = 22;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const bw = (W - L - R) / n, max = Math.max(1, ...tot.slice(lo, hi + 1));
+  const Y = v => (H - B) - v / max * (H - T - B);
+  let out = `<line x1="${L}" x2="${W-R}" y1="${H-B}" y2="${H-B}" stroke="var(--grid)"/>`;
+  for (let s = lo; s <= hi; s++) {
+    const x = L + (s - lo) * bw + 1, w = Math.max(1, bw - 2);
+    if (tot[s]) {
+      out += `<rect x="${x}" y="${Y(tot[s])}" width="${w}" height="${(H-B)-Y(tot[s])}" fill="var(--deemph)" opacity=".55" rx="1"><title>${String(Math.floor(s/2)).padStart(2,'0')}:${s%2?'30':'00'} — ${tot[s]} attempts, ${fin[s]} finished</title></rect>`;
+      if (fin[s]) out += `<rect x="${x}" y="${Y(fin[s])}" width="${w}" height="${(H-B)-Y(fin[s])}" fill="var(--series)" rx="1"/>`;
+    }
+    if (s % 2 === 0) out += `<text x="${x + bw - 1}" y="${H-7}" text-anchor="middle">${new Date(2000,0,1,s/2).toLocaleTimeString(undefined,{hour:'numeric'})}</text>`;
+  }
+  out += `<text x="${L-6}" y="${Y(max)+4}" text-anchor="end">${max}</text>`;
+  svg.innerHTML = out;
+  const finTot = fin.reduce((a, b) => a + b, 0);
+  const peak = tot.indexOf(Math.max(...tot));
+  const bestRate = fin.map((f, i) => tot[i] >= 20 ? f / tot[i] : -1);
+  const br = bestRate.indexOf(Math.max(...bestRate));
+  document.getElementById('hours-sub').textContent =
+    `${all.length.toLocaleString()} attempts, ${finTot} finished. Busiest half-hour starts ${String(Math.floor(peak/2)).padStart(2,'0')}:${peak%2?'30':'00'}` +
+    (br >= 0 ? `; best finish rate ${Math.round(bestRate[br]*100)}% around ${String(Math.floor(br/2)).padStart(2,'0')}:${br%2?'30':'00'}.` : '.');
+})();
+
 /* golds table */
 (function golds() {
   const g = D.golds;
@@ -743,18 +877,22 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
 /* sessions table */
 (function sessions() {
   // Hide zero-attempt micro-sessions (bot restarts, brief blips).
-  const rows = (D.sessions || []).filter(s => s.attempts > 0 || !s.ended_at_ms);
+  // Most recent broadcasts only; every session still feeds the day log's
+  // capture line and tags.
+  const rows = (D.sessions || []).filter(s => s.attempts > 0 || !s.ended_at_ms).slice(0, 14);
   const el = document.getElementById('sessions-table');
   if (!rows.length) { el.outerHTML = '<p class="subnote">No sessions yet.</p>'; return; }
-  el.innerHTML = `<tr><th>Start</th><th>Length</th><th class="num">Attempts</th><th class="num">Finished</th><th class="num">Best</th></tr>` +
+  el.innerHTML = `<tr><th>Start</th><th>Length</th><th class="num">Attempts</th><th class="num">Finished</th><th class="num">Best</th><th class="num">Read</th></tr>` +
     rows.map(s => {
       const dur = s.ended_at_ms
         ? (() => { const m = Math.max(0, s.ended_at_ms - s.started_at_ms) / 60000;
                    return `${Math.floor(m/60)}h${String(Math.round(m%60)).padStart(2,'0')}m`; })()
         : 'live';
+      const read = s.frames ? `${Math.round((s.parsed || 0) * 100 / s.frames)}%` : '—';
       return `<tr><td>${dshort(s.started_at_ms)} ${dtime(s.started_at_ms)}</td><td class="tnum">${dur}</td>
         <td class="num tnum">${s.attempts}</td><td class="num tnum">${s.finished}</td>
-        <td class="num tnum">${s.best_ms != null ? fmt(s.best_ms) : '—'}</td></tr>`;
+        <td class="num tnum">${s.best_ms != null ? fmt(s.best_ms) : '—'}</td>
+        <td class="num tnum" title="share of frames whose timer OCR parsed">${read}</td></tr>`;
     }).join('');
 })();
 </script>

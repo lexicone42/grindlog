@@ -32,12 +32,24 @@ total=$(ls backfill-db/vod-*.db 2>/dev/null | wc -l)
 complete=$(printf '%s\n' $ordered | grep -c . || true)
 echo "merging $complete complete VOD database(s); skipping $((total - complete)) in progress"
 
+# Capture-health columns exist only in databases written by newer binaries:
+# select each one if the source has it, else NULL.
+health_cols() { # path -> "expr AS frames, expr AS parsed, ..."
+  local have; have=$(sqlite3 "$1" "SELECT GROUP_CONCAT(name) FROM pragma_table_info('sessions')")
+  local out="" c
+  for c in frames parsed probing relocks counter_reads events; do
+    case ",$have," in *",$c,"*) out+="$c, ";; *) out+="NULL AS $c, ";; esac
+  done
+  echo "${out%, }"
+}
+
 import_db() { # path tag [session-filter-sql]
   local f="$1" tag="$2" filt="${3:-1}"
+  local hc; hc=$(health_cols "$f")
   sqlite3 "$OUT" "
     ATTACH '$f' AS s;
-    INSERT INTO sessions (started_at_ms, ended_at_ms, source, label, tag, src, src_id)
-      SELECT started_at_ms, ended_at_ms, source, label, tag, '$tag', id FROM s.sessions WHERE $filt ORDER BY id;
+    INSERT INTO sessions (started_at_ms, ended_at_ms, source, label, tag, frames, parsed, probing, relocks, counter_reads, events, src, src_id)
+      SELECT started_at_ms, ended_at_ms, source, label, tag, $hc, '$tag', id FROM s.sessions WHERE $filt ORDER BY id;
     INSERT INTO runs (game, category, attempt_number, started_at_ms, ended_at_ms, outcome, reset_reason,
                       final_time_ms, last_timer_ms, ls_attempt, src, src_id, src_session)
       SELECT game, category, attempt_number, started_at_ms, ended_at_ms, outcome, reset_reason,

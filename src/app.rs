@@ -39,6 +39,10 @@ pub struct Status {
     pub read_age_ms: Option<i64>,
     pub last_ocr: Option<String>,
     pub updated_unix_ms: i64,
+    /// Share of this session's frames whose timer OCR parsed.
+    pub parse_pct: Option<f64>,
+    /// Locked layout and pixel offset, or "probing".
+    pub layout: String,
 }
 
 struct CurrentRun {
@@ -229,6 +233,8 @@ struct PaneGeometry {
     splits: (i32, i32, u32, u32),
     /// Attempt counter, same convention.
     counter: Option<(i32, i32, u32, u32)>,
+    /// "Sum of Best" row's time, same convention.
+    sob: Option<(i32, i32, u32, u32)>,
     rows_read: usize,
     pitch: u32,
 }
@@ -250,6 +256,9 @@ impl PaneGeometry {
         if let Some(r) = self.counter.and_then(place) {
             regs.counter = Some(r);
         }
+        if let Some(r) = self.sob.and_then(place) {
+            regs.sob = Some(r);
+        }
     }
 }
 
@@ -262,9 +271,16 @@ fn time_shaped(text: &str) -> bool {
 /// time-shaped words grouped into rows, rightmost word per row (LiveSplit's
 /// cumulative column), median row pitch; the column block is anchored at the
 /// lowest row and spans `acts` rows. A bare integer above the block is the
-/// attempt counter. None when fewer than two rows read or the pitch is
-/// implausible.
-fn pane_geometry(words: &[ocr::Word], scale: u32, timer: R, acts: u32) -> Option<PaneGeometry> {
+/// attempt counter. Below the timer, a time whose row label (from the
+/// `letters` pass) says "Sum of Best" is the SoB row. None when fewer than
+/// two rows read or the pitch is implausible.
+fn pane_geometry(
+    words: &[ocr::Word],
+    letters: &[ocr::Word],
+    scale: u32,
+    timer: R,
+    acts: u32,
+) -> Option<PaneGeometry> {
     let sc = scale.max(1);
     let band_x0 = timer.0.saturating_sub(timer.2 / 2) as i64;
     let band_x1 = (timer.0 + timer.2 + timer.2 / 2) as i64;
@@ -345,7 +361,67 @@ fn pane_geometry(words: &[ocr::Word], scale: u32, timer: R, acts: u32) -> Option
             )
         })
         .map(|(dx, dy, w, h)| (dx as i32, dy as i32, w as u32, h as u32));
-    Some(PaneGeometry { splits, counter, rows_read: col.len(), pitch: pitch as u32 })
+
+    // Rows below the timer: label each time with the letter words on its
+    // line to the left; the one that reads "Sum of Best" is the SoB.
+    let labels: Vec<(R, &ocr::Word)> = letters
+        .iter()
+        .filter(|w| w.conf >= 30.0 && !time_shaped(&w.text))
+        .map(|w| ((w.x / sc, w.y / sc, w.w.max(1) / sc, w.h.max(1) / sc), w))
+        .collect();
+    // Times below the timer may come from either pass: a shape that parses
+    // as a time is trustworthy even at low confidence (a stray glyph merged
+    // into the word drags tesseract's score down).
+    let below_src: Vec<(R, &ocr::Word)> = words
+        .iter()
+        .chain(letters.iter())
+        .filter(|w| w.conf >= 10.0 && time_shaped(&w.text))
+        .map(|w| ((w.x / sc, w.y / sc, w.w.max(1) / sc, w.h.max(1) / sc), w))
+        .collect();
+    let below: Vec<(R, String)> = below_src
+        .iter()
+        .filter(|(r, _)| {
+            r.1 as i64 >= (timer.1 + timer.3) as i64 - 4
+                && (r.0 + r.2) as i64 > band_x0
+                && (r.0 as i64) < band_x1
+                && r.3 >= 10
+                && r.3 < timer.3
+        })
+        .map(|(r, _)| {
+            let label: String = labels
+                .iter()
+                .filter(|(b, _)| {
+                    (cy(*b) - cy(*r)).abs() <= (r.3 as i64).max(6)
+                        && (b.0 + b.2) as i64 <= r.0 as i64 + 4
+                        && b.0 as i64 + 700 >= r.0 as i64
+                })
+                .map(|(_, w)| w.text.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
+            (*r, label)
+        })
+        .collect();
+    if !letters.is_empty() {
+        debug!(
+            "pane rows below the timer: {:?}",
+            below.iter().map(|(r, l)| format!("y={} {l:?}", r.1)).collect::<Vec<_>>()
+        );
+    }
+    let sob = below
+        .iter()
+        .find(|(_, label)| {
+            (label.contains("best") && (label.contains("sum") || label.contains("segment")))
+                || label.contains("sob")
+        })
+        .map(|(r, _)| {
+            (
+                (r.0 as i64 - 14 - timer.0 as i64) as i32,
+                (r.1 as i64 - 8 - timer.1 as i64) as i32,
+                r.2 + 28,
+                r.3 + 16,
+            )
+        });
+    Some(PaneGeometry { splits, counter, sob, rows_read: col.len(), pitch: pitch as u32 })
 }
 
 /// Measure the pane geometry from the current union crop (see
@@ -356,12 +432,33 @@ async fn measure_pane(
     timer: R,
     acts: u32,
     pre: &PreprocessCfg,
+    want_sob: bool,
 ) -> Result<Option<PaneGeometry>> {
     const UP: u32 = 2;
     let pre2 = PreprocessCfg { upscale: UP, threshold: pre.threshold, invert: pre.invert };
     let proc = ocr::preprocess(union_img, &pre2);
-    let words = ocr_engine.recognize_words(&ocr::to_png(&proc)?, Some("0123456789:.")).await?;
-    Ok(pane_geometry(&words, UP, timer, acts))
+    let png = ocr::to_png(&proc)?;
+    let words = ocr_engine.recognize_words(&png, Some("0123456789:.")).await?;
+    // The letters pass only serves the SoB label; skip it when not wanted.
+    let letters = if want_sob {
+        ocr_engine.recognize_words(&png, None).await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    // NG_DUMP_PANE=1 saves what this pass saw (debugging a layout).
+    if std::env::var_os("NG_DUMP_PANE").is_some() {
+        let _ = std::fs::create_dir_all("calibration");
+        let _ = proc.save("calibration/pane.png");
+        debug!(
+            "pane words (2x px): {:?}",
+            words.iter().map(|w| format!("{}@{},{} {}x{}", w.text, w.x, w.y, w.w, w.h)).collect::<Vec<_>>()
+        );
+        debug!(
+            "pane letters (2x px): {:?}",
+            letters.iter().map(|w| format!("{}@{},{}", w.text, w.x, w.y)).collect::<Vec<_>>()
+        );
+    }
+    Ok(pane_geometry(&words, &letters, UP, timer, acts))
 }
 
 /// OCR the splits column as `rows` equal-height rows: one parsed time (or
@@ -553,6 +650,9 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut drift_warned = false;
     // Splits/counter rectangles measured from the frame at the last lock.
     let mut pane_geom: Option<PaneGeometry> = None;
+    // Capture health for the open session, flushed to its row every minute.
+    let mut health = db::SessionHealth::default();
+    let mut last_health_flush_t: i64 = i64::MIN / 2;
     let fine_drift = cfg.layout_search.drift_px > 0;
     let epoch = Instant::now();
     let mut current: Option<CurrentRun> = None;
@@ -681,10 +781,16 @@ pub async fn run(cfg: Config) -> Result<()> {
                     tracker = Tracker::new(cfg.detection.clone());
                 }
                 if let Some(id) = session_id.take() {
+                    if let Err(e) = db::update_session_health(&pool, id, &health).await {
+                        warn!("failed to update session health: {e:#}");
+                    }
                     if let Err(e) = db::close_session(&pool, id, wall_now).await {
                         warn!("failed to close session {id}: {e:#}");
                     } else {
-                        info!("session #{id} closed");
+                        info!(
+                            "session #{id} closed ({} of {} frames read, {} layout events)",
+                            health.parsed, health.frames, health.events.len()
+                        );
                     }
                 }
                 continue;
@@ -827,20 +933,28 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // configured rectangles are only the fallback.
                 if new_regs.splits.is_some() {
                     let acts = shared.acts.len().max(1) as u32;
-                    match measure_pane(&mut ocr_engine, &union_img, new_regs.timer, acts, &pre_splits).await {
+                    let want_sob = new_regs.sob.is_some();
+                    match measure_pane(&mut ocr_engine, &union_img, new_regs.timer, acts, &pre_splits, want_sob).await {
                         Ok(Some(g)) => {
                             g.apply(&mut new_regs);
                             let (ux, uy) = (new_regs.union.0, new_regs.union.1);
                             let s = new_regs.splits.unwrap();
+                            let at = |r: Option<R>, measured: bool, what: &str| match r {
+                                Some(c) if measured => format!(", {what} at {},{} {}x{}", ux + c.0, uy + c.1, c.2, c.3),
+                                _ => String::new(),
+                            };
                             info!(
-                                "pane geometry: {}/{acts} split rows read, pitch {}px; splits at {},{} {}x{} (canvas){}",
+                                "pane geometry: {}/{acts} split rows read, pitch {}px; splits at {},{} {}x{} (canvas){}{}",
                                 g.rows_read, g.pitch, ux + s.0, uy + s.1, s.2, s.3,
-                                match new_regs.counter {
-                                    Some(c) if g.counter.is_some() => format!(", counter at {},{} {}x{}", ux + c.0, uy + c.1, c.2, c.3),
-                                    _ => String::new(),
-                                }
+                                at(new_regs.counter, g.counter.is_some(), "counter"),
+                                at(new_regs.sob, g.sob.is_some(), "SoB"),
                             );
                             pane_geom = Some(g);
+                            health.event(
+                                time_base.map(|b| b + t).unwrap_or_else(util::unix_ms),
+                                "geometry",
+                                format!("{}/{acts} rows, pitch {}px", g.rows_read, g.pitch),
+                            );
                         }
                         Ok(None) => {
                             debug!("pane geometry not measurable here; using configured rectangles");
@@ -850,8 +964,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                     }
                 }
                 let name = &layout_names[new_layout];
+                let at = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
+                let geom_note = match pane_geom {
+                    Some(g) => format!("; pitch {}px, {} rows", g.pitch, g.rows_read),
+                    None => String::new(),
+                };
+                health.relocks += 1;
                 if new_layout != active_layout {
                     info!("layout switched to {name:?} (offset {:+},{:+})", new_off.0, new_off.1);
+                    health.event(at, "switch", format!("{name} {:+},{:+}{geom_note}", new_off.0, new_off.1));
                     // A layout change invalidates any splits baseline.
                     splits_tracker = None;
                 } else if new_off != active_off {
@@ -859,8 +980,10 @@ pub async fn run(cfg: Config) -> Result<()> {
                         "layout {name:?} re-anchored: LiveSplit moved {:+},{:+} px (was {:+},{:+})",
                         new_off.0, new_off.1, active_off.0, active_off.1
                     );
+                    health.event(at, "relock", format!("{name} {:+},{:+}{geom_note}", new_off.0, new_off.1));
                 } else {
                     info!("layout locked: {name:?} (offset {:+},{:+})", new_off.0, new_off.1);
+                    health.event(at, "lock", format!("{name} {:+},{:+}{geom_note}", new_off.0, new_off.1));
                 }
                 active_layout = new_layout;
                 active_off = new_off;
@@ -925,6 +1048,12 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 if let Some(g) = pane_geom {
                                     g.apply(&mut nr);
                                 }
+                                health.relocks += 1;
+                                health.event(
+                                    time_base.map(|b| b + t).unwrap_or_else(util::unix_ms),
+                                    "drift",
+                                    format!("{:+},{:+} px (now {:+},{:+})", d.0, d.1, new_off.0, new_off.1),
+                                );
                                 active_off = new_off;
                                 active_regs = nr;
                             }
@@ -946,6 +1075,13 @@ pub async fn run(cfg: Config) -> Result<()> {
         let reg = &active_regs;
         let obs = parsed.map(Obs::Time).unwrap_or(Obs::Illegible);
         last_t = t;
+        health.frames += 1;
+        if parsed.is_some() {
+            health.parsed += 1;
+        }
+        if !layout_locked {
+            health.probing += 1;
+        }
 
         if session_id.is_none() {
             let started = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
@@ -961,6 +1097,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                 Ok(id) => {
                     info!("session #{id} opened ({session_source}: {session_label})");
                     session_id = Some(id);
+                    health = db::SessionHealth::default();
+                    last_health_flush_t = t;
                 }
                 Err(e) => warn!("failed to open session: {e:#}"),
             }
@@ -1046,6 +1184,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                         };
                         if matches!(counter_stable, Some((_, n)) if n >= 2) {
                             info!("livesplit attempt counter: {v}");
+                            if cr.ls_attempt.is_none() {
+                                health.counter_reads += 1;
+                            }
                             cr.ls_attempt = Some(v);
                             last_ls_attempt = Some(v);
                         }
@@ -1097,9 +1238,23 @@ pub async fn run(cfg: Config) -> Result<()> {
             st.read_age_ms = tracker.accepted_age_ms(t);
             st.last_ocr = (!text.is_empty()).then_some(text);
             st.updated_unix_ms = util::unix_ms();
+            st.parse_pct = (health.frames > 0).then(|| health.parsed as f64 * 100.0 / health.frames as f64);
+            st.layout = if layout_locked {
+                format!("{} {:+},{:+}", layout_names[active_layout], active_off.0, active_off.1)
+            } else {
+                "probing".to_string()
+            };
         }
 
         let wall_now = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
+        if let Some(id) = session_id {
+            if t - last_health_flush_t >= 60_000 {
+                last_health_flush_t = t;
+                if let Err(e) = db::update_session_health(&pool, id, &health).await {
+                    warn!("failed to update session health: {e:#}");
+                }
+            }
+        }
         for ev in events {
             // Splits tracker follows the run lifecycle: fresh baseline per
             // run, dropped when the run ends.
@@ -1141,6 +1296,9 @@ pub async fn run(cfg: Config) -> Result<()> {
     // on a LIVE stream is simply not recorded (it's still happening).
     if let Some(id) = session_id.take() {
         let wall_now = time_base.map(|b| b + last_t).unwrap_or_else(util::unix_ms);
+        if let Err(e) = db::update_session_health(&pool, id, &health).await {
+            warn!("failed to update session health: {e:#}");
+        }
         if let Err(e) = db::close_session(&pool, id, wall_now).await {
             warn!("failed to close session {id}: {e:#}");
         }
@@ -1399,7 +1557,20 @@ mod tests {
         words.push(word(120, 410, 220, 70, "1:41.26"));
         words.push(word(900, 60, 60, 20, "12345"));
         words.push(word(270, 380, 20, 6, "0.1"));
-        let g = pane_geometry(&words, 1, timer, 6).expect("geometry");
+        // Below the timer: a "Previous Segment" row and the Sum of Best row.
+        words.push(word(300, 520, 60, 20, "0.3"));
+        words.push(word(290, 560, 70, 20, "11:31.7"));
+        let letters = vec![
+            word(60, 520, 90, 20, "Previous"),
+            word(160, 520, 90, 20, "Segment"),
+            word(60, 560, 50, 20, "Sum"),
+            word(115, 560, 30, 20, "of"),
+            word(150, 560, 50, 20, "Best"),
+            word(205, 560, 80, 20, "Segments"),
+        ];
+        let g = pane_geometry(&words, &letters, 1, timer, 6).expect("geometry");
+        assert_eq!(g.sob, Some((290 - 14 - 60, 560 - 8 - 400, 70 + 28, 20 + 16)));
+        assert_eq!(pane_geometry(&words, &[], 1, timer, 6).unwrap().sob, None);
         assert_eq!(g.pitch, 45);
         assert_eq!(g.rows_read, 6);
         // Column spans the cumulative words (260..330) with 8px margins.
@@ -1411,9 +1582,9 @@ mod tests {
         let c = g.counter.expect("counter");
         assert_eq!((c.0, c.1, c.2, c.3), (330 - 12 - 60, 60 - 6 - 400, 84, 32));
         // One row is not enough; an absurd pitch is rejected.
-        assert!(pane_geometry(&words[..2], 1, timer, 6).is_none());
+        assert!(pane_geometry(&words[..2], &[], 1, timer, 6).is_none());
         let far = vec![word(260, 100, 70, 20, "0:47.6"), word(260, 300, 70, 20, "2:44.2")];
-        assert!(pane_geometry(&far, 1, timer, 6).is_none());
+        assert!(pane_geometry(&far, &[], 1, timer, 6).is_none());
     }
 
     #[test]
