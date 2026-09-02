@@ -324,14 +324,23 @@ fn pane_geometry(
     // words that share the rightmost edge, so a row where only the segment
     // time was read cannot widen the column leftwards.
     let right_edge = col.iter().map(|r| r.0 + r.2).max()? as i64;
-    let left = col
-        .iter()
-        .filter(|r| right_edge - (r.0 + r.2) as i64 <= 12)
-        .map(|r| r.0)
-        .min()? as i64
-        - 8;
+    let aligned: Vec<R> = col.iter().filter(|r| right_edge - (r.0 + r.2) as i64 <= 12).copied().collect();
+    // Room for one more digit on the left than the widest value read: the
+    // rows read at lock time may all be sub-10-minute, and "11:35.1" is a
+    // digit wider than "8:38.6" — clipped, it reads as "1:35.1".
+    let digit_w = aligned.iter().map(|r| r.2 / 6).max().unwrap_or(12) as i64;
+    let left = aligned.iter().map(|r| r.0).min()? as i64 - 8 - digit_w;
     let right = right_edge + 8;
-    let bottom = cy(*col.last()?) + pitch / 2;
+    // The last act's row sits directly above the timer. If the lowest row
+    // that was read is more than a row and a half above the timer crop, the
+    // rows below it went unread (highlighted row, a blank comparison) and
+    // the block must be anchored lower — otherwise every act reads the row
+    // above it and the golds fill with impossible segments.
+    let mut last_cy = cy(*col.last()?);
+    while timer.1 as i64 - last_cy > pitch * 3 / 2 {
+        last_cy += pitch;
+    }
+    let bottom = last_cy + pitch / 2;
     let top = bottom - pitch * acts.max(1) as i64;
     let splits = (
         (left - timer.0 as i64) as i32,
@@ -1137,6 +1146,28 @@ pub async fn run(cfg: Config) -> Result<()> {
                         );
                         continue;
                     }
+                    // A split happened in the past: it can't be later than the
+                    // timer, and it must come after the previous act's split.
+                    let now = tracker.smoothed_now(t);
+                    if let Some(now) = now.filter(|&n| cum > n + 5_000) {
+                        warn!(
+                            "ignoring implausible split: {act_name} at {} while the timer reads {}",
+                            format_ms(cum),
+                            format_ms(now)
+                        );
+                        continue;
+                    }
+                    let prev_cum = current
+                        .as_ref()
+                        .and_then(|cr| cr.splits.iter().filter(|s| s.act_index < idx).map(|s| s.cumulative_ms).max());
+                    if let Some(p) = prev_cum.filter(|&p| cum <= p) {
+                        warn!(
+                            "ignoring implausible split: {act_name} at {} is not after the previous act ({})",
+                            format_ms(cum),
+                            format_ms(p)
+                        );
+                        continue;
+                    }
                     info!("split: {act_name} done at {}", format_ms(cum));
                     let rs = crate::splits::RecordedSplit {
                         act_index: idx,
@@ -1585,9 +1616,10 @@ mod tests {
         assert_eq!(pane_geometry(&words, &[], 1, timer, 6).unwrap().sob, None);
         assert_eq!(g.pitch, 45);
         assert_eq!(g.rows_read, 6);
-        // Column spans the cumulative words (260..330) with 8px margins.
-        assert_eq!(g.splits.0, 252 - 60);
-        assert_eq!(g.splits.2, 86);
+        // Column spans the cumulative words (260..330) with 8px margins plus
+        // one digit's width (70/6 = 11px) of headroom on the left.
+        assert_eq!(g.splits.0, 260 - 8 - 11 - 60);
+        assert_eq!(g.splits.2, 338 - (260 - 8 - 11));
         // Block: bottom = last row centre (335) + 22 = 357; top = 357 - 270 = 87.
         assert_eq!(g.splits.3, 270);
         assert_eq!(g.splits.1, 87 - 400);
