@@ -1125,6 +1125,18 @@ pub async fn run(cfg: Config) -> Result<()> {
                         .get(idx)
                         .map(|a| a.0.clone())
                         .unwrap_or_else(|| format!("Act {}", idx + 1));
+                    // A split far below the act's configured boundary is a
+                    // misread column (wrong row, wrong pane), not a segment
+                    // nobody has ever run; keep it out of the golds.
+                    let floor = shared.acts.get(idx).and_then(|a| a.1).map(|end| end * 6 / 10);
+                    if let Some(floor) = floor.filter(|&f| cum < f) {
+                        warn!(
+                            "ignoring implausible split: {act_name} at {} (below {} — misread column?)",
+                            format_ms(cum),
+                            format_ms(floor)
+                        );
+                        continue;
+                    }
                     info!("split: {act_name} done at {}", format_ms(cum));
                     let rs = crate::splits::RecordedSplit {
                         act_index: idx,

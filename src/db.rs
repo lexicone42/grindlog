@@ -611,6 +611,11 @@ pub async fn golds(pool: &SqlitePool, game: &str, category: &str) -> Result<Vec<
                   COUNT(*) OVER (PARTITION BY s.act_index) AS cnt \
            FROM splits s JOIN runs r ON r.id = s.run_id \
            WHERE r.game = ? AND r.category = ? AND s.segment_ms IS NOT NULL \
+             /* a segment under 60% of the act's average is a misread column, \
+                not a gold (nobody runs an act 40% faster than their norm) */ \
+             AND s.segment_ms >= 0.6 * (SELECT AVG(s2.segment_ms) FROM splits s2 JOIN runs r2 ON r2.id = s2.run_id \
+                                        WHERE s2.act_index = s.act_index AND r2.game = r.game \
+                                          AND r2.category = r.category AND s2.segment_ms IS NOT NULL) \
          ) WHERE rn = 1 ORDER BY act_index",
     )
     .bind(game)
