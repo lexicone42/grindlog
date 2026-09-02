@@ -10,7 +10,11 @@
 /// is more likely a mangled read of a longer time than a real value.
 pub fn parse_time(raw: &str) -> Option<i64> {
     let s: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
-    if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit() || c == ':' || c == '.') {
+    if s.is_empty()
+        || !s
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == ':' || c == '.')
+    {
         return None;
     }
     let (main, frac) = match s.split_once('.') {
@@ -106,9 +110,18 @@ mod tests {
 
     #[test]
     fn parses_full_hms_with_fraction() {
-        assert_eq!(parse_time("1:23:45.6"), Some(((3600 + 23 * 60 + 45) * 1000 + 600) as i64));
-        assert_eq!(parse_time("1:23:45.67"), Some((3600 + 23 * 60 + 45) * 1000 + 670));
-        assert_eq!(parse_time("1:23:45.678"), Some((3600 + 23 * 60 + 45) * 1000 + 678));
+        assert_eq!(
+            parse_time("1:23:45.6"),
+            Some(((3600 + 23 * 60 + 45) * 1000 + 600) as i64)
+        );
+        assert_eq!(
+            parse_time("1:23:45.67"),
+            Some((3600 + 23 * 60 + 45) * 1000 + 670)
+        );
+        assert_eq!(
+            parse_time("1:23:45.678"),
+            Some((3600 + 23 * 60 + 45) * 1000 + 678)
+        );
     }
 
     #[test]
@@ -129,15 +142,33 @@ mod tests {
 
     #[test]
     fn tolerates_ocr_whitespace() {
-        assert_eq!(parse_time(" 1:23:45.6 \n"), Some((3600 + 23 * 60 + 45) * 1000 + 600));
+        assert_eq!(
+            parse_time(" 1:23:45.6 \n"),
+            Some((3600 + 23 * 60 + 45) * 1000 + 600)
+        );
         assert_eq!(parse_time("1 : 07"), Some(67_000));
     }
 
     #[test]
     fn rejects_garbage() {
         for s in [
-            "", ":", "::", "1:", ":30", "1:60", "1:5", "12:345", "1.2.3", "1:23:45:12",
-            "abc", "1:2a", "12:34.", "12:34.5678", "1234:00", "99", "0:0",
+            "",
+            ":",
+            "::",
+            "1:",
+            ":30",
+            "1:60",
+            "1:5",
+            "12:345",
+            "1.2.3",
+            "1:23:45:12",
+            "abc",
+            "1:2a",
+            "12:34.",
+            "12:34.5678",
+            "1234:00",
+            "99",
+            "0:0",
         ] {
             assert_eq!(parse_time(s), None, "should reject {s:?}");
         }

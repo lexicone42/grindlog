@@ -165,14 +165,14 @@ testing without mod rights):
 | command | reply |
 |---|---|
 | `!pb` | the record (season best incl. pre-tracking baseline) + best tracked run |
-| `!lastrun` | last run's time, or where it reset |
+| `!lastrun` (`!last`) | last run's time, or where it reset |
 | `!today` | attempts / finished / resets / best today |
 | `!attempts` | total logged attempts |
-| `!deaths` | resets by act |
+| `!deaths` (`!resets`) | resets by act |
 | `!pace` | last completed act vs record pace, live during a run |
 | `!splits` | the current run's completed splits |
-| `!golds` | best segment per act + Sum of Best |
-| `!status` | tracker phase, timer estimate (marked "projected" when OCR is stale), last read, share of frames read this session, locked layout |
+| `!golds` (`!gold`) | best segment per act + Sum of Best |
+| `!status` (`!timer`, `!ngtimer`) | tracker phase, timer estimate (marked "projected" when OCR is stale), last read, share of frames read this session, locked layout |
 
 Mod commands (broadcaster, badge mods, or logins listed in `chat.mods`):
 

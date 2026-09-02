@@ -54,7 +54,10 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
             .game
             .references
             .iter()
-            .filter_map(|r| r.ms().map(|ms| serde_json::json!({"label": r.label, "ms": ms})))
+            .filter_map(|r| {
+                r.ms()
+                    .map(|ms| serde_json::json!({"label": r.label, "ms": ms}))
+            })
             .collect();
         let doc = serde_json::json!({
             "generated_at_ms": util::unix_ms(),
@@ -120,7 +123,10 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
     }
 
     if !deaths.is_empty() {
-        println!("\nWhere runs die ({} resets):", streaks.attempts - streaks.finished);
+        println!(
+            "\nWhere runs die ({} resets):",
+            streaks.attempts - streaks.finished
+        );
         let max = deaths.iter().map(|d| d.deaths).max().unwrap_or(1).max(1);
         for d in &deaths {
             let bar = "#".repeat(((d.deaths * 30) / max) as usize);

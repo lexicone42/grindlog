@@ -112,7 +112,9 @@ pub fn parse_command(text: &str) -> Option<Cmd> {
         }
         "!correct" => match it.next().and_then(parse_time) {
             Some(ms) => Some(Cmd::Correct { ms }),
-            None => Some(Cmd::Malformed("usage: !correct <time>, e.g. !correct 12:34.5")),
+            None => Some(Cmd::Malformed(
+                "usage: !correct <time>, e.g. !correct 12:34.5",
+            )),
         },
         "!void" => Some(Cmd::Void),
         _ => None,
@@ -126,7 +128,10 @@ pub struct ChatCtx {
     pub shared: Arc<Shared>,
 }
 
-pub async fn run_chat(ctx: ChatCtx, mut announce_rx: mpsc::UnboundedReceiver<String>) -> Result<()> {
+pub async fn run_chat(
+    ctx: ChatCtx,
+    mut announce_rx: mpsc::UnboundedReceiver<String>,
+) -> Result<()> {
     let token = ctx
         .cfg
         .oauth_token
@@ -393,7 +398,10 @@ async fn build_reply(ctx: &ChatCtx, cmd: &Cmd) -> Result<Option<String>> {
                 Some(format!("This run: {}", parts.join(", ")))
             }
         }
-        Cmd::SetGame { game: g, category: c } => {
+        Cmd::SetGame {
+            game: g,
+            category: c,
+        } => {
             db::set_setting(&ctx.pool, "game", g).await?;
             db::set_setting(&ctx.pool, "category", c).await?;
             *ctx.shared.game.write().await = (g.clone(), c.clone());
@@ -465,7 +473,9 @@ mod tests {
     fn parses_correct_times() {
         assert_eq!(
             parse_command("!correct 12:34.5"),
-            Some(Cmd::Correct { ms: (12 * 60 + 34) * 1000 + 500 })
+            Some(Cmd::Correct {
+                ms: (12 * 60 + 34) * 1000 + 500
+            })
         );
         assert!(matches!(
             parse_command("!correct nonsense"),
@@ -487,7 +497,10 @@ mod tests {
         assert_eq!(parse_prefixed("!NgDeaths", "ng"), Some(Cmd::Deaths));
         assert_eq!(
             parse_prefixed("!ngsetgame Ninja Gaiden Any%", "ng"),
-            Some(Cmd::SetGame { game: "Ninja Gaiden".into(), category: "Any%".into() })
+            Some(Cmd::SetGame {
+                game: "Ninja Gaiden".into(),
+                category: "Any%".into()
+            })
         );
         // bare commands belong to other bots when a prefix is set
         assert_eq!(parse_prefixed("!pb", "ng"), None);
@@ -502,7 +515,11 @@ mod tests {
     fn mod_gating() {
         assert!(Cmd::Void.mod_only());
         assert!(Cmd::Correct { ms: 0 }.mod_only());
-        assert!(Cmd::SetGame { game: "x".into(), category: "y".into() }.mod_only());
+        assert!(Cmd::SetGame {
+            game: "x".into(),
+            category: "y".into()
+        }
+        .mod_only());
         assert!(!Cmd::Pb.mod_only());
         assert!(!Cmd::Status.mod_only());
     }

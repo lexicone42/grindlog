@@ -57,13 +57,23 @@ impl CaptureCfg {
         let m = now.format("%H").to_string().parse::<u32>().unwrap_or(0) * 60
             + now.format("%M").to_string().parse::<u32>().unwrap_or(0);
         let lead = start.saturating_sub(10); // wake up a little early
-        let inside = if lead <= end { (lead..=end).contains(&m) } else { m >= lead || m <= end };
+        let inside = if lead <= end {
+            (lead..=end).contains(&m)
+        } else {
+            m >= lead || m <= end
+        };
         if inside {
             self.offline_poll_secs
         } else {
             // Don't sleep past the window start.
-            let mins_to_start = if m < lead { lead - m } else { 24 * 60 - m + lead };
-            self.quiet_poll_secs.min(u64::from(mins_to_start) * 60).max(60)
+            let mins_to_start = if m < lead {
+                lead - m
+            } else {
+                24 * 60 - m + lead
+            };
+            self.quiet_poll_secs
+                .min(u64::from(mins_to_start) * 60)
+                .max(60)
         }
     }
 }
@@ -121,13 +131,14 @@ pub async fn capture_loop(cfg: CaptureCfg, tx: mpsc::Sender<CaptureEvent>) -> Re
                 } else {
                     cfg.restart_delay_secs
                 };
-                info!(
-                    "capture session ended after {frames} frames; restarting in {delay}s"
-                );
+                info!("capture session ended after {frames} frames; restarting in {delay}s");
                 tokio::time::sleep(Duration::from_secs(delay)).await;
             }
             Err(e) => {
-                warn!("capture error: {e:#}; retrying in {}s", cfg.restart_delay_secs);
+                warn!(
+                    "capture error: {e:#}; retrying in {}s",
+                    cfg.restart_delay_secs
+                );
                 tokio::time::sleep(Duration::from_secs(cfg.restart_delay_secs)).await;
             }
         }
@@ -170,18 +181,16 @@ async fn run_once(
                 }
             }
         }
-        SourceKind::Vod => {
-            match twitch_hls::resolve_vod(http, &cfg.vod_id, &cfg.quality).await? {
-                Resolved::Offline => return Ok(Session::Offline),
-                Resolved::Live { variant_url, name } => {
-                    info!("vod {} resolved ({name}); starting ffmpeg", cfg.vod_id);
-                    ff.args(["-rw_timeout", "15000000"]);
-                    seek_args(&mut ff, cfg.start_secs);
-                    ff.args(["-i", &variant_url]);
-                    ff.stdin(Stdio::null());
-                }
+        SourceKind::Vod => match twitch_hls::resolve_vod(http, &cfg.vod_id, &cfg.quality).await? {
+            Resolved::Offline => return Ok(Session::Offline),
+            Resolved::Live { variant_url, name } => {
+                info!("vod {} resolved ({name}); starting ffmpeg", cfg.vod_id);
+                ff.args(["-rw_timeout", "15000000"]);
+                seek_args(&mut ff, cfg.start_secs);
+                ff.args(["-i", &variant_url]);
+                ff.stdin(Stdio::null());
             }
-        }
+        },
         SourceKind::File => {
             info!("reading {}", cfg.input);
             seek_args(&mut ff, cfg.start_secs);

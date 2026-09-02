@@ -22,7 +22,10 @@ pub async fn run(cfg: Config, full_frame: bool) -> Result<()> {
     let mut cap = app::capture_cfg(&cfg);
     if full_frame {
         let s = &cfg.stream;
-        cap.filter = format!("fps={},scale={}:{}:flags=bicubic", s.fps, s.canvas_w, s.canvas_h);
+        cap.filter = format!(
+            "fps={},scale={}:{}:flags=bicubic",
+            s.fps, s.canvas_w, s.canvas_h
+        );
         cap.pix_fmt = "rgb24".into();
         cap.frame_len = (s.canvas_w * s.canvas_h * 3) as usize;
     }

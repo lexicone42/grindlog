@@ -97,11 +97,19 @@ struct Found {
 }
 
 fn bbox(w: &Word, scale: u32) -> R {
-    (w.x / scale, w.y / scale, w.w.max(1) / scale, w.h.max(1) / scale)
+    (
+        w.x / scale,
+        w.y / scale,
+        w.w.max(1) / scale,
+        w.h.max(1) / scale,
+    )
 }
 
 fn is_time(text: &str) -> bool {
-    let t = text.trim().trim_end_matches('.').trim_start_matches(['-', '+', '−']);
+    let t = text
+        .trim()
+        .trim_end_matches('.')
+        .trim_start_matches(['-', '+', '−']);
     t.contains(['.', ':']) && parse_time(t).is_some()
 }
 
@@ -123,7 +131,12 @@ fn grow(r: R, dx: i64, dy: i64, cw: u32, ch: u32) -> R {
     let y = (r.1 as i64 - dy).max(0);
     let right = (r.0 as i64 + r.2 as i64 + dx).min(cw as i64);
     let bottom = (r.1 as i64 + r.3 as i64 + dy).min(ch as i64);
-    (x as u32, y as u32, (right - x).max(1) as u32, (bottom - y).max(1) as u32)
+    (
+        x as u32,
+        y as u32,
+        (right - x).max(1) as u32,
+        (bottom - y).max(1) as u32,
+    )
 }
 
 fn union_rects(rs: &[R]) -> Option<R> {
@@ -137,7 +150,11 @@ fn union_rects(rs: &[R]) -> Option<R> {
 async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Option<Found>> {
     const UP: u32 = 2;
     let (cw, ch) = gray.dimensions();
-    let pre = PreprocessCfg { upscale: UP, threshold: cfg.timer.threshold, invert: cfg.timer.invert };
+    let pre = PreprocessCfg {
+        upscale: UP,
+        threshold: cfg.timer.threshold,
+        invert: cfg.timer.invert,
+    };
     let proc = ocr::preprocess(gray, &pre);
     let png = ocr::to_png(&proc)?;
     let digits = engine.recognize_words(&png, Some("0123456789:.-+")).await?;
@@ -175,12 +192,18 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
 
     // Split rows: small times above the timer, grouped by line, rightmost
     // word per line = the cumulative-time column.
-    let mut above: Vec<R> = small.iter().filter(|r| r.1 + r.3 <= timer_ink.1).copied().collect();
+    let mut above: Vec<R> = small
+        .iter()
+        .filter(|r| r.1 + r.3 <= timer_ink.1)
+        .copied()
+        .collect();
     above.sort_by_key(|r| center_y(*r));
     let mut rows: Vec<Vec<R>> = Vec::new();
     for r in above {
         match rows.last_mut() {
-            Some(row) if (center_y(row[0]) - center_y(r)).abs() <= (r.3 as i64 / 2).max(4) => row.push(r),
+            Some(row) if (center_y(row[0]) - center_y(r)).abs() <= (r.3 as i64 / 2).max(4) => {
+                row.push(r)
+            }
             _ => rows.push(vec![r]),
         }
     }
@@ -189,7 +212,10 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
         .map(|row| *row.iter().max_by_key(|r| r.0 + r.2).unwrap())
         .collect();
     let row_pitch = if split_rows.len() >= 2 {
-        let mut gaps: Vec<i64> = split_rows.windows(2).map(|w| center_y(w[1]) - center_y(w[0])).collect();
+        let mut gaps: Vec<i64> = split_rows
+            .windows(2)
+            .map(|w| center_y(w[1]) - center_y(w[0]))
+            .collect();
         gaps.sort_unstable();
         Some(gaps[gaps.len() / 2] as u32)
     } else {
@@ -213,7 +239,11 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
 
     // Rows below the timer, labelled with a letters pass so the sum-of-best
     // row can be told from "previous segment" / "PB".
-    let below_times: Vec<R> = small.iter().filter(|r| r.1 >= timer_ink.1 + timer_ink.3).copied().collect();
+    let below_times: Vec<R> = small
+        .iter()
+        .filter(|r| r.1 >= timer_ink.1 + timer_ink.3)
+        .copied()
+        .collect();
     let mut below: Vec<(R, String)> = Vec::new();
     if !below_times.is_empty() {
         let letters = engine.recognize_words(&png, None).await.unwrap_or_default();
@@ -222,12 +252,19 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
                 .iter()
                 .filter(|w| w.conf >= 30.0 && !is_time(&w.text))
                 .map(|w| (bbox(w, UP), w))
-                .filter(|(b, _)| (center_y(*b) - center_y(r)).abs() <= (r.3 as i64).max(6) && b.0 + b.2 <= r.0 + 4)
+                .filter(|(b, _)| {
+                    (center_y(*b) - center_y(r)).abs() <= (r.3 as i64).max(6)
+                        && b.0 + b.2 <= r.0 + 4
+                })
                 .filter(|(b, _)| b.0 + 600 >= r.0)
                 .map(|(b, w)| (b.0, w.text.clone()))
                 .collect();
             label.sort_by_key(|(x, _)| *x);
-            let label: String = label.into_iter().map(|(_, t)| t).collect::<Vec<_>>().join(" ");
+            let label: String = label
+                .into_iter()
+                .map(|(_, t)| t)
+                .collect::<Vec<_>>()
+                .join(" ");
             below.push((r, label));
         }
         below.sort_by_key(|(r, _)| r.1);
@@ -254,7 +291,10 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
 }
 
 fn fmt_rect(r: R) -> String {
-    format!("{{ crop_x = {}, crop_y = {}, crop_w = {}, crop_h = {} }}", r.0, r.1, r.2, r.3)
+    format!(
+        "{{ crop_x = {}, crop_y = {}, crop_w = {}, crop_h = {} }}",
+        r.0, r.1, r.2, r.3
+    )
 }
 
 fn report(f: &Found, gray: &GrayImage, cfg: &Config) -> Result<()> {
@@ -262,7 +302,11 @@ fn report(f: &Found, gray: &GrayImage, cfg: &Config) -> Result<()> {
     println!("LiveSplit pane found ({cw}x{ch} canvas coordinates)");
     println!(
         "  timer digits at x={} y={} w={} h={}  -> crop {}",
-        f.timer_ink.0, f.timer_ink.1, f.timer_ink.2, f.timer_ink.3, fmt_rect(f.timer)
+        f.timer_ink.0,
+        f.timer_ink.1,
+        f.timer_ink.2,
+        f.timer_ink.3,
+        fmt_rect(f.timer)
     );
     match (&f.splits, f.row_pitch) {
         (Some(s), pitch) => println!(
