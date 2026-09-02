@@ -1,7 +1,7 @@
 //! The main run mode: capture -> preprocess -> OCR -> state machine -> DB/chat.
 
 use anyhow::{Context, Result};
-use image::GrayImage;
+use image::{GrayImage, Luma, RgbImage};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
@@ -152,6 +152,25 @@ pub fn regions(cfg: &Config) -> Vec<Regions> {
 /// Names of the configured layouts, index-aligned with `regions()`.
 pub fn layout_names(cfg: &Config) -> Vec<String> {
     layout_rects(cfg).into_iter().map(|l| l.name).collect()
+}
+
+/// Luma grayscale, as ffmpeg's "gray" output would be: LiveSplit's blue
+/// highlight row stays dark, so the splits column and the pane analysis
+/// read white-on-blue text.
+fn to_luma(rgb: &RgbImage) -> GrayImage {
+    image::imageops::grayscale(rgb)
+}
+
+/// Brightest-channel grayscale for the timer, counter and Sum of Best: a red
+/// "behind pace" timer is pure red, which luma turns into a dim ~76/255 that
+/// erodes glyphs (a 7 reading as 1) or drops under the threshold entirely.
+/// The brightest channel keeps every LiveSplit timer colour at full strength.
+fn to_bright(rgb: &RgbImage) -> GrayImage {
+    let (w, h) = rgb.dimensions();
+    GrayImage::from_fn(w, h, |x, y| {
+        let p = rgb.get_pixel(x, y).0;
+        Luma([p[0].max(p[1]).max(p[2])])
+    })
 }
 
 /// Every rectangle of a layout moved by a pixel offset (the LiveSplit window
@@ -587,12 +606,14 @@ pub fn capture_cfg(cfg: &Config) -> capture::CaptureCfg {
             "fps={},scale={}:{}:flags=bicubic,crop={uw}:{uh}:{ux}:{uy}",
             s.fps, s.canvas_w, s.canvas_h
         ),
-        pix_fmt: "gray".into(),
+        // Colour is needed: the timer is converted with the brightest channel
+        // (red timers stay bright), the splits column with luma.
+        pix_fmt: "rgb24".into(),
         title_filter: s.title_filter.clone(),
         vod_id: s.vod_id.clone(),
         input: s.input.clone(),
         start_secs: s.start_secs,
-        frame_len: (uw * uh) as usize,
+        frame_len: (uw * uh * 3) as usize,
         frame_timeout_secs: s.frame_timeout_secs,
         offline_poll_secs: s.offline_poll_secs,
         restart_delay_secs: s.restart_delay_secs,
@@ -713,9 +734,21 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut probe_rr: usize = 0;
     let mut dark_frames: u32 = 0;
     let dark_frames_search = cfg.layout_search.dark_frames_search.max(1);
-    // Fine drift while locked: where the digits sit inside each layout's
-    // timer crop (learned on first lock), and the recent shifts seen from it.
-    let mut anchors = vec![None::<(i32, i32)>; regs.len()];
+    // Fine drift while locked: where the digits SHOULD sit inside each
+    // layout's timer crop — right edge at ~94% of the width, vertically
+    // centred, which is how every calibrated crop places them. Learning the
+    // anchor from the first lock instead would enshrine a bad lock: digits
+    // clipped at the crop edge would be "corrected" back to the edge, the
+    // timer would keep going dark, and the layout probe would thrash.
+    let anchors: Vec<Option<(i32, i32)>> = regs
+        .iter()
+        .map(|r| {
+            Some((
+                (r.timer.2 as f32 * 0.94).round() as i32,
+                (r.timer.3 as f32 * 0.47).round() as i32,
+            ))
+        })
+        .collect();
     let mut drift_hits: Vec<(i32, i32)> = Vec::new();
     let mut drift_warned = false;
     // Splits/counter rectangles measured from the frame at the last lock.
@@ -875,10 +908,14 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
         };
 
-        let Some(union_img) = GrayImage::from_raw(uw, uh, raw) else {
+        let Some(union_rgb) = RgbImage::from_raw(uw, uh, raw) else {
             warn!("dropped a frame with unexpected size");
             continue;
         };
+        // Two grayscales of the same crop: luma for the splits column and
+        // pane analysis, brightest channel for the timer/counter/SoB.
+        let union_img = to_luma(&union_rgb);
+        let union_bright = to_bright(&union_rgb);
         let t = if recorded {
             frame_idx * frame_interval_ms
         } else {
@@ -896,7 +933,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         let mut ink: Option<(i32, i32)> = None;
         if layout_locked {
             let r = active_regs.timer;
-            let g = image::imageops::crop_imm(&union_img, r.0, r.1, r.2, r.3).to_image();
+            let g = image::imageops::crop_imm(&union_bright, r.0, r.1, r.2, r.3).to_image();
             let proc = ocr::preprocess(&g, &pre);
             match ocr_engine.recognize_boxed(&ocr::to_png(&proc)?).await {
                 Ok((t, bbox)) => {
@@ -953,7 +990,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             for ci in to_read {
                 let c = &mut cands[ci];
                 let rd = match ocr_engine
-                    .recognize(&read_timer(&union_img, c.regs.timer)?)
+                    .recognize(&read_timer(&union_bright, c.regs.timer)?)
                     .await
                 {
                     Ok(t) => t.trim().to_string(),
@@ -1150,7 +1187,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         // splits/counter crops, so re-anchor on a consistent shift of the ink.
         if let (true, Some(m)) = (layout_locked, ink) {
             match anchors[active_layout] {
-                None => anchors[active_layout] = Some(m),
+                None => {}
                 Some(a) => {
                     let d = (m.0 - a.0, m.1 - a.1);
                     let near_last = drift_hits
@@ -1349,7 +1386,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             // runs are the ones that used to slip through without one.
             if cr.ls_attempt.is_none() && t - last_counter_read_t >= 2000 {
                 last_counter_read_t = t;
-                let cimg = image::imageops::crop_imm(&union_img, cx, cy, cw2, ch2).to_image();
+                let cimg = image::imageops::crop_imm(&union_bright, cx, cy, cw2, ch2).to_image();
                 let cp = ocr::preprocess(&cimg, &pre_counter);
                 if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&cp)?).await {
                     if let Some(v) = crate::timeparse::parse_counter(txt.trim()).filter(|&v| {
@@ -1379,7 +1416,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         if let Some((bx, by, bw2, bh2)) = reg.sob {
             if t - last_sob_read_t >= 60_000 {
                 last_sob_read_t = t;
-                let bimg = image::imageops::crop_imm(&union_img, bx, by, bw2, bh2).to_image();
+                let bimg = image::imageops::crop_imm(&union_bright, bx, by, bw2, bh2).to_image();
                 let bp = ocr::preprocess(&bimg, &pre_counter);
                 if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&bp)?).await {
                     // Plausibility: a Sum of Best can never exceed the record
