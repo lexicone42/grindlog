@@ -62,6 +62,17 @@ cp config.example.toml config.toml   # edit: channel, crop rectangle
    digits on white), and prints live OCR readings. Tune `threshold` /
    `invert` / the crop until readings parse cleanly.
 
+### Finding the LiveSplit pane automatically
+
+`ngtwitchtimer locate` OCRs a whole frame (from the configured source, or
+`--image some-frame.png`) and picks out the time-shaped words: the big timer,
+the split rows above it, the attempt counter, the "Sum of Best" row. It
+prints a ready-to-paste `[[layouts]]` entry, says how far the pane sits from
+each configured layout (`offset +18,+12 px`, `digits CLIPPED`), and draws the
+boxes into `calibration/locate.png`. Use it to add a new OBS scene as a
+layout, or to check whether the streamer moved the window. With
+`source = "vod"`, `stream.start_secs = 7200` seeks two hours in.
+
 ### Testing against a VOD or file first (recommended)
 
 Detection can be tested reproducibly before pointing at a live stream:

@@ -115,9 +115,10 @@ pub fn regions(cfg: &Config) -> Vec<Regions> {
                 .chain(l.sob)
         })
         .collect();
-    // Pad the union by the drift-search margin (clamped to the canvas) so
-    // offset probes stay inside the decoded frame.
-    let pad = cfg.layout_search.drift_px;
+    // Pad the union by the drift-search margin plus one grid step (clamped to
+    // the canvas) so offset probes, and the fine correction that follows a
+    // grid lock, stay inside the decoded frame.
+    let pad = cfg.layout_search.drift_px + cfg.layout_search.step_px;
     let (cw, chh) = (cfg.stream.canvas_w, cfg.stream.canvas_h);
     let ux = rects.iter().map(|r| r.0).min().unwrap().saturating_sub(pad);
     let uy = rects.iter().map(|r| r.1).min().unwrap().saturating_sub(pad);
@@ -181,33 +182,40 @@ fn drift_offsets(cfg: &crate::config::LayoutSearchCfg) -> Vec<(i32, i32)> {
 }
 
 /// Where the digits sit inside a processed (ink = black) timer crop: the
-/// ink's right edge and vertical centre in un-upscaled crop pixels. LiveSplit
-/// right-aligns the timer, so both stay put while the window does; a shift
-/// means the window moved. Rows/columns with only a few ink pixels are noise.
-fn ink_anchor(proc: &GrayImage, upscale: u32) -> Option<(i32, i32)> {
+/// ink's right edge and vertical centre, in un-upscaled crop pixels.
+/// LiveSplit right-aligns the timer, so both stay put while the window does;
+/// a consistent shift means the window moved.
+///
+/// A crop often reaches the pane's border to the right of the digits — ink
+/// spanning the full crop height, which tesseract folds into the word box
+/// too. Starting from where the text begins (`text_left`, from tesseract),
+/// the first full-height column is that border, and only columns left of it
+/// count.
+fn ink_anchor(proc: &GrayImage, text_left: Option<u32>, upscale: u32) -> Option<(i32, i32)> {
     let up = upscale.max(1);
     let (w, h) = proc.dimensions();
-    let min = 3 * up;
     let mut cols = vec![0u32; w as usize];
     for (x, _, p) in proc.enumerate_pixels() {
         if p.0[0] == 0 {
             cols[x as usize] += 1;
         }
     }
-    // A pane border or the game area's edge inside the crop is ink spanning
-    // (nearly) the full crop height; digits never do. Drop such columns.
-    let digit_col = |c: u32| c >= min && c <= h * 9 / 10;
+    let start = text_left.unwrap_or(0).min(w) as usize;
+    let border = cols[start..].iter().position(|&c| c >= h * 95 / 100).map(|i| start + i);
+    let end = border.map_or(w as usize, |b| b.saturating_sub(3 * up as usize));
+    let min = 3 * up;
+    let digit_col = |x: usize| x >= start && x < end && cols[x] >= min && cols[x] <= h * 9 / 10;
+    let right = (start..end).rev().find(|&x| digit_col(x))? as f32;
     let mut rows = vec![0u32; h as usize];
     for (x, y, p) in proc.enumerate_pixels() {
-        if p.0[0] == 0 && digit_col(cols[x as usize]) {
+        if p.0[0] == 0 && digit_col(x as usize) {
             rows[y as usize] += 1;
         }
     }
-    let right = cols.iter().rposition(|&c| digit_col(c))? as f32;
     let top = rows.iter().position(|&c| c >= min)? as f32;
     let bottom = rows.iter().rposition(|&c| c >= min)? as f32;
     let up = up as f32;
-    Some(((right / up).round() as i32, ((top + bottom) / 2.0 / up).round() as i32))
+    Some((((right + 1.0) / up).round() as i32, ((top + bottom) / 2.0 / up).round() as i32))
 }
 
 /// One position where a timer might be: a layout plus a pixel offset.
@@ -359,6 +367,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut active_regs: Regions = regs[0].clone();
     let mut active_off: (i32, i32) = (0, 0);
     let mut layout_locked = cands.len() == 1;
+    // Until the first lock no layout is favoured; afterwards the active one is.
+    let mut ever_locked = layout_locked;
     let mut probe_rr: usize = 0;
     let mut dark_frames: u32 = 0;
     let dark_frames_search = cfg.layout_search.dark_frames_search.max(1);
@@ -366,6 +376,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     // timer crop (learned on first lock), and the recent shifts seen from it.
     let mut anchors = vec![None::<(i32, i32)>; regs.len()];
     let mut drift_hits: Vec<(i32, i32)> = Vec::new();
+    let mut drift_warned = false;
     let fine_drift = cfg.layout_search.drift_px > 0;
     let epoch = Instant::now();
     let mut current: Option<CurrentRun> = None;
@@ -527,12 +538,18 @@ pub async fn run(cfg: Config) -> Result<()> {
             let r = active_regs.timer;
             let g = image::imageops::crop_imm(&union_img, r.0, r.1, r.2, r.3).to_image();
             let proc = ocr::preprocess(&g, &pre);
-            match ocr_engine.recognize(&ocr::to_png(&proc)?).await {
-                Ok(t) => text = t.trim().to_string(),
+            match ocr_engine.recognize_boxed(&ocr::to_png(&proc)?).await {
+                Ok((t, bbox)) => {
+                    text = t.trim().to_string();
+                    // A trailing "1" is a narrow glyph: its ink ends ~9px
+                    // short of the other digits' right edge, and at 2 fps the
+                    // hundredths digit repeats for many frames, which would
+                    // read as a consistent shift. Measure on other digits.
+                    if fine_drift && parse_time(&text).is_some() && !text.ends_with('1') {
+                        ink = ink_anchor(&proc, bbox.map(|b| b.0), pre.upscale);
+                    }
+                }
                 Err(e) => warn!("ocr failed: {e:#}"),
-            }
-            if fine_drift && parse_time(&text).is_some() {
-                ink = ink_anchor(&proc, pre.upscale);
             }
         } else {
             let mut to_read: Vec<usize> = Vec::new();
@@ -544,20 +561,27 @@ pub async fn run(cfg: Config) -> Result<()> {
                     to_read.push(ci);
                 }
             }
-            // One offset candidate per layout takes its turn this frame.
+            // Offset candidates take turns: one per layout per frame, two for
+            // the layout that was active — a nudge of the same scene is far
+            // likelier than a scene switch, and layouts whose timers overlap
+            // would otherwise race to explain the same digits.
             let n_off = offsets.len().max(1);
             let turn = probe_rr % n_off;
             probe_rr = probe_rr.wrapping_add(1);
             for li in 0..regs.len() {
-                let pick = cands
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| c.layout == li && c.off != (0, 0))
-                    .nth(turn)
-                    .map(|(ci, _)| ci);
-                if let Some(ci) = pick {
-                    if !to_read.contains(&ci) {
-                        to_read.push(ci);
+                let favoured = ever_locked && li == active_layout;
+                let turns = if favoured { [Some(turn), Some((turn + n_off / 2) % n_off)] } else { [Some(turn), None] };
+                for tn in turns.into_iter().flatten() {
+                    let pick = cands
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| c.layout == li && c.off != (0, 0))
+                        .nth(tn)
+                        .map(|(ci, _)| ci);
+                    if let Some(ci) = pick {
+                        if !to_read.contains(&ci) {
+                            to_read.push(ci);
+                        }
                     }
                 }
             }
@@ -569,7 +593,11 @@ pub async fn run(cfg: Config) -> Result<()> {
                     Err(_) => String::new(),
                 };
                 let v = parse_time(&rd);
-                if c.observe(v, t) && c.streak >= 5 && winner.is_none() {
+                // Switching scenes needs a longer streak than re-finding the
+                // same scene, so an overlapping rectangle of another layout
+                // can't win merely by being tried first.
+                let need = if !ever_locked || c.layout == active_layout { 5 } else { 10 };
+                if c.observe(v, t) && c.streak >= need && winner.is_none() {
                     winner = Some((ci, rd.clone()));
                 }
                 if c.layout == active_layout && c.off == active_off {
@@ -596,7 +624,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                 active_off = c.off;
                 active_regs = c.regs.clone();
                 layout_locked = true;
+                ever_locked = true;
                 drift_hits.clear();
+                drift_warned = false;
                 for c in cands.iter_mut() {
                     c.streak = 0;
                     c.last = None;
@@ -653,10 +683,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 active_off = new_off;
                                 active_regs = nr;
                             }
-                            None => warn!(
-                                "LiveSplit moved {:+},{:+} px, beyond layout_search.drift_px; crops stay put",
-                                d.0, d.1
-                            ),
+                            None => {
+                                if !drift_warned {
+                                    warn!(
+                                        "LiveSplit moved {:+},{:+} px, beyond layout_search.drift_px; crops stay put",
+                                        d.0, d.1
+                                    );
+                                    drift_warned = true;
+                                }
+                            }
                         }
                         drift_hits.clear();
                     }
@@ -1112,6 +1147,33 @@ mod tests {
         assert!(shifted(&r, (0, 24)).is_none());
         // The SoB row starts at x=10: -12 left leaves the union.
         assert!(shifted(&r, (-12, 0)).is_none());
+    }
+
+    #[test]
+    fn ink_anchor_ignores_pane_border() {
+        // 4x-upscaled 100x25 crop: digits occupy x 40..120 (crop px 10..30),
+        // y 20..60 (crop px 5..15); a full-height border at x 140..146.
+        let (w, h) = (400u32, 100u32);
+        let mut img = GrayImage::from_pixel(w, h, image::Luma([255]));
+        for y in 20..60 {
+            for x in 40..120 {
+                img.put_pixel(x, y, image::Luma([0]));
+            }
+        }
+        for y in 0..h {
+            for x in 140..146 {
+                img.put_pixel(x, y, image::Luma([0]));
+            }
+        }
+        // Blur next to the border must not count as digits either.
+        for y in 0..h {
+            img.put_pixel(138, y, image::Luma([0]));
+        }
+        assert_eq!(ink_anchor(&img, Some(40), 4), Some((30, 10)));
+        assert_eq!(ink_anchor(&img, None, 4), Some((30, 10)));
+        // No digits at all -> nothing to anchor on.
+        let blank = GrayImage::from_pixel(w, h, image::Luma([255]));
+        assert_eq!(ink_anchor(&blank, None, 4), None);
     }
 
     #[test]

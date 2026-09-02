@@ -144,6 +144,31 @@ impl OcrEngine {
             Self::Leptess(l) => l.recognize(png).await,
         }
     }
+
+    /// Like `recognize`, plus the bounding box of the recognized text in
+    /// image pixels (x, y, w, h) when the engine can report one.
+    pub async fn recognize_boxed(&mut self, png: &[u8]) -> Result<(String, Option<(u32, u32, u32, u32)>)> {
+        match self {
+            Self::Cli(c) => c.recognize_boxed(png).await,
+            #[cfg(feature = "leptess-ocr")]
+            Self::Leptess(l) => l.recognize(png).await.map(|t| (t, None)),
+        }
+    }
+}
+
+/// Union of word boxes; the text is the words joined like tesseract's plain
+/// output would be.
+pub fn words_to_line(words: &[Word]) -> (String, Option<(u32, u32, u32, u32)>) {
+    let text = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+    let x = words.iter().map(|w| w.x).min();
+    let y = words.iter().map(|w| w.y).min();
+    let right = words.iter().map(|w| w.x + w.w).max();
+    let bottom = words.iter().map(|w| w.y + w.h).max();
+    let bbox = match (x, y, right, bottom) {
+        (Some(x), Some(y), Some(r), Some(b)) => Some((x, y, r - x, b - y)),
+        _ => None,
+    };
+    (text, bbox)
 }
 
 pub struct CliOcr {
@@ -177,9 +202,19 @@ impl CliOcr {
     pub async fn recognize(&self, png: &[u8]) -> Result<String> {
         // A wedged tesseract must not freeze the whole pipeline: bound the
         // call and let kill_on_drop reap the child.
-        tokio::time::timeout(std::time::Duration::from_secs(15), self.recognize_inner(png))
+        tokio::time::timeout(std::time::Duration::from_secs(15), self.recognize_inner(png, false))
             .await
             .map_err(|_| anyhow::anyhow!("tesseract timed out after 15s"))?
+            .map(|out| out.trim().to_string())
+    }
+
+    /// Single-line read that also returns where the text sits in the image
+    /// (TSV output in the same call — no second pass).
+    pub async fn recognize_boxed(&self, png: &[u8]) -> Result<(String, Option<(u32, u32, u32, u32)>)> {
+        let tsv = tokio::time::timeout(std::time::Duration::from_secs(15), self.recognize_inner(png, true))
+            .await
+            .map_err(|_| anyhow::anyhow!("tesseract timed out after 15s"))??;
+        Ok(words_to_line(&parse_tsv(&tsv)))
     }
 
     /// Sparse-text pass over a whole image (`--psm 11`, TSV output): every
@@ -197,6 +232,7 @@ impl CliOcr {
         args.push("tsv".into());
         let mut child = tokio::process::Command::new(&self.cmd)
             .args(&args)
+            .env("OMP_THREAD_LIMIT", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -215,20 +251,27 @@ impl CliOcr {
         Ok(parse_tsv(&String::from_utf8_lossy(&out.stdout)))
     }
 
-    async fn recognize_inner(&self, png: &[u8]) -> Result<String> {
-        let mut child = tokio::process::Command::new(&self.cmd)
-            .args([
-                "stdin",
-                "stdout",
-                "--dpi",
-                "96",
-                "--psm",
-                "7", // single text line
-                "-l",
-                &self.lang,
-                "-c",
-                &format!("tessedit_char_whitelist={WHITELIST}"),
-            ])
+    async fn recognize_inner(&self, png: &[u8], tsv: bool) -> Result<String> {
+        let mut cmd = tokio::process::Command::new(&self.cmd);
+        cmd.args([
+            "stdin",
+            "stdout",
+            "--dpi",
+            "96",
+            "--psm",
+            "7", // single text line
+            "-l",
+            &self.lang,
+            "-c",
+            &format!("tessedit_char_whitelist={WHITELIST}"),
+        ]);
+        if tsv {
+            cmd.arg("tsv");
+        }
+        let mut child = cmd
+            // One thread per call: on small crops OpenMP's fan-out costs more
+            // than it saves, and several workers share the cores anyway.
+            .env("OMP_THREAD_LIMIT", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -372,5 +415,23 @@ mod tests {
         let png = to_png(&img).unwrap();
         let back = image::load_from_memory(&png).unwrap();
         assert_eq!((back.width(), back.height()), (8, 8));
+    }
+
+    #[test]
+    fn tsv_words_and_line_box() {
+        let tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
+                   1\t1\t0\t0\t0\t0\t0\t0\t1560\t400\t-1\t\n\
+                   4\t1\t1\t1\t1\t0\t600\t80\t900\t300\t-1\t\n\
+                   5\t1\t1\t1\t1\t1\t600\t80\t700\t300\t96.5\t1:41\n\
+                   5\t1\t1\t1\t1\t2\t1320\t150\t180\t230\t91.0\t.26\n\
+                   5\t1\t1\t1\t1\t3\t1500\t80\t10\t300\t0\t\n";
+        let words = parse_tsv(tsv);
+        assert_eq!(words.len(), 2, "only level-5 rows with text");
+        assert_eq!(words[0].text, "1:41");
+        assert_eq!((words[1].x, words[1].y, words[1].w, words[1].h), (1320, 150, 180, 230));
+        let (text, bbox) = words_to_line(&words);
+        assert_eq!(text, "1:41 .26");
+        assert_eq!(bbox, Some((600, 80, 900, 300)));
+        assert_eq!(words_to_line(&[]), (String::new(), None));
     }
 }
