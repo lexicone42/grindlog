@@ -116,6 +116,10 @@ async fn resolve_inner(
     if variants.is_empty() {
         bail!("no variants found in master playlist");
     }
+    tracing::debug!(
+        "available renditions: {:?}",
+        variants.iter().map(|v| (&v.name, v.bandwidth)).collect::<Vec<_>>()
+    );
     let pick = pick_variant(&variants, quality)
         .unwrap_or_else(|| variants.iter().max_by_key(|v| v.bandwidth).unwrap());
     Ok(Resolved::Live {
