@@ -21,11 +21,16 @@ sqlite3 "$LIVE" ".schema" | grep -vE 'sqlite_autoindex|sqlite_sequence' | sqlite
 sqlite3 "$OUT" "ALTER TABLE sessions ADD COLUMN src TEXT; ALTER TABLE sessions ADD COLUMN src_id INTEGER;
                ALTER TABLE runs ADD COLUMN src TEXT; ALTER TABLE runs ADD COLUMN src_id INTEGER; ALTER TABLE runs ADD COLUMN src_session INTEGER;"
 
-# Order VOD dbs by their session start.
+# Order VOD dbs by their session start. Only COMPLETE VODs are merged (their
+# session closed at end of input); in-progress ones are picked up next time.
 ordered=$(for f in backfill-db/vod-*.db; do
-  s=$(sqlite3 "$f" "SELECT MIN(started_at_ms) FROM sessions" 2>/dev/null || echo 0)
-  [ -n "$s" ] && [ "$s" != "" ] && echo "$s $f"
+  s=$(sqlite3 "$f" "SELECT MIN(started_at_ms) FROM sessions WHERE ended_at_ms IS NOT NULL" 2>/dev/null || true)
+  # (an if/fi, not &&: a trailing false test would fail the pipeline under pipefail)
+  if [ -n "$s" ]; then echo "$s $f"; fi
 done | sort -n | awk '{print $2}')
+total=$(ls backfill-db/vod-*.db 2>/dev/null | wc -l)
+complete=$(printf '%s\n' $ordered | grep -c . || true)
+echo "merging $complete complete VOD database(s); skipping $((total - complete)) in progress"
 
 import_db() { # path tag [session-filter-sql]
   local f="$1" tag="$2" filt="${3:-1}"
@@ -53,7 +58,8 @@ echo "imported $n VOD databases"
 
 # Live sessions whose day is not covered by any VOD session (compare local dates).
 covered=$(sqlite3 "$OUT" "SELECT GROUP_CONCAT(DISTINCT quote(date(started_at_ms/1000,'unixepoch','localtime'))) FROM sessions")
-import_db "$LIVE" live "source='hls' AND date(started_at_ms/1000,'unixepoch','localtime') NOT IN (${covered:-''})"
+# (source 'file' = the early hand-run VOD analyses; kept until the streamed VOD version covers that day)
+import_db "$LIVE" live "source IN ('hls','file') AND date(started_at_ms/1000,'unixepoch','localtime') NOT IN (${covered:-''})"
 
 sqlite3 "$OUT" "
   -- remap runs.session_id to the new session ids
