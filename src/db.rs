@@ -166,15 +166,14 @@ pub async fn open_session(
     label: &str,
     tag: Option<&str>,
 ) -> Result<i64> {
-    let res = sqlx::query(
-        "INSERT INTO sessions (started_at_ms, source, label, tag) VALUES (?, ?, ?, ?)",
-    )
-    .bind(started_at_ms)
-    .bind(source)
-    .bind(label)
-    .bind(tag)
-    .execute(pool)
-    .await?;
+    let res =
+        sqlx::query("INSERT INTO sessions (started_at_ms, source, label, tag) VALUES (?, ?, ?, ?)")
+            .bind(started_at_ms)
+            .bind(source)
+            .bind(label)
+            .bind(tag)
+            .execute(pool)
+            .await?;
     Ok(res.last_insert_rowid())
 }
 
@@ -285,13 +284,11 @@ pub async fn recent_sessions(pool: &SqlitePool, limit: i64) -> Result<Vec<Sessio
 }
 
 pub async fn next_attempt_number(pool: &SqlitePool, game: &str, category: &str) -> Result<i64> {
-    let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM runs WHERE game = ? AND category = ?",
-    )
-    .bind(game)
-    .bind(category)
-    .fetch_one(pool)
-    .await?;
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE game = ? AND category = ?")
+        .bind(game)
+        .bind(category)
+        .fetch_one(pool)
+        .await?;
     Ok(n + 1)
 }
 
@@ -353,12 +350,11 @@ pub async fn today_stats(
 }
 
 pub async fn total_attempts(pool: &SqlitePool, game: &str, category: &str) -> Result<i64> {
-    let n: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE game = ? AND category = ?")
-            .bind(game)
-            .bind(category)
-            .fetch_one(pool)
-            .await?;
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE game = ? AND category = ?")
+        .bind(game)
+        .bind(category)
+        .fetch_one(pool)
+        .await?;
     Ok(n)
 }
 
@@ -715,7 +711,11 @@ mod tests {
             } else {
                 OUTCOME_RESET
             },
-            reset_reason: if final_ms.is_some() { None } else { Some("zeroed") },
+            reset_reason: if final_ms.is_some() {
+                None
+            } else {
+                Some("zeroed")
+            },
             final_time_ms: final_ms,
             last_timer_ms: final_ms.or(Some(42_000)),
             session_id: None,
@@ -727,22 +727,33 @@ mod tests {
     async fn pb_and_attempt_numbers() {
         let (_dir, pool) = test_pool().await;
         assert_eq!(next_attempt_number(&pool, "smb", "Any%").await.unwrap(), 1);
-        insert_run(&pool, run("smb", 1, 1000, Some(300_000))).await.unwrap();
+        insert_run(&pool, run("smb", 1, 1000, Some(300_000)))
+            .await
+            .unwrap();
         insert_run(&pool, run("smb", 2, 2000, None)).await.unwrap();
-        insert_run(&pool, run("smb", 3, 3000, Some(295_000))).await.unwrap();
+        insert_run(&pool, run("smb", 3, 3000, Some(295_000)))
+            .await
+            .unwrap();
         assert_eq!(next_attempt_number(&pool, "smb", "Any%").await.unwrap(), 4);
         let pb = personal_best(&pool, "smb", "Any%").await.unwrap().unwrap();
         assert_eq!(pb.final_time_ms, Some(295_000));
         assert_eq!(pb.attempt_number, 3);
-        assert!(personal_best(&pool, "other", "Any%").await.unwrap().is_none());
+        assert!(personal_best(&pool, "other", "Any%")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
     async fn today_stats_filters_by_day_start() {
         let (_dir, pool) = test_pool().await;
-        insert_run(&pool, run("smb", 1, 500, Some(310_000))).await.unwrap(); // "yesterday"
+        insert_run(&pool, run("smb", 1, 500, Some(310_000)))
+            .await
+            .unwrap(); // "yesterday"
         insert_run(&pool, run("smb", 2, 5000, None)).await.unwrap();
-        insert_run(&pool, run("smb", 3, 6000, Some(290_000))).await.unwrap();
+        insert_run(&pool, run("smb", 3, 6000, Some(290_000)))
+            .await
+            .unwrap();
         let t = today_stats(&pool, "smb", "Any%", 1000).await.unwrap();
         assert_eq!(t.attempts, 2);
         assert_eq!(t.finished, 1);
@@ -771,7 +782,9 @@ mod tests {
     #[tokio::test]
     async fn session_lifecycle_and_summary() {
         let (_dir, pool) = test_pool().await;
-        let sid = open_session(&pool, 1000, "hls", "somechannel", None).await.unwrap();
+        let sid = open_session(&pool, 1000, "hls", "somechannel", None)
+            .await
+            .unwrap();
         let mut r = run("smb", 1, 2000, Some(300_000));
         r.session_id = Some(sid);
         insert_run(&pool, r).await.unwrap();
@@ -794,15 +807,22 @@ mod tests {
         assert_eq!(get_setting(&pool, "game").await.unwrap(), None);
         set_setting(&pool, "game", "SMB1").await.unwrap();
         set_setting(&pool, "game", "SMB3").await.unwrap();
-        assert_eq!(get_setting(&pool, "game").await.unwrap().as_deref(), Some("SMB3"));
+        assert_eq!(
+            get_setting(&pool, "game").await.unwrap().as_deref(),
+            Some("SMB3")
+        );
     }
 
     #[tokio::test]
     async fn summaries_group_by_game() {
         let (_dir, pool) = test_pool().await;
-        insert_run(&pool, run("smb", 1, 1000, Some(300_000))).await.unwrap();
+        insert_run(&pool, run("smb", 1, 1000, Some(300_000)))
+            .await
+            .unwrap();
         insert_run(&pool, run("smb", 2, 2000, None)).await.unwrap();
-        insert_run(&pool, run("zelda", 1, 3000, None)).await.unwrap();
+        insert_run(&pool, run("zelda", 1, 3000, None))
+            .await
+            .unwrap();
         let s = summaries(&pool).await.unwrap();
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].game, "smb");

@@ -145,9 +145,7 @@ pub fn survival(runs: &[RunBrief], acts: &[Act]) -> Vec<DeathBucket> {
         let survived = match end {
             Some(e) => runs
                 .iter()
-                .filter(|r| {
-                    r.finished || r.last_timer_ms.map(|d| d >= *e).unwrap_or(false)
-                })
+                .filter(|r| r.finished || r.last_timer_ms.map(|d| d >= *e).unwrap_or(false))
                 .count() as i64,
             None => runs.iter().filter(|r| r.finished).count() as i64,
         };
@@ -186,10 +184,10 @@ mod tests {
     #[test]
     fn death_chart_buckets_by_act() {
         let runs = vec![
-            run(1, None, 10_000),   // Act 1
-            run(2, None, 54_999),   // Act 1
-            run(3, None, 55_000),   // Act 2 (boundary is exclusive end)
-            run(4, None, 600_000),  // Act 3 (unbounded)
+            run(1, None, 10_000),     // Act 1
+            run(2, None, 54_999),     // Act 1
+            run(3, None, 55_000),     // Act 2 (boundary is exclusive end)
+            run(4, None, 600_000),    // Act 3 (unbounded)
             run(5, Some(700_000), 0), // finished — not a death
         ];
         let chart = death_chart(&runs, &acts());
@@ -202,7 +200,11 @@ mod tests {
 
     #[test]
     fn death_chart_minute_fallback_and_trailing_trim() {
-        let runs = vec![run(1, None, 30_000), run(2, None, 45_000), run(3, None, 130_000)];
+        let runs = vec![
+            run(1, None, 30_000),
+            run(2, None, 45_000),
+            run(3, None, 130_000),
+        ];
         let chart = death_chart(&runs, &[]);
         assert_eq!(chart.len(), 3); // 0-1m, 1-2m (empty, kept), 2-3m
         assert_eq!(chart[0].deaths, 2);

@@ -147,7 +147,11 @@ impl OcrEngine {
 
     /// Sparse-text pass with word boxes (CLI engine only; other engines
     /// report no words).
-    pub async fn recognize_words(&mut self, png: &[u8], whitelist: Option<&str>) -> Result<Vec<Word>> {
+    pub async fn recognize_words(
+        &mut self,
+        png: &[u8],
+        whitelist: Option<&str>,
+    ) -> Result<Vec<Word>> {
         match self {
             Self::Cli(c) => c.recognize_words(png, whitelist).await,
             #[cfg(feature = "leptess-ocr")]
@@ -157,7 +161,10 @@ impl OcrEngine {
 
     /// Like `recognize`, plus the bounding box of the recognized text in
     /// image pixels (x, y, w, h) when the engine can report one.
-    pub async fn recognize_boxed(&mut self, png: &[u8]) -> Result<(String, Option<(u32, u32, u32, u32)>)> {
+    pub async fn recognize_boxed(
+        &mut self,
+        png: &[u8],
+    ) -> Result<(String, Option<(u32, u32, u32, u32)>)> {
         match self {
             Self::Cli(c) => c.recognize_boxed(png).await,
             #[cfg(feature = "leptess-ocr")]
@@ -169,7 +176,11 @@ impl OcrEngine {
 /// Union of word boxes; the text is the words joined like tesseract's plain
 /// output would be.
 pub fn words_to_line(words: &[Word]) -> (String, Option<(u32, u32, u32, u32)>) {
-    let text = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+    let text = words
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
     let x = words.iter().map(|w| w.x).min();
     let y = words.iter().map(|w| w.y).min();
     let right = words.iter().map(|w| w.x + w.w).max();
@@ -212,18 +223,27 @@ impl CliOcr {
     pub async fn recognize(&self, png: &[u8]) -> Result<String> {
         // A wedged tesseract must not freeze the whole pipeline: bound the
         // call and let kill_on_drop reap the child.
-        tokio::time::timeout(std::time::Duration::from_secs(15), self.recognize_inner(png, false))
-            .await
-            .map_err(|_| anyhow::anyhow!("tesseract timed out after 15s"))?
-            .map(|out| out.trim().to_string())
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.recognize_inner(png, false),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("tesseract timed out after 15s"))?
+        .map(|out| out.trim().to_string())
     }
 
     /// Single-line read that also returns where the text sits in the image
     /// (TSV output in the same call — no second pass).
-    pub async fn recognize_boxed(&self, png: &[u8]) -> Result<(String, Option<(u32, u32, u32, u32)>)> {
-        let tsv = tokio::time::timeout(std::time::Duration::from_secs(15), self.recognize_inner(png, true))
-            .await
-            .map_err(|_| anyhow::anyhow!("tesseract timed out after 15s"))??;
+    pub async fn recognize_boxed(
+        &self,
+        png: &[u8],
+    ) -> Result<(String, Option<(u32, u32, u32, u32)>)> {
+        let tsv = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.recognize_inner(png, true),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("tesseract timed out after 15s"))??;
         Ok(words_to_line(&parse_tsv(&tsv)))
     }
 
@@ -231,10 +251,12 @@ impl CliOcr {
     /// word tesseract finds, with its bounding box in image pixels. Used by
     /// `locate` to find the LiveSplit pane; `whitelist` restricts glyphs.
     pub async fn recognize_words(&self, png: &[u8], whitelist: Option<&str>) -> Result<Vec<Word>> {
-        let mut args: Vec<String> = ["stdin", "stdout", "--dpi", "96", "--psm", "11", "-l", &self.lang]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let mut args: Vec<String> = [
+            "stdin", "stdout", "--dpi", "96", "--psm", "11", "-l", &self.lang,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         if let Some(w) = whitelist {
             args.push("-c".into());
             args.push(format!("tessedit_char_whitelist={w}"));
@@ -252,9 +274,12 @@ impl CliOcr {
         let mut stdin = child.stdin.take().expect("piped stdin");
         stdin.write_all(png).await?;
         drop(stdin);
-        let out = tokio::time::timeout(std::time::Duration::from_secs(120), child.wait_with_output())
-            .await
-            .map_err(|_| anyhow::anyhow!("tesseract timed out after 120s"))??;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            child.wait_with_output(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("tesseract timed out after 120s"))??;
         if !out.status.success() {
             bail!("tesseract exited with {}", out.status);
         }
@@ -353,7 +378,8 @@ pub mod leptess_worker {
                 .send((png.to_vec(), otx))
                 .await
                 .map_err(|_| anyhow!("leptess worker is gone"))?;
-            orx.await.map_err(|_| anyhow!("leptess worker dropped the job"))?
+            orx.await
+                .map_err(|_| anyhow!("leptess worker dropped the job"))?
         }
     }
 
@@ -438,7 +464,10 @@ mod tests {
         let words = parse_tsv(tsv);
         assert_eq!(words.len(), 2, "only level-5 rows with text");
         assert_eq!(words[0].text, "1:41");
-        assert_eq!((words[1].x, words[1].y, words[1].w, words[1].h), (1320, 150, 180, 230));
+        assert_eq!(
+            (words[1].x, words[1].y, words[1].w, words[1].h),
+            (1320, 150, 180, 230)
+        );
         let (text, bbox) = words_to_line(&words);
         assert_eq!(text, "1:41 .26");
         assert_eq!(bbox, Some((600, 80, 900, 300)));

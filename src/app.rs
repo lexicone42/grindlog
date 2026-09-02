@@ -64,7 +64,7 @@ pub struct Regions {
     pub timer: (u32, u32, u32, u32), // relative to union
     pub splits: Option<(u32, u32, u32, u32)>, // relative to union
     pub counter: Option<(u32, u32, u32, u32)>, // relative to union
-    pub sob: Option<(u32, u32, u32, u32)>,     // relative to union
+    pub sob: Option<(u32, u32, u32, u32)>, // relative to union
 }
 
 type R = (u32, u32, u32, u32);
@@ -87,9 +87,15 @@ pub(crate) fn layout_rects(cfg: &Config) -> Vec<LayoutRects> {
     let base = LayoutRects {
         name: "default".into(),
         timer: (t.crop_x, t.crop_y, t.crop_w, t.crop_h),
-        splits: s.enabled.then_some((s.crop_x, s.crop_y, s.crop_w, s.crop_h)),
-        counter: c.enabled.then_some((c.crop_x, c.crop_y, c.crop_w, c.crop_h)),
-        sob: b.enabled.then_some((b.crop_x, b.crop_y, b.crop_w, b.crop_h)),
+        splits: s
+            .enabled
+            .then_some((s.crop_x, s.crop_y, s.crop_w, s.crop_h)),
+        counter: c
+            .enabled
+            .then_some((c.crop_x, c.crop_y, c.crop_w, c.crop_h)),
+        sob: b
+            .enabled
+            .then_some((b.crop_x, b.crop_y, b.crop_w, b.crop_h)),
     };
     let rect = |r: crate::config::Rect| (r.crop_x, r.crop_y, r.crop_w, r.crop_h);
     let mut all = vec![base];
@@ -99,7 +105,9 @@ pub(crate) fn layout_rects(cfg: &Config) -> Vec<LayoutRects> {
             name: l.name.clone(),
             timer: rect(l.timer),
             splits: base.splits.map(|d| l.splits.map(rect).unwrap_or(d)),
-            counter: base.counter.map(|d| l.attempts_counter.map(rect).unwrap_or(d)),
+            counter: base
+                .counter
+                .map(|d| l.attempts_counter.map(rect).unwrap_or(d)),
             sob: base.sob.map(|d| l.lifetime_sob.map(rect).unwrap_or(d)),
         });
     }
@@ -205,7 +213,10 @@ fn ink_anchor(proc: &GrayImage, text_left: Option<u32>, upscale: u32) -> Option<
         }
     }
     let start = text_left.unwrap_or(0).min(w) as usize;
-    let border = cols[start..].iter().position(|&c| c >= h * 95 / 100).map(|i| start + i);
+    let border = cols[start..]
+        .iter()
+        .position(|&c| c >= h * 95 / 100)
+        .map(|i| start + i);
     let end = border.map_or(w as usize, |b| b.saturating_sub(3 * up as usize));
     let min = 3 * up;
     let digit_col = |x: usize| x >= start && x < end && cols[x] >= min && cols[x] <= h * 9 / 10;
@@ -219,7 +230,10 @@ fn ink_anchor(proc: &GrayImage, text_left: Option<u32>, upscale: u32) -> Option<
     let top = rows.iter().position(|&c| c >= min)? as f32;
     let bottom = rows.iter().rposition(|&c| c >= min)? as f32;
     let up = up as f32;
-    Some((((right + 1.0) / up).round() as i32, ((top + bottom) / 2.0 / up).round() as i32))
+    Some((
+        ((right + 1.0) / up).round() as i32,
+        ((top + bottom) / 2.0 / up).round() as i32,
+    ))
 }
 
 /// Pane geometry measured from the frame itself, relative to the timer
@@ -310,7 +324,10 @@ fn pane_geometry(
             _ => rows.push(vec![r]),
         }
     }
-    let col: Vec<R> = rows.iter().map(|row| *row.iter().max_by_key(|r| r.0 + r.2).unwrap()).collect();
+    let col: Vec<R> = rows
+        .iter()
+        .map(|row| *row.iter().max_by_key(|r| r.0 + r.2).unwrap())
+        .collect();
     if col.len() < 2 {
         return None;
     }
@@ -324,7 +341,11 @@ fn pane_geometry(
     // words that share the rightmost edge, so a row where only the segment
     // time was read cannot widen the column leftwards.
     let right_edge = col.iter().map(|r| r.0 + r.2).max()? as i64;
-    let aligned: Vec<R> = col.iter().filter(|r| right_edge - (r.0 + r.2) as i64 <= 12).copied().collect();
+    let aligned: Vec<R> = col
+        .iter()
+        .filter(|r| right_edge - (r.0 + r.2) as i64 <= 12)
+        .copied()
+        .collect();
     // Room for one more digit on the left than the widest value read: the
     // rows read at lock time may all be sub-10-minute, and "11:35.1" is a
     // digit wider than "8:38.6" — clipped, it reads as "1:35.1".
@@ -413,7 +434,10 @@ fn pane_geometry(
     if !letters.is_empty() {
         debug!(
             "pane rows below the timer: {:?}",
-            below.iter().map(|(r, l)| format!("y={} {l:?}", r.1)).collect::<Vec<_>>()
+            below
+                .iter()
+                .map(|(r, l)| format!("y={} {l:?}", r.1))
+                .collect::<Vec<_>>()
         );
     }
     let sob = below
@@ -430,7 +454,13 @@ fn pane_geometry(
                 r.3 + 16,
             )
         });
-    Some(PaneGeometry { splits, counter, sob, rows_read: col.len(), pitch: pitch as u32 })
+    Some(PaneGeometry {
+        splits,
+        counter,
+        sob,
+        rows_read: col.len(),
+        pitch: pitch as u32,
+    })
 }
 
 /// Measure the pane geometry from the current union crop (see
@@ -444,13 +474,22 @@ async fn measure_pane(
     want_sob: bool,
 ) -> Result<Option<PaneGeometry>> {
     const UP: u32 = 2;
-    let pre2 = PreprocessCfg { upscale: UP, threshold: pre.threshold, invert: pre.invert };
+    let pre2 = PreprocessCfg {
+        upscale: UP,
+        threshold: pre.threshold,
+        invert: pre.invert,
+    };
     let proc = ocr::preprocess(union_img, &pre2);
     let png = ocr::to_png(&proc)?;
-    let words = ocr_engine.recognize_words(&png, Some("0123456789:.")).await?;
+    let words = ocr_engine
+        .recognize_words(&png, Some("0123456789:."))
+        .await?;
     // The letters pass only serves the SoB label; skip it when not wanted.
     let letters = if want_sob {
-        ocr_engine.recognize_words(&png, None).await.unwrap_or_default()
+        ocr_engine
+            .recognize_words(&png, None)
+            .await
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -460,11 +499,17 @@ async fn measure_pane(
         let _ = proc.save("calibration/pane.png");
         debug!(
             "pane words (2x px): {:?}",
-            words.iter().map(|w| format!("{}@{},{} {}x{}", w.text, w.x, w.y, w.w, w.h)).collect::<Vec<_>>()
+            words
+                .iter()
+                .map(|w| format!("{}@{},{} {}x{}", w.text, w.x, w.y, w.w, w.h))
+                .collect::<Vec<_>>()
         );
         debug!(
             "pane letters (2x px): {:?}",
-            letters.iter().map(|w| format!("{}@{},{}", w.text, w.x, w.y)).collect::<Vec<_>>()
+            letters
+                .iter()
+                .map(|w| format!("{}@{},{}", w.text, w.x, w.y))
+                .collect::<Vec<_>>()
         );
     }
     Ok(pane_geometry(&words, &letters, UP, timer, acts))
@@ -607,7 +652,11 @@ pub async fn run(cfg: Config) -> Result<()> {
         let chat_channel = if cfg.chat.channel.trim().is_empty() {
             cfg.stream.channel.clone()
         } else {
-            cfg.chat.channel.trim().trim_start_matches('#').to_ascii_lowercase()
+            cfg.chat
+                .channel
+                .trim()
+                .trim_start_matches('#')
+                .to_ascii_lowercase()
         };
         let ctx = chat::ChatCtx {
             cfg: cfg.chat.clone(),
@@ -636,10 +685,22 @@ pub async fn run(cfg: Config) -> Result<()> {
     let offsets = drift_offsets(&cfg.layout_search);
     let mut cands: Vec<Candidate> = Vec::new();
     for (i, r) in regs.iter().enumerate() {
-        cands.push(Candidate { layout: i, off: (0, 0), regs: r.clone(), streak: 0, last: None });
+        cands.push(Candidate {
+            layout: i,
+            off: (0, 0),
+            regs: r.clone(),
+            streak: 0,
+            last: None,
+        });
         for &off in &offsets {
             if let Some(sr) = shifted(r, off) {
-                cands.push(Candidate { layout: i, off, regs: sr, streak: 0, last: None });
+                cands.push(Candidate {
+                    layout: i,
+                    off,
+                    regs: sr,
+                    streak: 0,
+                    last: None,
+                });
             }
         }
     }
@@ -781,7 +842,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                         reason: crate::state::ResetReason::Disappeared,
                     };
                     if let Err(e) = handle_event(
-                        &pool, &shared, &announce_tx, announce, &mut current, ev, wall_now,
+                        &pool,
+                        &shared,
+                        &announce_tx,
+                        announce,
+                        &mut current,
+                        ev,
+                        wall_now,
                     )
                     .await
                     {
@@ -798,7 +865,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                     } else {
                         info!(
                             "session #{id} closed ({} of {} frames read, {} layout events)",
-                            health.parsed, health.frames, health.events.len()
+                            health.parsed,
+                            health.frames,
+                            health.events.len()
                         );
                     }
                 }
@@ -861,7 +930,11 @@ pub async fn run(cfg: Config) -> Result<()> {
             probe_rr = probe_rr.wrapping_add(1);
             for li in 0..regs.len() {
                 let favoured = ever_locked && li == active_layout;
-                let turns = if favoured { [Some(turn), Some((turn + n_off / 2) % n_off)] } else { [Some(turn), None] };
+                let turns = if favoured {
+                    [Some(turn), Some((turn + n_off / 2) % n_off)]
+                } else {
+                    [Some(turn), None]
+                };
                 for tn in turns.into_iter().flatten() {
                     let pick = cands
                         .iter()
@@ -879,7 +952,10 @@ pub async fn run(cfg: Config) -> Result<()> {
             let mut winner: Option<(usize, String)> = None;
             for ci in to_read {
                 let c = &mut cands[ci];
-                let rd = match ocr_engine.recognize(&read_timer(&union_img, c.regs.timer)?).await {
+                let rd = match ocr_engine
+                    .recognize(&read_timer(&union_img, c.regs.timer)?)
+                    .await
+                {
                     Ok(t) => t.trim().to_string(),
                     Err(_) => String::new(),
                 };
@@ -887,7 +963,11 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // Switching scenes needs a longer streak than re-finding the
                 // same scene, so an overlapping rectangle of another layout
                 // can't win merely by being tried first.
-                let need = if !ever_locked || c.layout == active_layout { 5 } else { 10 };
+                let need = if !ever_locked || c.layout == active_layout {
+                    5
+                } else {
+                    10
+                };
                 if c.observe(v, t) && c.streak >= need && winner.is_none() {
                     winner = Some((ci, rd.clone()));
                 }
@@ -914,13 +994,24 @@ pub async fn run(cfg: Config) -> Result<()> {
                             (win_t.1 as i64 - r.timer.1 as i64) as i32,
                         );
                         let Some(sr) = shifted(r, off) else { continue };
-                        let Some(splits_rect) = sr.splits else { continue };
-                        let n = read_splits_rows(&mut ocr_engine, &union_img, splits_rect, rows, &pre_splits)
-                            .await?
-                            .iter()
-                            .filter(|v| v.is_some())
-                            .count();
-                        debug!("layout {:?} at {:+},{:+}: {n}/{rows} split rows read", layout_names[li], off.0, off.1);
+                        let Some(splits_rect) = sr.splits else {
+                            continue;
+                        };
+                        let n = read_splits_rows(
+                            &mut ocr_engine,
+                            &union_img,
+                            splits_rect,
+                            rows,
+                            &pre_splits,
+                        )
+                        .await?
+                        .iter()
+                        .filter(|v| v.is_some())
+                        .count();
+                        debug!(
+                            "layout {:?} at {:+},{:+}: {n}/{rows} split rows read",
+                            layout_names[li], off.0, off.1
+                        );
                         let better = match best {
                             None => true,
                             Some(b) => n > b || (n == b && li == new_layout),
@@ -943,13 +1034,24 @@ pub async fn run(cfg: Config) -> Result<()> {
                 if new_regs.splits.is_some() {
                     let acts = shared.acts.len().max(1) as u32;
                     let want_sob = new_regs.sob.is_some();
-                    match measure_pane(&mut ocr_engine, &union_img, new_regs.timer, acts, &pre_splits, want_sob).await {
+                    match measure_pane(
+                        &mut ocr_engine,
+                        &union_img,
+                        new_regs.timer,
+                        acts,
+                        &pre_splits,
+                        want_sob,
+                    )
+                    .await
+                    {
                         Ok(Some(g)) => {
                             g.apply(&mut new_regs);
                             let (ux, uy) = (new_regs.union.0, new_regs.union.1);
                             let s = new_regs.splits.unwrap();
                             let at = |r: Option<R>, measured: bool, what: &str| match r {
-                                Some(c) if measured => format!(", {what} at {},{} {}x{}", ux + c.0, uy + c.1, c.2, c.3),
+                                Some(c) if measured => {
+                                    format!(", {what} at {},{} {}x{}", ux + c.0, uy + c.1, c.2, c.3)
+                                }
                                 _ => String::new(),
                             };
                             info!(
@@ -966,7 +1068,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                             );
                         }
                         Ok(None) => {
-                            debug!("pane geometry not measurable here; using configured rectangles");
+                            debug!(
+                                "pane geometry not measurable here; using configured rectangles"
+                            );
                             pane_geom = None;
                         }
                         Err(e) => warn!("pane geometry pass failed: {e:#}"),
@@ -980,8 +1084,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                 };
                 health.relocks += 1;
                 if new_layout != active_layout {
-                    info!("layout switched to {name:?} (offset {:+},{:+})", new_off.0, new_off.1);
-                    health.event(at, "switch", format!("{name} {:+},{:+}{geom_note}", new_off.0, new_off.1));
+                    info!(
+                        "layout switched to {name:?} (offset {:+},{:+})",
+                        new_off.0, new_off.1
+                    );
+                    health.event(
+                        at,
+                        "switch",
+                        format!("{name} {:+},{:+}{geom_note}", new_off.0, new_off.1),
+                    );
                     // A layout change invalidates any splits baseline.
                     splits_tracker = None;
                 } else if new_off != active_off {
@@ -989,10 +1100,21 @@ pub async fn run(cfg: Config) -> Result<()> {
                         "layout {name:?} re-anchored: LiveSplit moved {:+},{:+} px (was {:+},{:+})",
                         new_off.0, new_off.1, active_off.0, active_off.1
                     );
-                    health.event(at, "relock", format!("{name} {:+},{:+}{geom_note}", new_off.0, new_off.1));
+                    health.event(
+                        at,
+                        "relock",
+                        format!("{name} {:+},{:+}{geom_note}", new_off.0, new_off.1),
+                    );
                 } else {
-                    info!("layout locked: {name:?} (offset {:+},{:+})", new_off.0, new_off.1);
-                    health.event(at, "lock", format!("{name} {:+},{:+}{geom_note}", new_off.0, new_off.1));
+                    info!(
+                        "layout locked: {name:?} (offset {:+},{:+})",
+                        new_off.0, new_off.1
+                    );
+                    health.event(
+                        at,
+                        "lock",
+                        format!("{name} {:+},{:+}{geom_note}", new_off.0, new_off.1),
+                    );
                 }
                 active_layout = new_layout;
                 active_off = new_off;
@@ -1061,7 +1183,10 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 health.event(
                                     time_base.map(|b| b + t).unwrap_or_else(util::unix_ms),
                                     "drift",
-                                    format!("{:+},{:+} px (now {:+},{:+})", d.0, d.1, new_off.0, new_off.1),
+                                    format!(
+                                        "{:+},{:+} px (now {:+},{:+})",
+                                        d.0, d.1, new_off.0, new_off.1
+                                    ),
                                 );
                                 active_off = new_off;
                                 active_regs = nr;
@@ -1127,7 +1252,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                 last_splits_read_t = t;
                 let rows = shared.acts.len().max(1) as u32;
                 let values =
-                    read_splits_rows(&mut ocr_engine, &union_img, splits_rect, rows, &pre_splits).await?;
+                    read_splits_rows(&mut ocr_engine, &union_img, splits_rect, rows, &pre_splits)
+                        .await?;
                 for (idx, cum) in st.observe(&values, tracker.smoothed_now(t)) {
                     let act_name = shared
                         .acts
@@ -1137,7 +1263,11 @@ pub async fn run(cfg: Config) -> Result<()> {
                     // A split far below the act's configured boundary is a
                     // misread column (wrong row, wrong pane), not a segment
                     // nobody has ever run; keep it out of the golds.
-                    let floor = shared.acts.get(idx).and_then(|a| a.1).map(|end| end * 6 / 10);
+                    let floor = shared
+                        .acts
+                        .get(idx)
+                        .and_then(|a| a.1)
+                        .map(|end| end * 6 / 10);
                     if let Some(floor) = floor.filter(|&f| cum < f) {
                         warn!(
                             "ignoring implausible split: {act_name} at {} (below {} — misread column?)",
@@ -1157,9 +1287,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                         );
                         continue;
                     }
-                    let prev_cum = current
-                        .as_ref()
-                        .and_then(|cr| cr.splits.iter().filter(|s| s.act_index < idx).map(|s| s.cumulative_ms).max());
+                    let prev_cum = current.as_ref().and_then(|cr| {
+                        cr.splits
+                            .iter()
+                            .filter(|s| s.act_index < idx)
+                            .map(|s| s.cumulative_ms)
+                            .max()
+                    });
                     if let Some(p) = prev_cum.filter(|&p| cum <= p) {
                         warn!(
                             "ignoring implausible split: {act_name} at {} is not after the previous act ({})",
@@ -1218,9 +1352,11 @@ pub async fn run(cfg: Config) -> Result<()> {
                 let cimg = image::imageops::crop_imm(&union_img, cx, cy, cw2, ch2).to_image();
                 let cp = ocr::preprocess(&cimg, &pre_counter);
                 if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&cp)?).await {
-                    if let Some(v) = crate::timeparse::parse_counter(txt.trim())
-                        .filter(|&v| last_ls_attempt.map(|p| v > p && v < p + 500).unwrap_or(true))
-                    {
+                    if let Some(v) = crate::timeparse::parse_counter(txt.trim()).filter(|&v| {
+                        last_ls_attempt
+                            .map(|p| v > p && v < p + 500)
+                            .unwrap_or(true)
+                    }) {
                         counter_stable = match counter_stable {
                             Some((pv, n)) if pv == v => Some((v, n + 1)),
                             _ => Some((v, 1)),
@@ -1250,16 +1386,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                     // (and can't be wildly below it) — this rejects consistent
                     // misreads when the layout shifts under the crop.
                     let bound = shared.baseline_best_ms.unwrap_or(i64::MAX);
-                    if let Some(v) = parse_time(txt.trim())
-                        .filter(|&v| v <= bound && v > bound / 2)
+                    if let Some(v) = parse_time(txt.trim()).filter(|&v| v <= bound && v > bound / 2)
                     {
                         sob_stable = match sob_stable {
                             Some((pv, n)) if pv == v => Some((v, n + 1)),
                             _ => Some((v, 1)),
                         };
-                        if matches!(sob_stable, Some((_, n)) if n >= 2)
-                            && sob_recorded != Some(v)
-                        {
+                        if matches!(sob_stable, Some((_, n)) if n >= 2) && sob_recorded != Some(v) {
                             info!("season sum of best: {}", format_ms(v));
                             if let Err(e) =
                                 db::set_setting(&pool, "ls_sob_ms", &v.to_string()).await
@@ -1281,9 +1414,13 @@ pub async fn run(cfg: Config) -> Result<()> {
             st.read_age_ms = tracker.accepted_age_ms(t);
             st.last_ocr = (!text.is_empty()).then_some(text);
             st.updated_unix_ms = util::unix_ms();
-            st.parse_pct = (health.frames > 0).then(|| health.parsed as f64 * 100.0 / health.frames as f64);
+            st.parse_pct =
+                (health.frames > 0).then(|| health.parsed as f64 * 100.0 / health.frames as f64);
             st.layout = if layout_locked {
-                format!("{} {:+},{:+}", layout_names[active_layout], active_off.0, active_off.1)
+                format!(
+                    "{} {:+},{:+}",
+                    layout_names[active_layout], active_off.0, active_off.1
+                )
             } else {
                 "probing".to_string()
             };
@@ -1321,9 +1458,16 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // Same run continues on a slipped clock: keep splits state.
                 Event::Resynced { .. } => {}
             }
-            if let Err(e) =
-                handle_event(&pool, &shared, &announce_tx, announce, &mut current, ev, wall_now)
-                    .await
+            if let Err(e) = handle_event(
+                &pool,
+                &shared,
+                &announce_tx,
+                announce,
+                &mut current,
+                ev,
+                wall_now,
+            )
+            .await
             {
                 // Don't let a transient DB hiccup kill the tracker.
                 warn!("failed to record event: {e:#}");
@@ -1555,7 +1699,11 @@ mod tests {
 
     #[test]
     fn drift_offsets_nearest_first_without_origin() {
-        let offs = drift_offsets(&LayoutSearchCfg { drift_px: 24, step_px: 12, dark_frames_search: 30 });
+        let offs = drift_offsets(&LayoutSearchCfg {
+            drift_px: 24,
+            step_px: 12,
+            dark_frames_search: 30,
+        });
         assert_eq!(offs.len(), 24);
         assert!(!offs.contains(&(0, 0)));
         // First ring (Chebyshev distance 12) precedes the second (24); axis
@@ -1564,7 +1712,12 @@ mod tests {
         assert!(offs[..8].iter().all(|&(x, y)| x.abs().max(y.abs()) == 12));
         assert!(offs[8..].iter().all(|&(x, y)| x.abs().max(y.abs()) == 24));
         assert!(offs[..4].iter().all(|&(x, y)| x == 0 || y == 0));
-        assert!(drift_offsets(&LayoutSearchCfg { drift_px: 0, step_px: 12, dark_frames_search: 30 }).is_empty());
+        assert!(drift_offsets(&LayoutSearchCfg {
+            drift_px: 0,
+            step_px: 12,
+            dark_frames_search: 30
+        })
+        .is_empty());
     }
 
     #[test]
@@ -1582,7 +1735,14 @@ mod tests {
     }
 
     fn word(x: u32, y: u32, w: u32, h: u32, text: &str) -> ocr::Word {
-        ocr::Word { x, y, w, h, conf: 90.0, text: text.into() }
+        ocr::Word {
+            x,
+            y,
+            w,
+            h,
+            conf: 90.0,
+            text: text.into(),
+        }
     }
 
     #[test]
@@ -1612,7 +1772,10 @@ mod tests {
             word(205, 560, 80, 20, "Segments"),
         ];
         let g = pane_geometry(&words, &letters, 1, timer, 6).expect("geometry");
-        assert_eq!(g.sob, Some((290 - 14 - 60, 560 - 8 - 400, 70 + 28, 20 + 16)));
+        assert_eq!(
+            g.sob,
+            Some((290 - 14 - 60, 560 - 8 - 400, 70 + 28, 20 + 16))
+        );
         assert_eq!(pane_geometry(&words, &[], 1, timer, 6).unwrap().sob, None);
         assert_eq!(g.pitch, 45);
         assert_eq!(g.rows_read, 6);
@@ -1627,7 +1790,10 @@ mod tests {
         assert_eq!((c.0, c.1, c.2, c.3), (330 - 12 - 60, 60 - 6 - 400, 84, 32));
         // One row is not enough; an absurd pitch is rejected.
         assert!(pane_geometry(&words[..2], &[], 1, timer, 6).is_none());
-        let far = vec![word(260, 100, 70, 20, "0:47.6"), word(260, 300, 70, 20, "2:44.2")];
+        let far = vec![
+            word(260, 100, 70, 20, "0:47.6"),
+            word(260, 300, 70, 20, "2:44.2"),
+        ];
         assert!(pane_geometry(&far, &[], 1, timer, 6).is_none());
     }
 
@@ -1660,7 +1826,13 @@ mod tests {
 
     #[test]
     fn candidate_accepts_frozen_or_advancing_readings() {
-        let mut c = Candidate { layout: 0, off: (0, 0), regs: regs(), streak: 0, last: None };
+        let mut c = Candidate {
+            layout: 0,
+            off: (0, 0),
+            regs: regs(),
+            streak: 0,
+            last: None,
+        };
         assert!(c.observe(Some(10_000), 0));
         assert!(c.observe(Some(10_500), 500)); // advancing with the clock
         assert!(c.observe(Some(22_400), 12_500)); // advanced ~12s after a 12s gap

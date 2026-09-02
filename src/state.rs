@@ -121,13 +121,23 @@ impl ResetReason {
 pub enum Event {
     /// A run is underway; `timer_ms` is the current timer value, so the real
     /// start instant is `now - timer_ms` (also correct when we join mid-run).
-    Started { timer_ms: i64 },
-    Finished { final_ms: i64 },
-    Reset { last_ms: i64, reason: ResetReason },
+    Started {
+        timer_ms: i64,
+    },
+    Finished {
+        final_ms: i64,
+    },
+    Reset {
+        last_ms: i64,
+        reason: ResetReason,
+    },
     /// Stream time slipped (CDN rewind, dropout) and the tracker re-anchored
     /// onto the same run's new apparent timeline. Informational — no run
     /// starts or ends.
-    Resynced { from_ms: i64, to_ms: i64 },
+    Resynced {
+        from_ms: i64,
+        to_ms: i64,
+    },
 }
 
 enum Phase {
@@ -235,7 +245,8 @@ impl Tracker {
                     Some(&(lt, lv)) => {
                         let delta = v - lv;
                         let elapsed = t - lt;
-                        delta >= cfg.min_advance_ms && (delta - elapsed).abs() <= cfg.advance_slack_ms
+                        delta >= cfg.min_advance_ms
+                            && (delta - elapsed).abs() <= cfg.advance_slack_ms
                     }
                 };
                 if !extends {
@@ -369,23 +380,43 @@ impl Tracker {
 /// a single-glyph misread rather than a different value on screen.
 fn glyph_confusion(expected: i64, v: i64) -> bool {
     const PAIRS: &[(char, char)] = &[
-        ('1', '7'), ('7', '1'), ('2', '7'), ('7', '2'), ('1', '4'), ('4', '1'), ('3', '8'), ('8', '3'),
-        ('0', '8'), ('8', '0'), ('6', '8'), ('8', '6'), ('5', '6'), ('6', '5'), ('0', '6'), ('6', '0'),
-        ('4', '9'), ('9', '4'), ('3', '9'), ('9', '3'),
+        ('1', '7'),
+        ('7', '1'),
+        ('2', '7'),
+        ('7', '2'),
+        ('1', '4'),
+        ('4', '1'),
+        ('3', '8'),
+        ('8', '3'),
+        ('0', '8'),
+        ('8', '0'),
+        ('6', '8'),
+        ('8', '6'),
+        ('5', '6'),
+        ('6', '5'),
+        ('0', '6'),
+        ('6', '0'),
+        ('4', '9'),
+        ('9', '4'),
+        ('3', '9'),
+        ('9', '3'),
     ];
     let mmss = |ms: i64| {
         let s = ms.max(0) / 1000;
         format!("{}:{:02}", s / 60, s % 60)
     };
     let b = mmss(v);
-    [expected - 1000, expected, expected + 1000].iter().any(|&e| {
-        let a = mmss(e);
-        if a.len() != b.len() {
-            return false;
-        }
-        let diffs: Vec<(char, char)> = a.chars().zip(b.chars()).filter(|(x, y)| x != y).collect();
-        diffs.len() == 1 && PAIRS.contains(&diffs[0])
-    })
+    [expected - 1000, expected, expected + 1000]
+        .iter()
+        .any(|&e| {
+            let a = mmss(e);
+            if a.len() != b.len() {
+                return false;
+            }
+            let diffs: Vec<(char, char)> =
+                a.chars().zip(b.chars()).filter(|(x, y)| x != y).collect();
+            diffs.len() == 1 && PAIRS.contains(&diffs[0])
+        })
 }
 
 fn consistent(readings: &[(i64, i64)], cfg: &TrackerConfig) -> bool {
@@ -488,7 +519,9 @@ mod tests {
         assert_eq!(s.time(1_501_000), vec![]);
         assert_eq!(
             s.time(1_502_000),
-            vec![Event::Started { timer_ms: 1_502_000 }]
+            vec![Event::Started {
+                timer_ms: 1_502_000
+            }]
         );
     }
 
@@ -628,7 +661,10 @@ mod tests {
         assert_eq!(s.time(301_000), vec![]);
         assert_eq!(
             s.time(302_000),
-            vec![Event::Resynced { from_ms: 60_000, to_ms: 302_000 }]
+            vec![Event::Resynced {
+                from_ms: 60_000,
+                to_ms: 302_000
+            }]
         );
         assert_eq!(s.tr.phase_name(), "RUNNING");
         // ...and a backward slip (rewind) too.
@@ -636,7 +672,10 @@ mod tests {
         assert_eq!(s.time(151_000), vec![]);
         assert_eq!(
             s.time(152_000),
-            vec![Event::Resynced { from_ms: 302_000, to_ms: 152_000 }]
+            vec![Event::Resynced {
+                from_ms: 302_000,
+                to_ms: 152_000
+            }]
         );
         s.advance_quietly(153_000, 160_000);
     }
@@ -680,7 +719,16 @@ mod tests {
         assert_eq!(s.time(2_000), vec![]);
         assert_eq!(s.time(3_000), vec![]);
         let ev = s.time(4_000);
-        assert!(matches!(ev.first(), Some(Event::Reset { reason: ResetReason::Desync, .. })), "{ev:?}");
+        assert!(
+            matches!(
+                ev.first(),
+                Some(Event::Reset {
+                    reason: ResetReason::Desync,
+                    ..
+                })
+            ),
+            "{ev:?}"
+        );
     }
 
     #[test]

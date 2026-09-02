@@ -91,7 +91,9 @@ impl SplitsTracker {
                     if self.recorded[j].is_some() {
                         continue;
                     }
-                    let Some((sv, n)) = self.stable[j] else { continue };
+                    let Some((sv, n)) = self.stable[j] else {
+                        continue;
+                    };
                     let after_prev = self.recorded[..j]
                         .iter()
                         .flatten()
@@ -211,7 +213,10 @@ mod tests {
         let mut t = SplitsTracker::new(2, 100, 2);
         // Row 1 unreadable at first: its baseline arrives later.
         assert_eq!(t.observe(&[Some(50_000), None], Some(5_000)), vec![]);
-        assert_eq!(t.observe(&[Some(50_000), Some(165_000)], Some(6_000)), vec![]);
+        assert_eq!(
+            t.observe(&[Some(50_000), Some(165_000)], Some(6_000)),
+            vec![]
+        );
         let v = [Some(50_000), Some(160_000)];
         assert_eq!(t.observe(&v, Some(170_000)), vec![]);
         // Act 1 records; act 0 (which never visibly changed — a tie) is

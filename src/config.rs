@@ -262,7 +262,10 @@ impl StreamCfg {
             }
             Ok(h * 60 + m)
         };
-        Ok(Some((parse(&self.active_hours[0])?, parse(&self.active_hours[1])?)))
+        Ok(Some((
+            parse(&self.active_hours[0])?,
+            parse(&self.active_hours[1])?,
+        )))
     }
 
     pub fn recorded_start_ms(&self) -> Result<Option<i64>> {
@@ -420,7 +423,10 @@ pub struct ActCfg {
 
 impl GameCfg {
     pub fn act_list(&self) -> Vec<(String, Option<i64>)> {
-        self.acts.iter().map(|a| (a.name.clone(), a.end_ms)).collect()
+        self.acts
+            .iter()
+            .map(|a| (a.name.clone(), a.end_ms))
+            .collect()
     }
 
     pub fn baseline_best_ms(&self) -> Option<i64> {
@@ -495,7 +501,12 @@ impl Config {
             .trim()
             .trim_start_matches('#')
             .to_ascii_lowercase();
-        cfg.chat.mods = cfg.chat.mods.iter().map(|m| m.to_ascii_lowercase()).collect();
+        cfg.chat.mods = cfg
+            .chat
+            .mods
+            .iter()
+            .map(|m| m.to_ascii_lowercase())
+            .collect();
         cfg.validate()?;
         Ok(cfg)
     }
@@ -555,18 +566,28 @@ impl Config {
                         || r.crop_x + r.crop_w > self.stream.canvas_w
                         || r.crop_y + r.crop_h > self.stream.canvas_h
                     {
-                        bail!("layout {:?} {what} rectangle is invalid for the canvas", l.name);
+                        bail!(
+                            "layout {:?} {what} rectangle is invalid for the canvas",
+                            l.name
+                        );
                     }
                 }
             }
         }
         for r in &self.game.references {
             if r.ms().is_none() {
-                bail!("game.references entry {:?} has unparseable time {:?}", r.label, r.time);
+                bail!(
+                    "game.references entry {:?} has unparseable time {:?}",
+                    r.label,
+                    r.time
+                );
             }
         }
         if self.game.baseline_best.is_some() && self.game.baseline_best_ms().is_none() {
-            bail!("game.baseline_best {:?} is unparseable", self.game.baseline_best);
+            bail!(
+                "game.baseline_best {:?} is unparseable",
+                self.game.baseline_best
+            );
         }
         for (name, c) in [
             ("attempts_counter", &self.attempts_counter),
@@ -692,10 +713,8 @@ mod tests {
 
     #[test]
     fn rejects_out_of_canvas_crop() {
-        let err = parse(
-            "[stream]\nchannel = \"x\"\n[timer]\ncrop_x = 1800\ncrop_w = 200\n",
-        )
-        .unwrap_err();
+        let err =
+            parse("[stream]\nchannel = \"x\"\n[timer]\ncrop_x = 1800\ncrop_w = 200\n").unwrap_err();
         assert!(err.to_string().contains("canvas"));
     }
 
@@ -712,10 +731,8 @@ mod tests {
 
     #[test]
     fn detection_overrides_apply() {
-        let cfg = parse(
-            "[stream]\nchannel = \"x\"\n[detection]\nstall_confirmations = 9\n",
-        )
-        .unwrap();
+        let cfg =
+            parse("[stream]\nchannel = \"x\"\n[detection]\nstall_confirmations = 9\n").unwrap();
         assert_eq!(cfg.detection.stall_confirmations, 9);
         // untouched fields keep defaults
         assert_eq!(cfg.detection.start_confirmations, 3);

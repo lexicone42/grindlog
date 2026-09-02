@@ -26,7 +26,11 @@ pub async fn resolve(client: &reqwest::Client, channel: &str, quality: &str) -> 
 }
 
 /// Resolve a Twitch VOD (twitch.tv/videos/<id>) to a variant playlist URL.
-pub async fn resolve_vod(client: &reqwest::Client, vod_id: &str, quality: &str) -> Result<Resolved> {
+pub async fn resolve_vod(
+    client: &reqwest::Client,
+    vod_id: &str,
+    quality: &str,
+) -> Result<Resolved> {
     resolve_inner(client, Target::Vod(vod_id), quality).await
 }
 
@@ -102,7 +106,11 @@ async fn resolve_inner(
         token = urlencode(value)
     );
 
-    let resp = client.get(&usher).send().await.context("usher request failed")?;
+    let resp = client
+        .get(&usher)
+        .send()
+        .await
+        .context("usher request failed")?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         // "transcode does not exist" — the channel is offline.
         return Ok(Resolved::Offline);
@@ -118,7 +126,10 @@ async fn resolve_inner(
     }
     tracing::debug!(
         "available renditions: {:?}",
-        variants.iter().map(|v| (&v.name, v.bandwidth)).collect::<Vec<_>>()
+        variants
+            .iter()
+            .map(|v| (&v.name, v.bandwidth))
+            .collect::<Vec<_>>()
     );
     let pick = pick_variant(&variants, quality)
         .unwrap_or_else(|| variants.iter().max_by_key(|v| v.bandwidth).unwrap());
@@ -213,9 +224,11 @@ pub fn pick_variant<'a>(variants: &'a [Variant], quality: &str) -> Option<&'a Va
             .iter()
             .find(|v| v.name.eq_ignore_ascii_case(name))
             .or_else(|| {
-                variants
-                    .iter()
-                    .find(|v| v.name.to_ascii_lowercase().contains(&name.to_ascii_lowercase()))
+                variants.iter().find(|v| {
+                    v.name
+                        .to_ascii_lowercase()
+                        .contains(&name.to_ascii_lowercase())
+                })
             }),
     }
 }
