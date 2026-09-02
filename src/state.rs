@@ -401,6 +401,12 @@ fn glyph_confusion(expected: i64, v: i64) -> bool {
         ('3', '9'),
         ('9', '3'),
     ];
+    // A reading under a minute against a clock past one is far likelier a
+    // fast reset-and-restart than a 6→0 or 8→0 glyph error, and the cost of
+    // getting that wrong is two runs merged into one: no suppression there.
+    if v < 60_000 || expected < 60_000 {
+        return false;
+    }
     let mmss = |ms: i64| {
         let s = ms.max(0) / 1000;
         format!("{}:{:02}", s / 60, s % 60)
@@ -739,6 +745,34 @@ mod tests {
         assert!(!glyph_confusion(442_000, 4_000)); // 7:22 vs 0:04
         assert!(!glyph_confusion(442_000, 122_000)); // 7:22 vs 2:02: two glyphs
         assert!(!glyph_confusion(442_000, 262_000)); // 7:22 vs 4:22: not a known pair
+                                                     // Under a minute is never a glyph confusion: 6:03 vs 0:03 is a restart.
+        assert!(!glyph_confusion(363_000, 3_000));
+        assert!(!glyph_confusion(483_000, 3_000)); // 8:03 vs 0:03
+    }
+
+    #[test]
+    fn six_minute_fast_restart_is_still_a_reset() {
+        // Runner dies at 6:00 and restarts so fast that the first reading of
+        // the new run is already 0:03 — a 6/0 glyph pair, but under a minute.
+        let mut s = Sim::new(cfg());
+        s.start_run(360_000);
+        assert_eq!(s.time(3_000), vec![]);
+        assert_eq!(s.time(4_000), vec![]);
+        let ev = s.time(5_000);
+        assert!(
+            matches!(
+                ev.first(),
+                Some(Event::Reset {
+                    reason: ResetReason::Desync,
+                    ..
+                })
+            ),
+            "{ev:?}"
+        );
+        assert!(
+            matches!(ev.get(1), Some(Event::Started { timer_ms: 5_000 })),
+            "{ev:?}"
+        );
     }
 
     #[test]
