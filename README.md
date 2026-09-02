@@ -1,4 +1,4 @@
-# ngtwitchtimer
+# grindlog (`ngtwitchtimer`)
 
 Tracks a Twitch streamer's NES speedrun attempts by watching the public
 stream and OCR-reading the on-screen LiveSplit timer. Works from the
@@ -7,6 +7,46 @@ state machine and logged to SQLite; optional chat integration announces
 finishes and answers viewer commands; a static records site
 (https://ng.lexicone.com) renders the whole history — daily heartbeat
 timelines, death charts, gold segments, and click-into-run splits.
+
+## About
+
+This started as a way to answer one question about a favourite stream:
+*how did the grind actually go today?* Speedrunning is hundreds of resets
+for every finish, and the story of a day — how deep the runs got, where they
+died, how many attempts the good one took — vanishes as soon as the
+broadcast ends. grindlog watches the stream the way a viewer would, reads
+the LiveSplit window off the video with tesseract, and keeps every attempt.
+
+It is an independent viewer-side tool: it needs no cooperation from the
+streamer, no capture-card access, no LiveSplit server, and no chat presence
+(chat is optional). Everything it knows, it read off the public video.
+The reference deployment follows **arcus**'s *Ninja Gaiden* (NES) Any%
+runs — he's one of the fastest in the world at it — but the game, acts,
+layout rectangles and record semantics are all configuration.
+
+What makes it more than a timer scraper:
+
+- **Layout resilience.** The streamer switches OBS scenes, nudges and
+  resizes the LiveSplit window. The bot probes configured layouts at a grid
+  of pixel offsets, re-anchors on small drifts, and measures the pane's row
+  pitch from the frame at every lock, so the splits column and attempt
+  counter follow the window instead of a hand-measured rectangle.
+- **Capture health.** Every session records how much of the feed it read
+  and every layout event, and the site shows it per day — a bad day is
+  visible rather than silently thin.
+- **Backfill.** Old VODs are streamed straight from Twitch and land on the
+  original broadcast timeline, so the history is as deep as the VODs.
+- **Speedrun semantics.** Seasonal bests vs lifetime PB, a pre-tracking
+  baseline that a "new record" must beat, run identity by the streamer's own
+  LiveSplit attempt counter, and a plausibility floor so a frozen timer is
+  never a finish.
+
+It is written in Rust with no Python in the toolchain; the only external
+programs are `ffmpeg` and `tesseract`.
+
+**Status:** actively used daily; expect rough edges around layouts other
+than the ones it was calibrated on — the `locate` and `calibrate` commands
+exist to make new ones quick to add.
 
 Highlights beyond the basics:
 
@@ -33,8 +73,8 @@ Highlights beyond the basics:
 - **tesseract** for OCR — any of:
   - the `tesseract` CLI binary on `$PATH` (Gentoo: `emerge app-text/tesseract`,
     make sure the `eng` traineddata is installed) — used by the default build;
-  - no root? A user-space install works fine (this is what's set up on this
-    machine): extract the [tesseract AppImage](https://github.com/AlexanderP/tesseract-appimage)
+  - no root? A user-space install works fine (what the reference deployment
+    uses): extract the [tesseract AppImage](https://github.com/AlexanderP/tesseract-appimage)
     with `--appimage-extract` into `~/.local/opt/tesseract-appimage/` and put a
     one-line wrapper at `~/.local/bin/tesseract`:
     `exec "$HOME/.local/opt/tesseract-appimage/AppRun" "$@"`;
@@ -185,3 +225,29 @@ the same way: the one whose splits column reads as times wins.
   persisted query. Symptoms: GQL 400s in the log. Fix: see the comments at
   the top of `src/twitch_hls.rs` (one-line updates, current values are in
   streamlink's `twitch.py`).
+
+## Contributing
+
+Issues and pull requests are welcome. The best first contributions are
+layout configurations for other streamers/games (with a `locate` printout
+and a frame), detection edge cases with an `obs_log` excerpt, and site
+ideas. Please keep the toolchain Rust + ffmpeg + tesseract only.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  http://opensource.org/licenses/MIT)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.
+
+This project is not affiliated with Twitch, LiveSplit, or the streamers it
+follows. It only reads publicly broadcast video.

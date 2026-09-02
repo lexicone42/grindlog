@@ -8,9 +8,11 @@ Parameters:
   DomainName:
     Type: String
     Default: ng.lexicone.com
+    Description: Site hostname; also the S3 bucket name.
   HostedZoneId:
     Type: String
-    Default: ZN8XM06S79WID # lexicone.com
+    Description: Route53 hosted zone id of the parent domain (no default — pass your own).
+    AllowedPattern: "^Z[A-Z0-9]+$"
 
 Resources:
   SiteBucket:

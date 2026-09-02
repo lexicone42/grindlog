@@ -2,7 +2,7 @@
 [stream]
 channel = "arcus"
 source = "file"
-input = "/datar/download/arcus/Ninja Gaiden speedruns-v2857970189.mp4"
+input = "vods/Ninja Gaiden speedruns-v2857970189.mp4"   # a downloaded VOD (any ffmpeg-readable path)
 recorded_start = "2026-08-27T16:59:02Z"   # from Twitch's createdAt
 
 [timer]

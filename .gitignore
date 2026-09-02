@@ -18,5 +18,13 @@
 
 # Local screenshots / scratch
 *.png
+*.jpg
+*.jpeg
 /.playwright-mcp/
 nohup.out
+
+# Backfill working set (per-VOD databases and import marks)
+/backfill-db/
+
+# Downloaded VODs for file-source analysis
+/vods/

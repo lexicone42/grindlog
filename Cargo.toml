@@ -3,6 +3,12 @@ name = "ngtwitchtimer"
 version = "0.1.0"
 edition = "2021"
 description = "Tracks a Twitch streamer's speedrun attempts by OCR-reading the on-screen LiveSplit timer"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/lexicone42/grindlog"
+readme = "README.md"
+keywords = ["twitch", "speedrun", "livesplit", "ocr", "bot"]
+categories = ["command-line-utilities", "multimedia::video"]
+publish = false
 
 [features]
 default = []
