@@ -22,6 +22,13 @@ active_hours = ["09:50", "20:30"]
 offline_poll_secs = 60
 quiet_poll_secs = 1800
 
+[ocr]
+# "auto": the in-process engine when the binary was built with it (see
+# scripts/build-release.sh), else the tesseract CLI. The language data lives
+# in the extracted AppImage; only the in-process engine needs the path.
+engine = "auto"
+tessdata_path = "/home/bryan/.local/opt/tesseract-appimage/usr/share/tesseract-ocr/5/tessdata"
+
 [timer]
 # Calibrated against his VODs; sized for the widest time ("12:09.17").
 crop_x = 285

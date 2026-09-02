@@ -25,6 +25,10 @@ vod_id = "$id"
 # against 1080p on the same footage) at ~10x less decode work than 1080p60.
 quality = "480p30"
 
+[ocr]
+engine = "auto"
+tessdata_path = "$HOME/.local/opt/tesseract-appimage/usr/share/tesseract-ocr/5/tessdata"
+
 [timer]
 crop_x = 285
 crop_y = 800

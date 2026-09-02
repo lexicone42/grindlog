@@ -157,7 +157,9 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
     };
     let proc = ocr::preprocess(gray, &pre);
     let png = ocr::to_png(&proc)?;
-    let digits = engine.recognize_words(&png, Some("0123456789:.-+")).await?;
+    let digits = engine
+        .recognize_words(&png, Some("0123456789:.-+"), 11)
+        .await?;
 
     let times: Vec<(R, &Word)> = digits
         .iter()
@@ -246,7 +248,10 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
         .collect();
     let mut below: Vec<(R, String)> = Vec::new();
     if !below_times.is_empty() {
-        let letters = engine.recognize_words(&png, None).await.unwrap_or_default();
+        let letters = engine
+            .recognize_words(&png, None, 11)
+            .await
+            .unwrap_or_default();
         for r in below_times {
             let mut label: Vec<(u32, String)> = letters
                 .iter()
