@@ -37,6 +37,36 @@ pub struct Config {
     /// LiveSplit's "Sum of Best Segments" row (seasonal, given his splits-file practice).
     #[serde(default)]
     pub lifetime_sob: CounterCfg,
+    /// Alternate on-screen layouts (other OBS scenes). The base sections above
+    /// are layout 0; the bot probes every layout's timer until one parses
+    /// consistently, locks to it, and re-probes if the timer goes dark.
+    #[serde(default)]
+    pub layouts: Vec<LayoutCfg>,
+}
+
+/// A crop rectangle in canvas coordinates.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rect {
+    pub crop_x: u32,
+    pub crop_y: u32,
+    pub crop_w: u32,
+    pub crop_h: u32,
+}
+
+/// An alternate layout: same thresholds/upscale as the base sections, only
+/// the rectangles move. Regions left out inherit the base rectangle.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutCfg {
+    pub name: String,
+    pub timer: Rect,
+    #[serde(default)]
+    pub splits: Option<Rect>,
+    #[serde(default)]
+    pub attempts_counter: Option<Rect>,
+    #[serde(default)]
+    pub lifetime_sob: Option<Rect>,
 }
 
 /// LiveSplit's lifetime attempt counter (the number in the layout header).
@@ -482,6 +512,24 @@ impl Config {
         }
         self.stream.recorded_start_ms()?;
         self.stream.active_window()?;
+        for l in &self.layouts {
+            for (what, r) in [
+                ("timer", Some(l.timer)),
+                ("splits", l.splits),
+                ("attempts_counter", l.attempts_counter),
+                ("lifetime_sob", l.lifetime_sob),
+            ] {
+                if let Some(r) = r {
+                    if r.crop_w == 0
+                        || r.crop_h == 0
+                        || r.crop_x + r.crop_w > self.stream.canvas_w
+                        || r.crop_y + r.crop_h > self.stream.canvas_h
+                    {
+                        bail!("layout {:?} {what} rectangle is invalid for the canvas", l.name);
+                    }
+                }
+            }
+        }
         for r in &self.game.references {
             if r.ms().is_none() {
                 bail!("game.references entry {:?} has unparseable time {:?}", r.label, r.time);

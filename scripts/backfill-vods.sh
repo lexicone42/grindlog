@@ -54,6 +54,13 @@ crop_y = 462
 crop_w = 120
 crop_h = 34
 
+[[layouts]]
+name = "ng-theme"
+timer = { crop_x = 265, crop_y = 765, crop_w = 360, crop_h = 100 }
+splits = { crop_x = 515, crop_y = 513, crop_w = 100, crop_h = 252 }
+attempts_counter = { crop_x = 540, crop_y = 487, crop_w = 80, crop_h = 30 }
+lifetime_sob = { crop_x = 505, crop_y = 897, crop_w = 110, crop_h = 34 }
+
 [database]
 # One db per VOD so several chains can run in parallel; merge chronologically
 # afterwards (attempt numbers are assigned per db, so the merge renumbers).

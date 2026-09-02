@@ -63,45 +63,83 @@ pub struct Regions {
     pub sob: Option<(u32, u32, u32, u32)>,     // relative to union
 }
 
-pub fn regions(cfg: &Config) -> Regions {
+type R = (u32, u32, u32, u32);
+
+/// Absolute canvas rectangles for one layout: layout 0 is the base config
+/// sections; alternates override rectangles they specify and inherit the rest.
+struct LayoutRects {
+    name: String,
+    timer: R,
+    splits: Option<R>,
+    counter: Option<R>,
+    sob: Option<R>,
+}
+
+fn layout_rects(cfg: &Config) -> Vec<LayoutRects> {
     let t = &cfg.timer;
-    let mut rects: Vec<(u32, u32, u32, u32)> = vec![(t.crop_x, t.crop_y, t.crop_w, t.crop_h)];
     let s = &cfg.splits;
-    if cfg.splits.enabled {
-        rects.push((s.crop_x, s.crop_y, s.crop_w, s.crop_h));
-    }
     let c = &cfg.attempts_counter;
-    if c.enabled {
-        rects.push((c.crop_x, c.crop_y, c.crop_w, c.crop_h));
-    }
     let b = &cfg.lifetime_sob;
-    if b.enabled {
-        rects.push((b.crop_x, b.crop_y, b.crop_w, b.crop_h));
+    let base = LayoutRects {
+        name: "default".into(),
+        timer: (t.crop_x, t.crop_y, t.crop_w, t.crop_h),
+        splits: s.enabled.then_some((s.crop_x, s.crop_y, s.crop_w, s.crop_h)),
+        counter: c.enabled.then_some((c.crop_x, c.crop_y, c.crop_w, c.crop_h)),
+        sob: b.enabled.then_some((b.crop_x, b.crop_y, b.crop_w, b.crop_h)),
+    };
+    let rect = |r: crate::config::Rect| (r.crop_x, r.crop_y, r.crop_w, r.crop_h);
+    let mut all = vec![base];
+    for l in &cfg.layouts {
+        let base = &all[0];
+        all.push(LayoutRects {
+            name: l.name.clone(),
+            timer: rect(l.timer),
+            splits: base.splits.map(|d| l.splits.map(rect).unwrap_or(d)),
+            counter: base.counter.map(|d| l.attempts_counter.map(rect).unwrap_or(d)),
+            sob: base.sob.map(|d| l.lifetime_sob.map(rect).unwrap_or(d)),
+        });
     }
+    all
+}
+
+/// One `Regions` per layout, all relative to a single union crop that covers
+/// every layout — ffmpeg delivers that union once per frame.
+pub fn regions(cfg: &Config) -> Vec<Regions> {
+    let layouts = layout_rects(cfg);
+    let rects: Vec<R> = layouts
+        .iter()
+        .flat_map(|l| {
+            std::iter::once(l.timer)
+                .chain(l.splits)
+                .chain(l.counter)
+                .chain(l.sob)
+        })
+        .collect();
     let ux = rects.iter().map(|r| r.0).min().unwrap();
     let uy = rects.iter().map(|r| r.1).min().unwrap();
     let uw = rects.iter().map(|r| r.0 + r.2).max().unwrap() - ux;
     let uh = rects.iter().map(|r| r.1 + r.3).max().unwrap() - uy;
-    let rel = |r: &(u32, u32, u32, u32)| (r.0 - ux, r.1 - uy, r.2, r.3);
-    Regions {
-        union: (ux, uy, uw, uh),
-        timer: rel(&rects[0]),
-        splits: cfg
-            .splits
-            .enabled
-            .then(|| rel(&(s.crop_x, s.crop_y, s.crop_w, s.crop_h))),
-        counter: c
-            .enabled
-            .then(|| rel(&(c.crop_x, c.crop_y, c.crop_w, c.crop_h))),
-        sob: b
-            .enabled
-            .then(|| rel(&(b.crop_x, b.crop_y, b.crop_w, b.crop_h))),
-    }
+    let rel = |r: R| (r.0 - ux, r.1 - uy, r.2, r.3);
+    layouts
+        .iter()
+        .map(|l| Regions {
+            union: (ux, uy, uw, uh),
+            timer: rel(l.timer),
+            splits: l.splits.map(rel),
+            counter: l.counter.map(rel),
+            sob: l.sob.map(rel),
+        })
+        .collect()
+}
+
+/// Names of the configured layouts, index-aligned with `regions()`.
+pub fn layout_names(cfg: &Config) -> Vec<String> {
+    layout_rects(cfg).into_iter().map(|l| l.name).collect()
 }
 
 pub fn capture_cfg(cfg: &Config) -> capture::CaptureCfg {
     let s = &cfg.stream;
-    let (ux, uy, uw, uh) = regions(cfg).union;
+    let (ux, uy, uw, uh) = regions(cfg)[0].union;
     capture::CaptureCfg {
         channel: s.channel.clone(),
         quality: s.quality.clone(),
@@ -191,8 +229,19 @@ pub async fn run(cfg: Config) -> Result<()> {
     }
     let announce = cfg.chat.enabled && cfg.chat.announce;
 
-    let reg = regions(&cfg);
-    let (uw, uh) = (reg.union.2, reg.union.3);
+    // Layouts: probe every layout's timer until one parses consistently, lock
+    // to it, and re-probe if the locked layout's timer goes dark for a while
+    // (scene switch mid-stream). Lock immediately if there's only one.
+    let regs = regions(&cfg);
+    let layout_names = layout_names(&cfg);
+    let (uw, uh) = (regs[0].union.2, regs[0].union.3);
+    let mut active_layout: usize = 0;
+    let mut layout_locked = regs.len() == 1;
+    let mut probe_streak = vec![0u32; regs.len()];
+    // Last parsed value per layout while probing: a real timer's readings are
+    // consistent frame to frame (advancing ~1s or frozen); garbage jumps.
+    let mut probe_last = vec![None::<i64>; regs.len()];
+    let mut dark_frames: u32 = 0;
     let epoch = Instant::now();
     let mut current: Option<CurrentRun> = None;
     let mut splits_tracker: Option<crate::splits::SplitsTracker> = None;
@@ -332,18 +381,71 @@ pub async fn run(cfg: Config) -> Result<()> {
             warn!("dropped a frame with unexpected size");
             continue;
         };
-        let (tx_, ty_, tw_, th_) = reg.timer;
-        let gray = image::imageops::crop_imm(&union_img, tx_, ty_, tw_, th_).to_image();
-        let processed = ocr::preprocess(&gray, &pre);
-        let png = ocr::to_png(&processed)?;
-        let text = match ocr_engine.recognize(&png).await {
-            Ok(t) => t.trim().to_string(),
-            Err(e) => {
-                warn!("ocr failed: {e:#}");
-                String::new()
-            }
+        // OCR the timer. When locked, only the active layout is read; while
+        // probing, every layout's timer is read and the first to parse on
+        // three consecutive frames wins.
+        let read_timer = |img: &GrayImage, r: (u32, u32, u32, u32)| {
+            let g = image::imageops::crop_imm(img, r.0, r.1, r.2, r.3).to_image();
+            ocr::to_png(&ocr::preprocess(&g, &pre))
         };
+        let mut text = String::new();
+        if layout_locked {
+            match ocr_engine.recognize(&read_timer(&union_img, regs[active_layout].timer)?).await {
+                Ok(t) => text = t.trim().to_string(),
+                Err(e) => warn!("ocr failed: {e:#}"),
+            }
+        } else {
+            for (i, r) in regs.iter().enumerate() {
+                let t = match ocr_engine.recognize(&read_timer(&union_img, r.timer)?).await {
+                    Ok(t) => t.trim().to_string(),
+                    Err(_) => String::new(),
+                };
+                let v = parse_time(&t);
+                let consistent = match (v, probe_last[i]) {
+                    (Some(v), Some(p)) => (v - p).abs() <= 5000,
+                    (Some(_), None) => true,
+                    _ => false,
+                };
+                probe_last[i] = v;
+                if consistent {
+                    probe_streak[i] += 1;
+                    if probe_streak[i] >= 5 && !layout_locked {
+                        layout_locked = true;
+                        if i != active_layout {
+                            info!("layout switched to {:?}", layout_names[i]);
+                            // A layout change invalidates any splits baseline.
+                            splits_tracker = None;
+                        } else {
+                            info!("layout locked: {:?}", layout_names[i]);
+                        }
+                        active_layout = i;
+                    }
+                } else {
+                    probe_streak[i] = 0;
+                }
+                if i == active_layout {
+                    text = t;
+                }
+            }
+            if layout_locked {
+                probe_streak.iter_mut().for_each(|s| *s = 0);
+            }
+        }
         let parsed = parse_time(&text);
+        // Unlock and re-probe after a long dark stretch on the locked layout.
+        if regs.len() > 1 {
+            if parsed.is_some() {
+                dark_frames = 0;
+            } else {
+                dark_frames += 1;
+                if layout_locked && dark_frames >= 120 {
+                    layout_locked = false;
+                    dark_frames = 0;
+                    info!("timer dark for 2 minutes; probing all layouts");
+                }
+            }
+        }
+        let reg = &regs[active_layout];
         let obs = parsed.map(Obs::Time).unwrap_or(Obs::Illegible);
         let t = if recorded {
             frame_idx * frame_interval_ms

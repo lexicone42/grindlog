@@ -101,3 +101,13 @@ crop_x = 540
 crop_y = 912
 crop_w = 130
 crop_h = 36
+
+# His second OBS scene (the "Ninja Gaiden"-themed purple/orange layout): the
+# LiveSplit panel sits ~50px further left with tighter rows. The bot probes
+# both layouts' timers and locks onto whichever parses.
+[[layouts]]
+name = "ng-theme"
+timer = { crop_x = 265, crop_y = 765, crop_w = 360, crop_h = 100 }
+splits = { crop_x = 515, crop_y = 513, crop_w = 100, crop_h = 252 }
+attempts_counter = { crop_x = 540, crop_y = 487, crop_w = 80, crop_h = 30 }
+lifetime_sob = { crop_x = 505, crop_y = 897, crop_w = 110, crop_h = 34 }

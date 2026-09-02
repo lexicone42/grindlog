@@ -83,10 +83,15 @@ pub async fn run(cfg: Config, full_frame: bool) -> Result<()> {
             img.save(format!("{OUT_DIR}/full.png"))?;
             println!("[{n:04}] saved {OUT_DIR}/full.png");
         } else {
-            let (w, h) = (cfg.timer.crop_w, cfg.timer.crop_h);
-            let Some(gray) = GrayImage::from_raw(w, h, raw) else {
+            // Frames arrive as the union crop of all regions/layouts; cut the
+            // base layout's timer rectangle out of it.
+            let reg = &app::regions(&cfg)[0];
+            let (uw, uh) = (reg.union.2, reg.union.3);
+            let Some(union_img) = GrayImage::from_raw(uw, uh, raw) else {
                 continue;
             };
+            let (tx, ty, tw, th) = reg.timer;
+            let gray = image::imageops::crop_imm(&union_img, tx, ty, tw, th).to_image();
             gray.save(format!("{OUT_DIR}/crop.png"))?;
             let processed = ocr::preprocess(&gray, &pre);
             processed.save(format!("{OUT_DIR}/processed.png"))?;
