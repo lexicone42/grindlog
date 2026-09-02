@@ -68,6 +68,7 @@ sqlite3 "$OUT" "
   ALTER TABLE sessions DROP COLUMN src; ALTER TABLE sessions DROP COLUMN src_id;
   VACUUM;"
 
+./scripts/fill-run-numbers.sh "$OUT"
 sqlite3 "$OUT" "SELECT 'sessions', COUNT(*) FROM sessions; SELECT 'runs', COUNT(*), SUM(outcome='finished'), SUM(ls_attempt IS NOT NULL) FROM runs; SELECT 'splits', COUNT(*) FROM splits;"
 
 if [ "${1:-}" = "--swap" ]; then

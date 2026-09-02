@@ -13,6 +13,11 @@ channel = "arcus"
 # Only capture his Ninja Gaiden days — Arcathlon and other streams are
 # skipped (the bot keeps polling in case he switches mid-day).
 title_filter = "ninja gaiden"
+# He goes live ~09:59 local. Poll every minute from 09:40 until 20:30;
+# outside that window check only every 30 minutes (graceful on Twitch).
+active_hours = ["09:50", "20:30"]
+offline_poll_secs = 60
+quiet_poll_secs = 1800
 
 [timer]
 # Calibrated against his VODs; sized for the widest time ("12:09.17").

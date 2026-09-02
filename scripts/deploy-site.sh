@@ -22,6 +22,8 @@ if [ "${1:-}" = "--infra" ]; then
     --no-fail-on-empty-changeset
 fi
 
+# Fill in run numbers that can be inferred from their neighbors first.
+./scripts/fill-run-numbers.sh ninja-gaiden.db | tail -1
 ./scripts/build-site.sh
 
 echo "--- uploading ---"

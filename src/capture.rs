@@ -38,6 +38,32 @@ pub struct CaptureCfg {
     pub frame_timeout_secs: u64,
     pub offline_poll_secs: u64,
     pub restart_delay_secs: u64,
+    /// Local minutes-of-day window when the streamer is expected; outside it
+    /// offline polling slows to quiet_poll_secs.
+    pub active_window: Option<(u32, u32)>,
+    pub quiet_poll_secs: u64,
+}
+
+impl CaptureCfg {
+    /// Offline poll interval for right now: frequent inside the expected
+    /// window (and for a few minutes before it), quiet otherwise.
+    fn current_offline_poll(&self) -> u64 {
+        let Some((start, end)) = self.active_window else {
+            return self.offline_poll_secs;
+        };
+        let now = chrono::Local::now();
+        let m = now.format("%H").to_string().parse::<u32>().unwrap_or(0) * 60
+            + now.format("%M").to_string().parse::<u32>().unwrap_or(0);
+        let lead = start.saturating_sub(10); // wake up a little early
+        let inside = if lead <= end { (lead..=end).contains(&m) } else { m >= lead || m <= end };
+        if inside {
+            self.offline_poll_secs
+        } else {
+            // Don't sleep past the window start.
+            let mins_to_start = if m < lead { lead - m } else { 24 * 60 - m + lead };
+            self.quiet_poll_secs.min(u64::from(mins_to_start) * 60).max(60)
+        }
+    }
 }
 
 /// What the capture layer hands downstream.
@@ -77,12 +103,10 @@ pub async fn capture_loop(cfg: CaptureCfg, tx: mpsc::Sender<CaptureEvent>) -> Re
                 anyhow::bail!("vod {} not found or not accessible", cfg.vod_id);
             }
             Ok(Session::Offline) => {
-                info!(
-                    "{} is offline; checking again in {}s",
-                    cfg.channel, cfg.offline_poll_secs
-                );
+                let wait = cfg.current_offline_poll();
+                info!("{} is offline; checking again in {wait}s", cfg.channel);
                 let _ = tx.send(CaptureEvent::StreamOffline).await;
-                tokio::time::sleep(Duration::from_secs(cfg.offline_poll_secs)).await;
+                tokio::time::sleep(Duration::from_secs(wait)).await;
             }
             Ok(Session::Ended { frames }) => {
                 // A session that never really produced frames is an offline

@@ -119,6 +119,8 @@ pub fn capture_cfg(cfg: &Config) -> capture::CaptureCfg {
         frame_timeout_secs: s.frame_timeout_secs,
         offline_poll_secs: s.offline_poll_secs,
         restart_delay_secs: s.restart_delay_secs,
+        active_window: s.active_window().ok().flatten(),
+        quiet_poll_secs: s.quiet_poll_secs,
     }
 }
 
@@ -444,7 +446,9 @@ pub async fn run(cfg: Config) -> Result<()> {
         // LiveSplit attempt-counter pass: only while a run needs one, on the
         // slow cadence; requires two matching reads before it's trusted.
         if let (Some((cx, cy, cw2, ch2)), Some(cr)) = (reg.counter, current.as_mut()) {
-            if cr.ls_attempt.is_none() && t - last_counter_read_t >= splits_every_ms {
+            // Read fast (every 2s) until the run's number is captured — short
+            // runs are the ones that used to slip through without one.
+            if cr.ls_attempt.is_none() && t - last_counter_read_t >= 2000 {
                 last_counter_read_t = t;
                 let cimg = image::imageops::crop_imm(&union_img, cx, cy, cw2, ch2).to_image();
                 let cp = ocr::preprocess(&cimg, &pre_counter);

@@ -139,9 +139,16 @@ pub struct StreamCfg {
     pub canvas_w: u32,
     #[serde(default = "d_canvas_h")]
     pub canvas_h: u32,
-    /// How often to re-check a channel that is offline.
+    /// How often to re-check a channel that is offline (inside active_hours).
     #[serde(default = "d_offline_poll")]
     pub offline_poll_secs: u64,
+    /// Local-time window when the streamer is expected, e.g. ["09:50", "20:30"].
+    /// Outside it the bot polls only every `quiet_poll_secs` — graceful on
+    /// Twitch and on the logs. Empty = always use offline_poll_secs.
+    #[serde(default)]
+    pub active_hours: Vec<String>,
+    #[serde(default = "d_quiet_poll")]
+    pub quiet_poll_secs: u64,
     /// Delay before restarting a pipeline that died mid-stream.
     #[serde(default = "d_restart_delay")]
     pub restart_delay_secs: u64,
@@ -177,6 +184,27 @@ pub struct StreamCfg {
 }
 
 impl StreamCfg {
+    /// Parsed active window as minutes-of-day (start, end), if configured.
+    pub fn active_window(&self) -> Result<Option<(u32, u32)>> {
+        if self.active_hours.is_empty() {
+            return Ok(None);
+        }
+        if self.active_hours.len() != 2 {
+            bail!("stream.active_hours must be [\"HH:MM\", \"HH:MM\"]");
+        }
+        let parse = |s: &str| -> Result<u32> {
+            let (h, m) = s
+                .split_once(':')
+                .with_context(|| format!("bad time {s:?} in stream.active_hours"))?;
+            let (h, m): (u32, u32) = (h.parse()?, m.parse()?);
+            if h > 23 || m > 59 {
+                bail!("bad time {s:?} in stream.active_hours");
+            }
+            Ok(h * 60 + m)
+        };
+        Ok(Some((parse(&self.active_hours[0])?, parse(&self.active_hours[1])?)))
+    }
+
     pub fn recorded_start_ms(&self) -> Result<Option<i64>> {
         match &self.recorded_start {
             None => Ok(None),
@@ -453,6 +481,7 @@ impl Config {
             bail!("stream.source = \"file\" requires stream.input");
         }
         self.stream.recorded_start_ms()?;
+        self.stream.active_window()?;
         for r in &self.game.references {
             if r.ms().is_none() {
                 bail!("game.references entry {:?} has unparseable time {:?}", r.label, r.time);
@@ -509,6 +538,9 @@ fn d_offline_poll() -> u64 {
 }
 fn d_restart_delay() -> u64 {
     5
+}
+fn d_quiet_poll() -> u64 {
+    1800
 }
 fn d_frame_timeout() -> u64 {
     30
