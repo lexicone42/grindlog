@@ -17,9 +17,9 @@ for id in "$@"; do
 channel = "arcus"
 source = "vod"
 vod_id = "$id"
-# 720p60: counter/splits/timer all read cleanly, ~2.2x cheaper decode than 1080p60.
-# (480p30 is fine for timer+splits but the attempt counter goes unreadable.)
-quality = "720p60"
+# 480p30: timer, splits AND the attempt counter all read cleanly (verified
+# against 1080p on the same footage) at ~10x less decode work than 1080p60.
+quality = "480p30"
 
 [timer]
 crop_x = 285
