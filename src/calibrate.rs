@@ -90,11 +90,17 @@ pub async fn run(cfg: Config, full_frame: bool) -> Result<()> {
             // base layout's timer rectangle out of it.
             let reg = &app::regions(&cfg)[0];
             let (uw, uh) = (reg.union.2, reg.union.3);
-            let Some(union_img) = GrayImage::from_raw(uw, uh, raw) else {
+            // The union arrives in colour; the timer is read from the
+            // brightest channel, exactly as the bot does it.
+            let Some(union_rgb) = RgbImage::from_raw(uw, uh, raw) else {
                 continue;
             };
             let (tx, ty, tw, th) = reg.timer;
-            let gray = image::imageops::crop_imm(&union_img, tx, ty, tw, th).to_image();
+            let crop = image::imageops::crop_imm(&union_rgb, tx, ty, tw, th).to_image();
+            let gray = GrayImage::from_fn(tw, th, |x, y| {
+                let p = crop.get_pixel(x, y).0;
+                image::Luma([p[0].max(p[1]).max(p[2])])
+            });
             gray.save(format!("{OUT_DIR}/crop.png"))?;
             let processed = ocr::preprocess(&gray, &pre);
             processed.save(format!("{OUT_DIR}/processed.png"))?;
