@@ -48,24 +48,20 @@ programs are `ffmpeg` and `tesseract`.
 than the ones it was calibrated on — the `locate` and `calibrate` commands
 exist to make new ones quick to add.
 
-Highlights beyond the basics:
+Where things live in the configuration (see `config.example.toml`, every
+field commented with its default):
 
-- **Splits-panel OCR**: a second crop over LiveSplit's cumulative column
-  detects per-act splits by *change* against the comparison baseline
-  (tie-backfill included), enabling golds, Sum of Best, and `!pace`.
-- **Sessions**: one row per broadcast; recorded sources land on the original
-  broadcast timeline (`recorded_start`, auto-fetched for VODs).
-- **Record semantics**: `record_label` ("season best"), `baseline_best` (a
-  pre-tracking best that NEW-record announcements must beat), and
-  `references` (WR / lifetime PB shown on the site).
-- **Title gate**: `stream.title_filter` skips broadcasts of other games.
-- **Backfill**: `scripts/backfill-vods.sh <ids...>` streams old VODs straight
-  from Twitch into a rebuild database, chronologically.
-- **Site**: `scripts/build-site.sh` bakes `report --json` into one
-  self-contained HTML page; `scripts/deploy-site.sh` pushes it to
-  S3+CloudFront (`infra/site-stack.yml`); a nightly cron keeps it fresh.
-- **Ops**: run supervised in tmux via `scripts/run-live.sh` (auto-restart,
-  logs to `logs/live.log`).
+- `[timer]` — the timer crop; `[splits]` — LiveSplit's cumulative column
+  (per-act splits are detected by *change* against the comparison baseline,
+  enabling golds, Sum of Best and `!pace`); `[attempts_counter]` — the
+  streamer's lifetime attempt counter, which becomes the run's identity;
+  `[lifetime_sob]` — the Sum of Best row.
+- `[[layouts]]` — the same rectangles for other OBS scenes;
+  `[layout_search]` — how far to search when the window moves.
+- `[game]` — acts, `record_label`, `baseline_best`, `references`.
+- `[stream]` — source (live HLS, VOD, file), quality, `title_filter`,
+  `active_hours`, `session_tag`, `recorded_start`/`start_secs` for VODs.
+- `[chat]` — bot account, `command_prefix`, mods, announcements.
 
 ## Requirements
 
@@ -137,20 +133,31 @@ reset) with ffmpeg only; the expected detections are in its header comment.
 ## Running
 
 ```sh
-ngtwitchtimer                # watch, detect, log (config.toml in cwd)
-ngtwitchtimer report         # PBs, today's stats, recent runs
-ngtwitchtimer report --json  # machine-readable (e.g. for a records website)
+ngtwitchtimer                    # watch, detect, log (config.toml in cwd)
+ngtwitchtimer -c live.toml run   # any config file
+ngtwitchtimer report             # PBs, today's stats, recent runs
+ngtwitchtimer report --json      # machine-readable (feeds the site)
+ngtwitchtimer locate             # find the LiveSplit pane in a frame
+ngtwitchtimer calibrate          # tune the timer crop by eye
 RUST_LOG=ngtwitchtimer=debug ngtwitchtimer   # per-frame tracing
 ```
 
 The bot survives stream drops (auto-restart with backoff) and goes dormant
-while the channel is offline, polling every 2 minutes. All times are stored
-as `i64` milliseconds in `ngtimer.db` (tables: `runs`, `transitions`,
-`settings`).
+while the channel is offline, polling every `offline_poll_secs` (120 by
+default; with `active_hours` set it polls that often only inside the window
+and every `quiet_poll_secs` outside it). `title_filter` skips broadcasts of
+other games. All times are stored as `i64` milliseconds in `ngtimer.db`
+(tables: `sessions`, `runs`, `splits`, `transitions`, `settings`; sessions
+also carry per-broadcast capture health).
 
 ## Chat commands
 
-Enable under `[chat]` with a bot account and an IRC OAuth token.
+Enable under `[chat]` with a bot account and an IRC OAuth token. `channel`
+is where the bot talks (it can differ from the channel it watches — point it
+at your own channel to test without posting in the streamer's chat).
+`command_prefix` namespaces every command for shared channels: with
+`command_prefix = "ngrust-"` the commands below are `!ngrust-pb`,
+`!ngrust-status`, and so on, and bare `!pb` is left to other bots.
 
 Viewer commands (shared 10s cooldown — usable by anyone, handy for live
 testing without mod rights):
@@ -161,11 +168,11 @@ testing without mod rights):
 | `!lastrun` | last run's time, or where it reset |
 | `!today` | attempts / finished / resets / best today |
 | `!attempts` | total logged attempts |
-| `!deaths` (`!resets`) | deaths by act |
+| `!deaths` | resets by act |
 | `!pace` | last completed act vs record pace, live during a run |
 | `!splits` | the current run's completed splits |
 | `!golds` | best segment per act + Sum of Best |
-| `!status` (`!timer`, `!ngtimer`) | tracker phase, timer estimate (marked "projected" when OCR is stale), last read |
+| `!status` | tracker phase, timer estimate (marked "projected" when OCR is stale), last read, share of frames read this session, locked layout |
 
 Mod commands (broadcaster, badge mods, or logins listed in `chat.mods`):
 
@@ -219,12 +226,41 @@ fewer than two rows can be read (`pane geometry: 6/6 split rows read, pitch
 45px; …` in the log). Layouts whose timer rectangles overlap are told apart
 the same way: the one whose splits column reads as times wins.
 
+## Scripts and operations
+
+| script | purpose |
+|---|---|
+| `scripts/run-live.sh` | supervise the live bot (restart on exit, log rotation, `logs/live.log`); run it inside tmux |
+| `scripts/backfill-vods.sh <vod_id>...` | analyze Twitch VODs straight from Twitch, one database each in `backfill-db/`; run several chains in parallel |
+| `scripts/import-vod.sh <vod_id> [--deploy]` | replace one broadcast day in the live database from its completed VOD database |
+| `scripts/import-when-done.sh <vod_id>...` | detached: import each VOD as its chain finishes and redeploy the site |
+| `scripts/merge-backfill.sh [--swap]` | full chronological rebuild from every completed VOD database (stop the bot before `--swap`) |
+| `scripts/fill-run-numbers.sh [db]` | infer missing LiveSplit run numbers where the arithmetic between known neighbours is unambiguous |
+| `scripts/build-site.sh` / `deploy-site.sh` / `deploy-if-live.sh` | bake `report --json` into `site/index.html`, upload to S3 and invalidate CloudFront; the last one is for a frequent cron that only deploys while the streamer is live |
+| `scripts/make-test-video.sh` | synthetic timer video for end-to-end tests |
+| `infra/site-stack.yml` | CloudFormation for the site (S3 + CloudFront + certificate + Route53 alias); pass your own `HostedZoneId` |
+
+Typical rhythm: the live bot runs all day in tmux; a cron deploys the site
+every few minutes while live and once nightly; old VODs are backfilled in
+three chains with `import-when-done.sh` landing each day as it completes.
+
 ## Maintenance notes
 
 - Twitch occasionally rotates the web player client-id or retires the GraphQL
   persisted query. Symptoms: GQL 400s in the log. Fix: see the comments at
   the top of `src/twitch_hls.rs` (one-line updates, current values are in
   streamlink's `twitch.py`).
+- When the streamer starts a new season (LiveSplit comparison reset), update
+  `game.baseline_best` — his comparison column is the season best, not the
+  lifetime PB.
+- tesseract is run with `OMP_THREAD_LIMIT=1`: on these small crops one thread
+  is faster per call, and several workers sharing the cores no longer
+  spin-wait each other to a crawl.
+- `NG_DUMP_PANE=1` makes the lock-time pane analysis save what it saw to
+  `calibration/pane.png` and log every word it read — the first thing to
+  look at when a new layout reads its splits as blanks.
+- Sessions record capture health; a day whose "capture" line on the site
+  reads far below ~90% is the cue to run `locate` against that VOD.
 
 ## Contributing
 

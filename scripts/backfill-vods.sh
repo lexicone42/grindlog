@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Process Twitch VODs chronologically into the full-history rebuild database
-# (ninja-gaiden-full.db). Streams each VOD directly — no downloads.
+# Analyze Twitch VODs one after another, each into its own database
+# (backfill-db/vod-<id>.db) so several chains can run in parallel. Streams
+# each VOD directly from Twitch — no downloads.
 #
 #   ./scripts/backfill-vods.sh <vod_id> [vod_id...]
 #
+# Afterwards: import-when-done.sh / import-vod.sh land each day in the live
+# database, or merge-backfill.sh rebuilds everything chronologically.
 # Broadcast start times are fetched from Twitch automatically, so runs land
-# on the original timeline. Run under `nice` so the live bot keeps priority.
+# on the original timeline. Workers run under `nice` so the live bot keeps
+# priority. OCR is the bottleneck: expect ~4x realtime per chain.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p backfill-logs backfill-db

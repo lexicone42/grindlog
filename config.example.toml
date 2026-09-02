@@ -11,12 +11,21 @@ channel = "somestreamer"        # twitch.tv/<channel>  (REQUIRED)
                                 # "file" (local video/clip; set input) - for testing
 # vod_id = ""                   # twitch.tv/videos/<id> when source = "vod"
 # input = ""                    # path/URL when source = "file"
+# start_secs = 0                # seek this far into a vod/file before analyzing
+# recorded_start = ""           # RFC3339 broadcast start for recorded sources
+                                #   (VODs fetch it from Twitch automatically)
+# session_tag = ""              # tag every session/run, e.g. "arcathlon"
+# title_filter = ""             # only capture when the live title contains this
+                                #   (case-insensitive), e.g. "ninja gaiden"
 # fps = 1                       # frames per second fed to OCR
 # canvas_w = 1920               # stream is scaled to this canvas before
 # canvas_h = 1080               #   cropping, so crop coords are stable
 # offline_poll_secs = 120       # re-check cadence while the channel is offline
+# active_hours = []             # e.g. ["09:50", "20:30"]: poll at offline_poll_secs
+# quiet_poll_secs = 1800        #   inside the window, at quiet_poll_secs outside
 # restart_delay_secs = 5        # backoff after a mid-stream pipeline death
 # frame_timeout_secs = 30       # no frame for this long -> restart pipeline
+# streamlink_extra_args = []    # passed through when source = "streamlink"
 
 [timer]
 # Crop rectangle around the LiveSplit timer, in canvas coordinates.
@@ -40,6 +49,8 @@ crop_h = 90
 [detection]                     # defaults assume fps = 1
 # start_epsilon_ms = 500        # timer must exceed this to count as started
 # start_confirmations = 3       # advancing readings to declare RUNNING
+# min_advance_ms = 100          # a reading must move at least this much to
+# advance_slack_ms = 2000       #   count as advancing; and at most elapsed+slack
 # stall_confirmations = 5       # frozen readings to declare FINISHED
 # stall_tolerance_ms = 150
 # reset_epsilon_ms = 1500       # readings below this count as "at zero"
@@ -51,6 +62,9 @@ crop_h = 90
                                 #   finish; set near the category's fastest
                                 #   plausible time (e.g. just under the WR)
 # desync_confirmations = 3      # consistent "misreads" before re-syncing
+# desync_restart_max_ms = 90000 # a desync onto a value below this is a missed
+                                #   reset (new run); above it, the same run on
+                                #   a slipped clock (stream rewind)
 # smoothing_window = 5          # readings in the smoothed current time
 
 [splits]                        # optional: OCR LiveSplit's cumulative-time column
@@ -60,17 +74,23 @@ crop_h = 90
 # crop_w = 0
 # crop_h = 0
 # threshold = 150               # its own threshold: the current row is highlighted
+# invert = true
 # read_every_secs = 5
 # tolerance_ms = 50             # change vs the comparison column that counts as a split
 # confirmations = 2
 
 [attempts_counter]              # optional: LiveSplit's attempt counter (the run number)
 # enabled = false
-# crop_x = 0 ... crop_h = 0
+# crop_x = 0 ... crop_h = 0     # canvas coords; threshold / invert as for [splits]
 
 [lifetime_sob]                  # optional: LiveSplit's sum-of-best row
 # enabled = false
-# crop_x = 0 ... crop_h = 0
+# crop_x = 0 ... crop_h = 0     # canvas coords; threshold / invert as for [splits]
+
+# With [splits] enabled, the bot also measures the pane at every layout lock
+# (row pitch, cumulative column, counter, Sum of Best row) and uses those
+# rectangles in preference to the configured ones — the configuration only
+# has to be close.
 
 # Alternate OBS scenes: each [[layouts]] entry gives the same rectangles at
 # their positions in that scene (omitted ones inherit the base sections
@@ -101,10 +121,14 @@ category = "Any%"
 
 [chat]
 # enabled = false               # everything works without chat; enable later
+# channel = ""                  # where the bot talks; empty = the watched channel
+                                #   (point it at your own channel to test quietly)
 # username = "mybotaccount"
 # oauth_token = "oauth:..."     # IRC token for the bot account
 # announce = true               # announce finished runs (+PB) in chat
 # command_cooldown_secs = 10    # shared cooldown for viewer commands
+# command_prefix = ""           # namespace for shared channels: "ngrust-" makes
+                                #   the commands !ngrust-pb, !ngrust-status, ...
 # mods = []                     # extra logins allowed to use mod commands
 
 [debug]
