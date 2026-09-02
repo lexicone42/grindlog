@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Merge per-VOD backfill databases (backfill-db/vod-*.db) into one fresh
+# database, chronologically, then append any live-tracked sessions whose
+# broadcast day is NOT covered by a VOD. Output: ninja-gaiden-merged.db.
+#
+#   ./scripts/merge-backfill.sh            # build ninja-gaiden-merged.db
+#   ./scripts/merge-backfill.sh --swap     # ...and swap it in for ninja-gaiden.db
+#                                          #   (stop the live bot first!)
+#
+# Attempt numbers are renumbered in chronological order. Settings (game,
+# category, ls_sob_ms, ...) are copied from the live db.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+LIVE=ninja-gaiden.db
+OUT=ninja-gaiden-merged.db
+rm -f "$OUT" "$OUT-wal" "$OUT-shm"
+
+# Fresh schema from the live db (tables only, no data), plus scratch columns
+# for id remapping that are dropped at the end.
+sqlite3 "$LIVE" ".schema" | grep -vE 'sqlite_autoindex|sqlite_sequence' | sqlite3 "$OUT"
+sqlite3 "$OUT" "ALTER TABLE sessions ADD COLUMN src TEXT; ALTER TABLE sessions ADD COLUMN src_id INTEGER;
+               ALTER TABLE runs ADD COLUMN src TEXT; ALTER TABLE runs ADD COLUMN src_id INTEGER; ALTER TABLE runs ADD COLUMN src_session INTEGER;"
+
+# Order VOD dbs by their session start.
+ordered=$(for f in backfill-db/vod-*.db; do
+  s=$(sqlite3 "$f" "SELECT MIN(started_at_ms) FROM sessions" 2>/dev/null || echo 0)
+  [ -n "$s" ] && [ "$s" != "" ] && echo "$s $f"
+done | sort -n | awk '{print $2}')
+
+import_db() { # path tag [session-filter-sql]
+  local f="$1" tag="$2" filt="${3:-1}"
+  sqlite3 "$OUT" "
+    ATTACH '$f' AS s;
+    INSERT INTO sessions (started_at_ms, ended_at_ms, source, label, tag, src, src_id)
+      SELECT started_at_ms, ended_at_ms, source, label, tag, '$tag', id FROM s.sessions WHERE $filt ORDER BY id;
+    INSERT INTO runs (game, category, attempt_number, started_at_ms, ended_at_ms, outcome, reset_reason,
+                      final_time_ms, last_timer_ms, ls_attempt, src, src_id, src_session)
+      SELECT game, category, attempt_number, started_at_ms, ended_at_ms, outcome, reset_reason,
+             final_time_ms, last_timer_ms, ls_attempt, '$tag', id, session_id
+      FROM s.runs WHERE session_id IN (SELECT id FROM s.sessions WHERE $filt) ORDER BY started_at_ms, id;
+    INSERT INTO splits (run_id, act_index, act_name, cumulative_ms, segment_ms)
+      SELECT m.id, sp.act_index, sp.act_name, sp.cumulative_ms, sp.segment_ms
+      FROM s.splits sp JOIN runs m ON m.src = '$tag' AND m.src_id = sp.run_id;
+    DETACH s;"
+}
+
+n=0
+for f in $ordered; do
+  import_db "$f" "$(basename "$f" .db)"
+  n=$((n+1))
+done
+echo "imported $n VOD databases"
+
+# Live sessions whose day is not covered by any VOD session (compare local dates).
+covered=$(sqlite3 "$OUT" "SELECT GROUP_CONCAT(DISTINCT quote(date(started_at_ms/1000,'unixepoch','localtime'))) FROM sessions")
+import_db "$LIVE" live "source='hls' AND date(started_at_ms/1000,'unixepoch','localtime') NOT IN (${covered:-''})"
+
+sqlite3 "$OUT" "
+  -- remap runs.session_id to the new session ids
+  UPDATE runs SET session_id = (SELECT id FROM sessions se WHERE se.src = runs.src AND se.src_id = runs.src_session);
+  -- chronological attempt numbers
+  UPDATE runs SET attempt_number = (
+    SELECT COUNT(*) FROM runs r2 WHERE r2.game = runs.game AND r2.category = runs.category
+      AND (r2.started_at_ms < runs.started_at_ms OR (r2.started_at_ms = runs.started_at_ms AND r2.id <= runs.id)));
+  -- settings from the live db
+  ATTACH '$LIVE' AS l; INSERT OR REPLACE INTO settings SELECT * FROM l.settings; DETACH l;
+  ALTER TABLE runs DROP COLUMN src; ALTER TABLE runs DROP COLUMN src_id; ALTER TABLE runs DROP COLUMN src_session;
+  ALTER TABLE sessions DROP COLUMN src; ALTER TABLE sessions DROP COLUMN src_id;
+  VACUUM;"
+
+sqlite3 "$OUT" "SELECT 'sessions', COUNT(*) FROM sessions; SELECT 'runs', COUNT(*), SUM(outcome='finished'), SUM(ls_attempt IS NOT NULL) FROM runs; SELECT 'splits', COUNT(*) FROM splits;"
+
+if [ "${1:-}" = "--swap" ]; then
+  ts=$(date +%Y%m%d-%H%M%S)
+  cp "$LIVE" "ninja-gaiden-pre-merge-$ts.db"
+  mv "$OUT" "$LIVE"; rm -f "$LIVE-wal" "$LIVE-shm"
+  echo "swapped in; previous live db saved as ninja-gaiden-pre-merge-$ts.db"
+fi
