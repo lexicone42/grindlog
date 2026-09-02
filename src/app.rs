@@ -250,7 +250,42 @@ fn drift_offsets(cfg: &crate::config::LayoutSearchCfg) -> Vec<(i32, i32)> {
 /// too. Starting from where the text begins (`text_left`, from tesseract),
 /// the first full-height column is that border, and only columns left of it
 /// count.
-fn ink_anchor(proc: &GrayImage, text_left: Option<u32>, upscale: u32) -> Option<(i32, i32)> {
+/// Extent of the digit ink inside a processed timer crop, in un-upscaled
+/// crop pixels (see `ink_extent`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Ink {
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+}
+
+impl Ink {
+    fn cy(&self) -> i32 {
+        (self.top + self.bottom) / 2
+    }
+
+    /// Digits against the crop boundary: the position is wrong even when
+    /// the text parses (a "10:05" reading as "0:05", the top third of every
+    /// glyph missing). Such a crop must never be locked or trusted.
+    fn clipped(&self, crop_w: u32, crop_h: u32) -> bool {
+        self.left <= 1
+            || self.top <= 1
+            || self.right >= crop_w as i32 - 1
+            || self.bottom >= crop_h as i32 - 2
+    }
+}
+
+#[cfg(test)]
+fn ink_anchor(proc: &GrayImage, bbox: Option<R>, upscale: u32) -> Option<(i32, i32)> {
+    ink_extent(proc, bbox.map(|b| b.0), upscale).map(|e| (e.right, e.cy()))
+}
+
+/// Border-aware ink extent: columns right of the first full-height column
+/// (the pane border) are ignored, and the vertical extent is taken over the
+/// remaining digit columns only. Tesseract's own word box is NOT used for
+/// this — it folds the border in and then spans the whole crop height.
+fn ink_extent(proc: &GrayImage, text_left: Option<u32>, upscale: u32) -> Option<Ink> {
     let up = upscale.max(1);
     let (w, h) = proc.dimensions();
     let mut cols = vec![0u32; w as usize];
@@ -274,13 +309,16 @@ fn ink_anchor(proc: &GrayImage, text_left: Option<u32>, upscale: u32) -> Option<
             rows[y as usize] += 1;
         }
     }
+    let left = (start..end).find(|&x| digit_col(x))? as f32;
     let top = rows.iter().position(|&c| c >= min)? as f32;
     let bottom = rows.iter().rposition(|&c| c >= min)? as f32;
     let up = up as f32;
-    Some((
-        ((right + 1.0) / up).round() as i32,
-        ((top + bottom) / 2.0 / up).round() as i32,
-    ))
+    Some(Ink {
+        left: (left / up).round() as i32,
+        right: ((right + 1.0) / up).round() as i32,
+        top: (top / up).round() as i32,
+        bottom: ((bottom + 1.0) / up).round() as i32,
+    })
 }
 
 /// Pane geometry measured from the frame itself, relative to the timer
@@ -828,6 +866,11 @@ pub async fn run(cfg: Config) -> Result<()> {
     // Consecutive probe frames skipped as static; capped so a frozen timer
     // is still found.
     let mut static_probe_skips: u32 = 0;
+    // Lock quality: reads judged per 60 frames, and consecutive reads whose
+    // glyphs touched the crop edge.
+    let mut quality_frames: u32 = 0;
+    let mut quality_parsed: u32 = 0;
+    let mut clipped_frames: u32 = 0;
     // The splits column as of its last read, and what it said: while the
     // column hasn't changed the previous values are fed again (the tracker
     // still gets its confirmations) without another six OCR calls.
@@ -1010,7 +1053,8 @@ pub async fn run(cfg: Config) -> Result<()> {
         // consistently on five looks becomes the active position.
         let read_timer = |img: &GrayImage, r: (u32, u32, u32, u32)| {
             let g = image::imageops::crop_imm(img, r.0, r.1, r.2, r.3).to_image();
-            ocr::to_png(&ocr::preprocess(&g, &pre))
+            let proc = ocr::preprocess(&g, &pre);
+            ocr::to_png(&proc).map(|png| (png, proc))
         };
         let mut text = String::new();
         let mut ink: Option<(i32, i32)> = None;
@@ -1040,8 +1084,16 @@ pub async fn run(cfg: Config) -> Result<()> {
                         // short of the other digits' right edge, and at 2 fps the
                         // hundredths digit repeats for many frames, which would
                         // read as a consistent shift. Measure on other digits.
+                        let ext = ink_extent(&proc, bbox.map(|b| b.0), pre.upscale);
                         if fine_drift && parse_time(&text).is_some() && !text.ends_with('1') {
-                            ink = ink_anchor(&proc, bbox.map(|b| b.0), pre.upscale);
+                            ink = ext.map(|e| (e.right, e.cy()));
+                        }
+                        // Digits against the crop edge: the position is wrong
+                        // even if the text parsed. Count it against the lock.
+                        if parse_time(&text).is_some() && ext.is_some_and(|e| e.clipped(r.2, r.3)) {
+                            clipped_frames += 1;
+                        } else {
+                            clipped_frames = 0;
                         }
                     }
                     Err(e) => {
@@ -1106,14 +1158,18 @@ pub async fn run(cfg: Config) -> Result<()> {
             let mut winner: Option<(usize, String)> = None;
             for ci in to_read {
                 let c = &mut cands[ci];
-                let rd = match ocr_engine
-                    .recognize(&read_timer(&union_bright, c.regs.timer)?)
-                    .await
-                {
-                    Ok(t) => t.trim().to_string(),
-                    Err(_) => String::new(),
+                let crop = c.regs.timer;
+                let (png, proc) = read_timer(&union_bright, crop)?;
+                let (rd, bbox) = match ocr_engine.recognize_boxed(&png).await {
+                    Ok((t, b)) => (t.trim().to_string(), b),
+                    Err(_) => (String::new(), None),
                 };
-                let v = parse_time(&rd);
+                // A reading whose digits touch the crop edge is a clipped
+                // position: it may parse, but it can't be the lock.
+                let clipped = parse_time(&rd).is_some()
+                    && ink_extent(&proc, bbox.map(|b| b.0), pre.upscale)
+                        .is_some_and(|e| e.clipped(crop.2, crop.3));
+                let v = if clipped { None } else { parse_time(&rd) };
                 // Switching scenes needs a longer streak than re-finding the
                 // same scene, so an overlapping rectangle of another layout
                 // can't win merely by being tried first.
@@ -1133,6 +1189,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                 text = winner_text;
                 // The lock frame's reading is what a static next frame reuses.
                 last_text = text.clone();
+                quality_frames = 0;
+                quality_parsed = 0;
+                clipped_frames = 0;
                 let (mut new_layout, mut new_off, mut new_regs) =
                     (cands[ci].layout, cands[ci].off, cands[ci].regs.clone());
                 // Layouts whose timer rectangles overlap can both explain the
@@ -1304,6 +1363,30 @@ pub async fn run(cfg: Config) -> Result<()> {
                     info!(
                         "timer dark for {dark_frames_search} frames; probing layouts and offsets"
                     );
+                }
+            }
+            // A lock that reads poorly is a wrong lock even if it never goes
+            // fully dark: digits half out of the crop parse some frames and
+            // not others. Judge every 60 read frames; a run of clipped reads
+            // is judged sooner.
+            if layout_locked && !frame_static {
+                quality_frames += 1;
+                if parsed.is_some() {
+                    quality_parsed += 1;
+                }
+                let poor = quality_frames >= 60 && quality_parsed * 100 / quality_frames < 40;
+                if poor || clipped_frames >= 10 {
+                    info!(
+                        "locked position reads poorly ({quality_parsed}/{quality_frames} parsed, {clipped_frames} clipped in a row); probing layouts and offsets"
+                    );
+                    layout_locked = false;
+                    dark_frames = 0;
+                    clipped_frames = 0;
+                    quality_frames = 0;
+                    quality_parsed = 0;
+                } else if quality_frames >= 60 {
+                    quality_frames = 0;
+                    quality_parsed = 0;
                 }
             }
         }
@@ -2040,8 +2123,21 @@ mod tests {
         for y in 0..h {
             img.put_pixel(138, y, image::Luma([0]));
         }
-        assert_eq!(ink_anchor(&img, Some(40), 4), Some((30, 10)));
+        // The word box only tells us where the text starts; the extent comes
+        // from the border-aware ink columns (the border here is excluded).
+        assert_eq!(ink_anchor(&img, Some((40, 0, 106, 100)), 4), Some((30, 10)));
         assert_eq!(ink_anchor(&img, None, 4), Some((30, 10)));
+        let e = ink_extent(&img, None, 4).unwrap();
+        assert_eq!((e.left, e.right, e.top, e.bottom), (10, 30, 5, 15));
+        assert!(!e.clipped(100, 25));
+        // Digits cut by the top of the crop read as clipped.
+        let mut cut = GrayImage::from_pixel(w, h, image::Luma([255]));
+        for y in 0..40 {
+            for x in 40..120 {
+                cut.put_pixel(x, y, image::Luma([0]));
+            }
+        }
+        assert!(ink_extent(&cut, None, 4).unwrap().clipped(100, 25));
         // No digits at all -> nothing to anchor on.
         let blank = GrayImage::from_pixel(w, h, image::Luma([255]));
         assert_eq!(ink_anchor(&blank, None, 4), None);

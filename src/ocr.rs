@@ -124,9 +124,20 @@ impl OcrEngine {
                 }
             }
             "auto" => {
+                // Prefer the in-process engine when compiled in, but a
+                // missing tessdata path or library must not take the bot
+                // down: fall back to the CLI with a warning.
                 #[cfg(feature = "leptess-ocr")]
                 {
-                    Ok(Self::Leptess(leptess_worker::LeptessWorker::spawn(cfg)?))
+                    match leptess_worker::LeptessWorker::spawn(cfg) {
+                        Ok(w) => Ok(Self::Leptess(w)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "in-process OCR unavailable ({e:#}); falling back to the tesseract CLI"
+                            );
+                            Ok(Self::Cli(CliOcr::new(cfg)?))
+                        }
+                    }
                 }
                 #[cfg(not(feature = "leptess-ocr"))]
                 {
