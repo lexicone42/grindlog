@@ -331,6 +331,12 @@ impl Tracker {
         //    wrong (missed a reset-and-restart, timer edit, long dropout):
         //    close out the old run and re-sync onto the new one.
         run.zeroish = 0;
+        // A reading one confusable glyph away from the expected value (a red
+        // "7:22" reading as "1:22" for frames on end) is OCR, not a desync;
+        // it must not accumulate as evidence of one.
+        if glyph_confusion(expected, v) {
+            return Phase::Running(run);
+        }
         run.suspects.push((t, v));
         if run.suspects.len() > cfg.desync_confirmations {
             run.suspects.remove(0);
@@ -356,6 +362,30 @@ impl Tracker {
         }
         Phase::Running(run)
     }
+}
+
+/// True when `v` differs from `expected` (±1s of rounding) in exactly one
+/// digit of its M:SS part and that digit pair is a known tesseract mix-up —
+/// a single-glyph misread rather than a different value on screen.
+fn glyph_confusion(expected: i64, v: i64) -> bool {
+    const PAIRS: &[(char, char)] = &[
+        ('1', '7'), ('7', '1'), ('2', '7'), ('7', '2'), ('1', '4'), ('4', '1'), ('3', '8'), ('8', '3'),
+        ('0', '8'), ('8', '0'), ('6', '8'), ('8', '6'), ('5', '6'), ('6', '5'), ('0', '6'), ('6', '0'),
+        ('4', '9'), ('9', '4'), ('3', '9'), ('9', '3'),
+    ];
+    let mmss = |ms: i64| {
+        let s = ms.max(0) / 1000;
+        format!("{}:{:02}", s / 60, s % 60)
+    };
+    let b = mmss(v);
+    [expected - 1000, expected, expected + 1000].iter().any(|&e| {
+        let a = mmss(e);
+        if a.len() != b.len() {
+            return false;
+        }
+        let diffs: Vec<(char, char)> = a.chars().zip(b.chars()).filter(|(x, y)| x != y).collect();
+        diffs.len() == 1 && PAIRS.contains(&diffs[0])
+    })
 }
 
 fn consistent(readings: &[(i64, i64)], cfg: &TrackerConfig) -> bool {
@@ -631,6 +661,36 @@ mod tests {
                 Event::Started { timer_ms: 3600 },
             ]
         );
+    }
+
+    #[test]
+    fn red_seven_read_as_one_is_not_a_desync() {
+        // Past 7:00 with a red (behind-pace) timer the "7" reads as "1" for
+        // frames on end: 7:22 → 1:22, 7:23 → 1:23 ... Those are one glyph
+        // off the expected value and must not close the run.
+        let mut s = Sim::new(cfg());
+        s.start_run(440_000); // 7:20
+        for v in [81_000, 82_000, 83_000, 84_000, 85_000, 86_000] {
+            assert_eq!(s.time(v), vec![], "1:{} must be ignored", v / 1000 % 60);
+        }
+        assert_eq!(s.tr.phase_name(), "RUNNING");
+        // Reading recovers; the same run continues without any event.
+        s.advance_quietly(447_000, 460_000);
+        // A genuine reset-and-restart is still caught: many glyphs differ.
+        assert_eq!(s.time(2_000), vec![]);
+        assert_eq!(s.time(3_000), vec![]);
+        let ev = s.time(4_000);
+        assert!(matches!(ev.first(), Some(Event::Reset { reason: ResetReason::Desync, .. })), "{ev:?}");
+    }
+
+    #[test]
+    fn glyph_confusion_pairs() {
+        assert!(glyph_confusion(442_000, 82_000)); // 7:22 vs 1:22
+        assert!(glyph_confusion(442_600, 82_000)); // rounding slack
+        assert!(glyph_confusion(82_000, 442_000)); // and the reverse
+        assert!(!glyph_confusion(442_000, 4_000)); // 7:22 vs 0:04
+        assert!(!glyph_confusion(442_000, 122_000)); // 7:22 vs 2:02: two glyphs
+        assert!(!glyph_confusion(442_000, 262_000)); // 7:22 vs 4:22: not a known pair
     }
 
     #[test]
