@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::db::{self, NewRun};
 use crate::ocr::{self, OcrEngine, PreprocessCfg};
 use crate::state::{Event, Obs, Tracker};
-use crate::timeparse::{format_ms, parse_time};
+use crate::timeparse::{format_ms, parse_time, parse_timer_text};
 use crate::{capture, chat, util};
 use sqlx::SqlitePool;
 
@@ -323,16 +323,70 @@ fn ink_extent(proc: &GrayImage, text_left: Option<u32>, upscale: u32) -> Option<
     let end = border.map_or(w as usize, |b| b.saturating_sub(3 * up as usize));
     let min = 3 * up;
     let digit_col = |x: usize| x >= start && x < end && cols[x] >= min && cols[x] <= h * 9 / 10;
-    let right = (start..end).rev().find(|&x| digit_col(x))? as f32;
+    let n_digit_cols = (start..end).filter(|&x| digit_col(x)).count() as u32;
+    if n_digit_cols == 0 {
+        return None;
+    }
     let mut rows = vec![0u32; h as usize];
     for (x, y, p) in proc.enumerate_pixels() {
         if p.0[0] == 0 && digit_col(x as usize) {
             rows[y as usize] += 1;
         }
     }
-    let left = (start..end).find(|&x| digit_col(x))? as f32;
-    let top = rows.iter().position(|&c| c >= min)? as f32;
-    let bottom = rows.iter().rposition(|&c| c >= min)? as f32;
+    // The crop holds more than digits: a separator line (a thin, full-width
+    // band of ink) and the top of the text row under the timer poking in at
+    // the bottom. Neither is part of the digits' extent — taking every inked
+    // row would put "the digits" against the crop edge and read as clipped
+    // whenever a neighbour is in view. So take the rows as bands of
+    // consecutive inked rows (bridging gaps of a couple of source pixels),
+    // drop bands too thin to be digits, and keep the one with the most ink:
+    // the digits dwarf everything else in the crop.
+    let inked = |y: usize| rows[y] >= min;
+    let mut bands: Vec<(usize, usize, u64)> = Vec::new(); // (top, bottom, ink)
+    let mut y = 0usize;
+    while y < h as usize {
+        if !inked(y) {
+            y += 1;
+            continue;
+        }
+        let top = y;
+        // Digits are vertically solid (the colon's gap is covered by the
+        // digits beside it), so a band only bridges a single source pixel:
+        // any wider gap is the padding before a neighbouring component.
+        let (mut ink, mut gap, mut bottom) = (0u64, 0usize, y);
+        while y < h as usize && gap <= up as usize {
+            if inked(y) {
+                ink += rows[y] as u64;
+                bottom = y;
+                gap = 0;
+            } else {
+                gap += 1;
+            }
+            y += 1;
+        }
+        bands.push((top, bottom, ink));
+    }
+    let thin = 3 * up as usize; // a separator line: at most ~3 source pixels
+    let (top_y, bottom_y, _) = bands
+        .iter()
+        .filter(|b| b.1 - b.0 + 1 > thin)
+        .max_by_key(|b| b.2)
+        .or_else(|| bands.iter().max_by_key(|b| b.2))
+        .copied()?;
+    // Horizontal extent from the digit band only, so text on another row
+    // cannot widen it either.
+    let mut band_cols = vec![0u32; w as usize];
+    for (x, yy, p) in proc.enumerate_pixels() {
+        let yy = yy as usize;
+        if p.0[0] == 0 && yy >= top_y && yy <= bottom_y && digit_col(x as usize) {
+            band_cols[x as usize] += 1;
+        }
+    }
+    let band_min = up; // a digit's thinnest stroke, one source pixel
+    let right = (start..end).rev().find(|&x| band_cols[x] >= band_min)? as f32;
+    let left = (start..end).find(|&x| band_cols[x] >= band_min)? as f32;
+    let top = top_y as f32;
+    let bottom = bottom_y as f32;
     let up = up as f32;
     Some(Ink {
         left: (left / up).round() as i32,
@@ -590,9 +644,20 @@ fn pane_readings(
         })
         .filter(|s| s.chars().any(|c| c.is_alphabetic()))
         .collect();
+    // The topmost line is not necessarily the title: themed layouts have
+    // artwork above the pane that OCR turns into stray syllables ("eos",
+    // "sa"). The title is the line with the most letters in it — a game
+    // name — and the category is whatever sits directly under it.
+    let letters_in = |s: &str| s.chars().filter(|c| c.is_alphabetic()).count();
+    let title_idx = title_lines
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| letters_in(s) >= 4)
+        .max_by_key(|(_, s)| letters_in(s))
+        .map(|(i, _)| i);
     PaneReadings {
-        game: title_lines.first().cloned(),
-        category: title_lines.get(1).cloned(),
+        game: title_idx.map(|i| title_lines[i].clone()),
+        category: title_idx.and_then(|i| title_lines.get(i + 1).cloned()),
         refs,
     }
 }
@@ -1298,7 +1363,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     // anchor from the first lock instead would enshrine a bad lock: digits
     // clipped at the crop edge would be "corrected" back to the edge, the
     // timer would keep going dark, and the layout probe would thrash.
-    let anchors: Vec<Option<(i32, i32)>> = regs
+    let mut anchors: Vec<Option<(i32, i32)>> = regs
         .iter()
         .map(|r| {
             Some((
@@ -1307,8 +1372,11 @@ pub async fn run(cfg: Config) -> Result<()> {
             ))
         })
         .collect();
-    let mut drift_hits: Vec<(i32, i32)> = Vec::new();
+    // (dx, dy, last glyph of the reading it came from)
+    let mut drift_hits: Vec<(i32, i32, char)> = Vec::new();
     let mut drift_warned = false;
+    // The timer crop has been enlarged to fit the digits since the last lock.
+    let mut crop_grown = false;
     // Previous frame (brightest-channel union) and what the timer read on it:
     // an unchanged timer crop reuses the reading instead of paying for OCR,
     // and a fully static union skips the probe entirely.
@@ -1354,16 +1422,14 @@ pub async fn run(cfg: Config) -> Result<()> {
         threshold: cfg.attempts_counter.threshold,
         invert: cfg.attempts_counter.invert,
     };
-    // (candidate counter value, consecutive sightings) — reset at every run
-    // start so a stale display can't inherit the previous run's streak.
-    let mut counter_stable: Option<(i64, u32)> = None;
-    let mut last_counter_read_t: i64 = i64::MIN / 2;
-    // The lifetime counter only ever increases; a read at or below the last
-    // recorded value is the previous attempt's number still on screen.
-    let mut last_ls_attempt: Option<i64> =
+    // Which attempt-counter reading to believe (see counter.rs), seeded with
+    // the highest number already recorded.
+    let mut counter = crate::counter::CounterTracker::new(
         sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(ls_attempt) FROM runs")
             .fetch_one(&pool)
-            .await?;
+            .await?,
+    );
+    let mut last_counter_read_t: i64 = i64::MIN / 2;
     // Reference times the layout advertises (Sum of Best, season best, PB,
     // WR), seeded with what a previous run already persisted so a restart
     // does not re-announce them.
@@ -1602,15 +1668,52 @@ pub async fn run(cfg: Config) -> Result<()> {
                         // hundredths digit repeats for many frames, which would
                         // read as a consistent shift. Measure on other digits.
                         let ext = ink_extent(&proc, bbox.map(|b| b.0), pre.upscale);
-                        if fine_drift && parse_time(&text).is_some() && drift_measurable(&text) {
+                        let legible = parse_timer_text(&text).is_some();
+                        if fine_drift && legible && drift_measurable(&text) {
                             ink = ext.map(|e| (e.right, e.cy()));
                         }
                         // Digits against the crop edge: the position is wrong
                         // even if the text parsed. Count it against the lock.
-                        if parse_time(&text).is_some() && ext.is_some_and(|e| e.clipped(r.2, r.3)) {
+                        if legible && ext.is_some_and(|e| e.clipped(r.2, r.3)) {
                             clipped_frames += 1;
                         } else {
                             clipped_frames = 0;
+                        }
+                        // Digits within a few pixels of the crop's top or
+                        // bottom leave no room for the window to move: a lock
+                        // a few pixels off reads clipped, gets dropped, and
+                        // the probe lands a few pixels off again. The union is
+                        // decoded with padding, so give the digits 12px of
+                        // margin instead — once per lock, and only when they
+                        // really are against the edge: a crop that already
+                        // fits is left alone, because a taller one takes in
+                        // whatever sits above or below the timer.
+                        if let Some(e) = ext.filter(|_| legible && !crop_grown) {
+                            let ink_h = (e.bottom - e.top).max(1) as u32;
+                            let margin = e.top.min(r.3 as i32 - e.bottom);
+                            // A band spanning the whole crop is not digits
+                            // measured, it is everything in view merged; no
+                            // growth on that.
+                            let measured = ink_h * 100 < r.3 * 95;
+                            if measured && margin < 5 && ink_h + 24 > r.3 {
+                                let want_h = (ink_h + 24).min(active_regs.union.3);
+                                let max_y = active_regs.union.3.saturating_sub(want_h) as i64;
+                                let y = (r.1 as i64 + e.cy() as i64 - want_h as i64 / 2)
+                                    .clamp(0, max_y);
+                                info!(
+                                    "timer crop grown to {want_h}px tall around {ink_h}px digits (was {}px)",
+                                    r.3
+                                );
+                                active_regs.timer = (r.0, y as u32, r.2, want_h);
+                                anchors[active_layout] = Some((
+                                    (r.2 as f32 * 0.94).round() as i32,
+                                    (want_h as f32 * 0.47).round() as i32,
+                                ));
+                                crop_grown = true;
+                                // This frame's ink was measured in the old crop.
+                                ink = None;
+                                clipped_frames = 0;
+                            }
                         }
                     }
                     Err(e) => {
@@ -1908,7 +2011,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         } else {
             Some(union_bright.clone())
         };
-        let parsed = parse_time(&text);
+        let parsed = parse_timer_text(&text);
         // Resume probing after a dark stretch on the active position: either
         // the scene changed or the LiveSplit window was nudged.
         if cands.len() > 1 {
@@ -1962,17 +2065,30 @@ pub async fn run(cfg: Config) -> Result<()> {
                 None => {}
                 Some(a) => {
                     let d = (m.0 - a.0, m.1 - a.1);
+                    // Digits differ in width by a few pixels, so the ink's
+                    // right edge depends on the last glyph shown; and at 1-2
+                    // fps the hundredths digit repeats for many frames. Eight
+                    // hits that all end in the same digit are one measurement
+                    // repeated, not eight — a re-anchor needs hits spanning at
+                    // least three different final digits.
+                    let last_glyph = last_text.chars().last().unwrap_or(' ');
                     let near_last = drift_hits
                         .last()
                         .is_none_or(|l| (l.0 - d.0).abs() <= 2 && (l.1 - d.1).abs() <= 2);
                     if d.0.abs() < 4 && d.1.abs() < 4 {
                         drift_hits.clear();
                     } else if near_last {
-                        drift_hits.push(d);
+                        drift_hits.push((d.0, d.1, last_glyph));
                     } else {
-                        drift_hits = vec![d];
+                        drift_hits = vec![(d.0, d.1, last_glyph)];
                     }
-                    if drift_hits.len() >= 8 {
+                    let distinct_glyphs = {
+                        let mut g: Vec<char> = drift_hits.iter().map(|h| h.2).collect();
+                        g.sort_unstable();
+                        g.dedup();
+                        g.len()
+                    };
+                    if drift_hits.len() >= 8 && distinct_glyphs >= 3 {
                         let mut xs: Vec<i32> = drift_hits.iter().map(|h| h.0).collect();
                         let mut ys: Vec<i32> = drift_hits.iter().map(|h| h.1).collect();
                         xs.sort_unstable();
@@ -2269,27 +2385,38 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
                 if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&cp)?).await {
                     debug!("counter ocr: {:?} (crop {cx},{cy} {cw2}x{ch2})", txt.trim());
-                    // The counter only ever grows, by a little per run. A
-                    // value that jumps far ahead (or the very first value of
-                    // a session, which nothing vouches for) needs three
-                    // identical reads instead of two, so one garbage read
-                    // can't poison the sequence for the rest of the day.
-                    if let Some(v) = crate::timeparse::parse_counter(txt.trim())
-                        .filter(|&v| last_ls_attempt.is_none_or(|p| v > p))
-                    {
-                        let near = last_ls_attempt.is_some_and(|p| v < p + 500);
-                        let need = if near { 2 } else { 3 };
-                        counter_stable = match counter_stable {
-                            Some((pv, n)) if pv == v => Some((v, n + 1)),
-                            _ => Some((v, 1)),
-                        };
-                        if matches!(counter_stable, Some((_, n)) if n >= need) {
-                            info!("livesplit attempt counter: {v}");
-                            if cr.ls_attempt.is_none() {
+                    if let Some(v) = crate::timeparse::parse_counter(txt.trim()) {
+                        use crate::counter::CounterEvent;
+                        match counter.observe(v, t) {
+                            CounterEvent::Ignore => {}
+                            CounterEvent::Adopt(v) => {
+                                info!("livesplit attempt counter: {v}");
                                 health.counter_reads += 1;
+                                cr.ls_attempt = Some(v);
                             }
-                            cr.ls_attempt = Some(v);
-                            last_ls_attempt = Some(v);
+                            CounterEvent::Revert { bogus, to } => {
+                                warn!(
+                                    "attempt counter {bogus} was a misread (two runs in a row read lower, ending at {to}); reverting"
+                                );
+                                if let Some(sid) = session_id {
+                                    match db::clear_ls_attempt(&pool, sid, bogus).await {
+                                        Ok(n) if n > 0 => {
+                                            info!("cleared run number {bogus} from {n} run(s)")
+                                        }
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            warn!("failed to clear run number {bogus}: {e:#}")
+                                        }
+                                    }
+                                }
+                                health.event(
+                                    time_base.map(|b| b + t).unwrap_or_else(util::unix_ms),
+                                    "counter",
+                                    format!("{bogus} was a misread; now {to}"),
+                                );
+                                health.counter_reads += 1;
+                                cr.ls_attempt = Some(to);
+                            }
                         }
                     }
                 }
@@ -2405,7 +2532,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             // run, dropped when the run ends.
             match &ev {
                 Event::Started { .. } => {
-                    counter_stable = None;
+                    counter.reset_run();
                     if cfg.splits.enabled {
                         splits_tracker = Some(crate::splits::SplitsTracker::new(
                             shared.acts.len(),
@@ -2778,6 +2905,33 @@ mod tests {
     }
 
     #[test]
+    fn title_is_the_line_with_the_most_letters_not_the_topmost() {
+        // A themed layout has artwork above the pane that OCR renders as
+        // stray syllables; they must not become the game name.
+        let timer = (60, 400, 300, 90);
+        let letters: Vec<ocr::Word> = [
+            (200, 10, 40, 18, "eos"),
+            (150, 49, 120, 22, "Ninja"),
+            (282, 49, 130, 22, "Gaiden"),
+            (458, 54, 100, 22, "(NES)"),
+            (307, 113, 80, 20, "Any%"),
+        ]
+        .iter()
+        .map(|&(x, y, w, h, t)| ocr::Word {
+            x,
+            y,
+            w,
+            h,
+            conf: 90.0,
+            text: t.into(),
+        })
+        .collect();
+        let r = pane_readings(&[], &letters, 2, timer, 300);
+        assert_eq!(r.game.as_deref(), Some("Ninja Gaiden (NES)"));
+        assert_eq!(r.category.as_deref(), Some("Any%"));
+    }
+
+    #[test]
     fn game_name_matching_tolerates_ocr_damage() {
         assert!(game_matches("Ninja Gaiden (NES)", "Ninja Gaiden (NES)"));
         assert!(game_matches("Ninja Gaiden", "Ninja Gaiden (NES)"));
@@ -2936,6 +3090,47 @@ mod tests {
             0,
         );
         assert!(ok);
+    }
+
+    #[test]
+    fn ink_extent_is_the_digit_band_not_every_inked_row() {
+        // 4x-upscaled crop, 100x25 source: digits occupy rows 5..15 (40..60
+        // upscaled) across columns 40..120; a separator line runs the full
+        // width at the bottom (row 96..97); the top of a neighbouring text
+        // row pokes in at the very top (rows 0..3, a few columns). Only the
+        // digits count, so the extent is not "clipped".
+        let (w, h) = (400u32, 100u32);
+        let mut img = GrayImage::from_pixel(w, h, image::Luma([255]));
+        for y in 40..60 {
+            for x in 40..120 {
+                img.put_pixel(x, y, image::Luma([0]));
+            }
+        }
+        for y in 96..98 {
+            for x in 0..w {
+                img.put_pixel(x, y, image::Luma([0]));
+            }
+        }
+        for y in 0..4 {
+            for x in 60..90 {
+                img.put_pixel(x, y, image::Luma([0]));
+            }
+        }
+        let e = ink_extent(&img, None, 4).unwrap();
+        assert_eq!(
+            (e.left, e.right, e.top, e.bottom),
+            (10, 30, 10, 15),
+            "{e:?}"
+        );
+        assert!(!e.clipped(100, 25));
+        // The same digits touching the top edge ARE clipped.
+        let mut cut = GrayImage::from_pixel(w, h, image::Luma([255]));
+        for y in 0..20 {
+            for x in 40..120 {
+                cut.put_pixel(x, y, image::Luma([0]));
+            }
+        }
+        assert!(ink_extent(&cut, None, 4).unwrap().clipped(100, 25));
     }
 
     #[test]

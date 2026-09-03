@@ -2,6 +2,44 @@
 //!
 //! All times in this crate are `i64` milliseconds.
 
+/// Parse the main timer's text, repairing the one failure the LiveSplit timer
+/// format produces systematically: the hundredths are drawn in a smaller
+/// font, and at stream resolution their decimal point is a couple of pixels
+/// that thresholding erases. "4.76" then reads as "476", "45.71" as "4571",
+/// "0.45" as "45", and "3:06.12" as "3:06 12". Every run starts in that
+/// sub-ten-second range, so without this repair the first seconds of every
+/// attempt are illegible and a quick reset is never seen at all.
+///
+/// Only the timer uses this; split rows and reference times stay strict. The
+/// tracker's own consistency checks (a reading must advance with the wall
+/// clock) are what keep a repaired misread from becoming a run.
+pub fn parse_timer_text(raw: &str) -> Option<i64> {
+    if let Some(v) = parse_time(raw) {
+        return Some(v);
+    }
+    let t = raw.trim();
+    // "3:06 12" / "1 86": a gap where the point was.
+    if let Some((head, tail)) = t.rsplit_once(' ') {
+        if tail.len() == 2
+            && tail.chars().all(|c| c.is_ascii_digit())
+            && !head.contains('.')
+            && head.chars().all(|c| c.is_ascii_digit() || c == ':')
+            && head.chars().any(|c| c.is_ascii_digit())
+        {
+            return parse_time(&format!("{head}.{tail}"));
+        }
+    }
+    // Bare digits with no separator at all: seconds and hundredths.
+    if !t.is_empty() && t.len() <= 4 && t.chars().all(|c| c.is_ascii_digit()) {
+        return match t.len() {
+            2 => parse_time(&format!("0.{t}")),
+            3 | 4 => parse_time(&format!("{}.{}", &t[..t.len() - 2], &t[t.len() - 2..])),
+            _ => None,
+        };
+    }
+    None
+}
+
 /// Parse a timer string as produced by OCR into milliseconds.
 ///
 /// Accepted shapes (OCR runs with a `0123456789:.` whitelist):
@@ -197,5 +235,32 @@ mod tests {
         assert_eq!(format_ms(67_000), "1:07.0");
         assert_eq!(format_ms(3_600_000), "1:00:00.0");
         assert_eq!(format_ms((3600 + 23 * 60 + 45) * 1000 + 678), "1:23:45.6");
+    }
+}
+
+#[cfg(test)]
+mod timer_text_tests {
+    use super::*;
+
+    #[test]
+    fn repairs_the_missing_decimal_point_of_the_small_hundredths_font() {
+        // Strict values pass straight through.
+        assert_eq!(parse_timer_text("11:35.47"), Some(695_470));
+        assert_eq!(parse_timer_text("7.66"), Some(7_660));
+        // The point of the small fraction font lost to thresholding.
+        assert_eq!(parse_timer_text("476"), Some(4_760));
+        assert_eq!(parse_timer_text("4571"), Some(45_710));
+        assert_eq!(parse_timer_text("45"), Some(450));
+        // A gap where the point was.
+        assert_eq!(parse_timer_text("3:06 12"), Some(186_120));
+        assert_eq!(parse_timer_text("1 86"), Some(1_860));
+        // Not repairable: a lone digit, five digits (the attempt counter
+        // shape), letters, a gap after a point (the strict parser already
+        // ignores whitespace there and reads "1.2 34" as 1.234).
+        assert_eq!(parse_timer_text("4"), None);
+        assert_eq!(parse_timer_text("95958"), None);
+        assert_eq!(parse_timer_text("4a6"), None);
+        assert_eq!(parse_timer_text("1.2 34"), Some(1_234));
+        assert_eq!(parse_timer_text(""), None);
     }
 }

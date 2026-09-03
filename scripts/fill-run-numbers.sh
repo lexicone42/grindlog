@@ -17,6 +17,20 @@ DB="${1:-ninja-gaiden.db}"
 # "filled|0", and takes the deploy down with it.
 sqlite3 -bail "$DB" <<'SQL'
 PRAGMA busy_timeout = 20000;
+-- The counter only ever counts up. A number that sits between two neighbours
+-- (in start order) which agree with each other, yet is outside their range,
+-- is a misread — a 94688 read as 94888 — and would otherwise both survive
+-- and block the inference for every run around it. Drop it; the inference
+-- below refills it from the neighbours.
+CREATE TEMP TABLE bad AS
+  WITH r AS (
+    SELECT id, ls_attempt AS v,
+           LAG(ls_attempt)  OVER (PARTITION BY game, category ORDER BY started_at_ms, id) AS p,
+           LEAD(ls_attempt) OVER (PARTITION BY game, category ORDER BY started_at_ms, id) AS n
+    FROM runs WHERE ls_attempt IS NOT NULL)
+  SELECT id FROM r WHERE p IS NOT NULL AND n IS NOT NULL AND p < n AND NOT (p < v AND v < n);
+UPDATE runs SET ls_attempt = NULL WHERE id IN (SELECT id FROM bad);
+SELECT 'outliers_cleared', (SELECT COUNT(*) FROM bad);
 CREATE TEMP TABLE ord AS
   SELECT id, game, category, ls_attempt,
          ROW_NUMBER() OVER (PARTITION BY game, category ORDER BY started_at_ms, id) AS rn

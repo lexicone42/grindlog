@@ -3,6 +3,7 @@ mod calibrate;
 mod capture;
 mod chat;
 mod config;
+mod counter;
 mod db;
 mod locate;
 mod ocr;

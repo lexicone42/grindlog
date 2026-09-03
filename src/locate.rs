@@ -161,11 +161,36 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
         .recognize_words(&png, Some("0123456789:.-+"), 11)
         .await?;
 
-    let times: Vec<(R, &Word)> = digits
+    // A time is a single word ("11:35.1"), or — at the start of a run, when
+    // the timer shows "7.66" with the hundredths in a smaller font — two
+    // words on one line whose point was lost ("7" + "66"). Without the pair
+    // rule the biggest text on the pane is invisible here and a Sum of Best
+    // row gets mistaken for the timer.
+    let single: Vec<(R, String)> = digits
         .iter()
-        .filter(|w| is_time(&w.text) && w.conf >= 30.0)
-        .map(|w| (bbox(w, UP), w))
+        .filter(|w| w.conf >= 30.0)
+        .map(|w| (bbox(w, UP), w.text.trim().to_string()))
         .collect();
+    let mut candidates: Vec<(R, String)> = Vec::new();
+    for (i, (ra, ta)) in single.iter().enumerate() {
+        if is_time(ta) || crate::timeparse::parse_timer_text(ta).is_some() {
+            candidates.push((*ra, ta.clone()));
+        }
+        for (rb, tb) in single.iter().skip(i + 1) {
+            let same_line = (ra.1 as i64 + ra.3 as i64 / 2 - rb.1 as i64 - rb.3 as i64 / 2).abs()
+                <= (ra.3 as i64 / 2).max(4);
+            let adjacent = rb.0 >= ra.0 + ra.2 && rb.0 - (ra.0 + ra.2) <= ra.3;
+            if same_line && adjacent {
+                let joined = format!("{ta} {tb}");
+                if crate::timeparse::parse_timer_text(&joined).is_some() {
+                    if let Some(u) = union_rects(&[*ra, *rb]) {
+                        candidates.push((u, joined));
+                    }
+                }
+            }
+        }
+    }
+    let times: Vec<(R, &str)> = candidates.iter().map(|(r, t)| (*r, t.as_str())).collect();
     // The timer is the tallest time on screen; anything under 20px is noise.
     let Some((timer_ink, _)) = times.iter().max_by_key(|(r, _)| r.3).copied() else {
         return Ok(None);

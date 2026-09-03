@@ -682,15 +682,25 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     const pitch = geo ? (geo.d.match(/pitch (\d+)px/) || [])[1] : null;
     const pct = frames ? Math.round(parsed * 100 / frames) : 0;
     const dayRuns = byDay.get(key) || [];
-    const numbered = dayRuns.filter(r => r.ls_attempt != null).length;
-    const warn = pct < 60 || (dayRuns.length >= 5 && numbered < dayRuns.length / 2);
-    return { frames, parsed, pct, relocks, events, pitch, warn };
+    const nums = dayRuns.map(r => r.ls_attempt).filter(v => v != null);
+    const numbered = nums.length;
+    // The honest completeness measure is his own attempt counter: the span
+    // between the day's first and last run number is how many attempts he
+    // made, and the runs we hold are how many we saw. "Frames read" is not —
+    // most of a broadcast has no timer on screen at all.
+    const span = nums.length >= 2 ? Math.max(...nums) - Math.min(...nums) + 1 : null;
+    const captured = span ? Math.min(100, Math.round(dayRuns.length * 100 / span)) : null;
+    const warn = captured != null
+      ? captured < 85
+      : (pct < 60 || (dayRuns.length >= 5 && numbered < dayRuns.length / 2));
+    return { frames, parsed, pct, relocks, events, pitch, warn, span, captured };
   }
 
   const chips = document.getElementById('day-chips');
   chips.innerHTML = days.map(d => {
     const h = dayHealth(d);
-    const dot = h && h.warn ? `<span title="capture read only ${h.pct}% of frames" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--behind);margin-left:5px;vertical-align:middle"></span>` : '';
+    const why = h && h.captured != null ? `captured ${h.captured}% of his attempts` : `capture read only ${h && h.pct}% of frames`;
+    const dot = h && h.warn ? `<span title="${why}" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--behind);margin-left:5px;vertical-align:middle"></span>` : '';
     return `<button class="daychip" data-day="${d}" aria-pressed="false">${dshort(byDay.get(d)[0].started_at_ms)}${dot}</button>`;
   }).join('');
   chips.addEventListener('click', e => {
@@ -737,10 +747,14 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     const dh = dayHealth(key);
     if (dh) {
       const numbered = runs.filter(r => r.ls_attempt != null).length;
-      const parts = [
-        `${dh.pct}% of frames read`,
-        `run numbers on ${numbered}/${runs.length} runs`,
-      ];
+      const parts = [];
+      if (dh.span) {
+        const missed = Math.max(0, dh.span - runs.length);
+        parts.push(`${runs.length} of his ${dh.span} attempts captured` +
+          (missed ? ` (${missed} missed — most are resets within seconds of starting)` : ''));
+      }
+      parts.push(`${dh.pct}% of frames had a legible timer`);
+      parts.push(`run numbers on ${numbered}/${runs.length} runs`);
       if (dh.relocks) parts.push(`${dh.relocks} layout ${dh.relocks === 1 ? 'event' : 'events'}`);
       if (dh.pitch) parts.push(`rows ${dh.pitch}px`);
       const evText = dh.events.slice(-12).map(e =>

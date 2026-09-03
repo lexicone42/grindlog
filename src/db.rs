@@ -177,6 +177,19 @@ pub async fn open_session(
     Ok(res.last_insert_rowid())
 }
 
+/// Forget an attempt number that turned out to be a misread, wherever it was
+/// recorded in this session (fill-run-numbers infers it again from its
+/// neighbours). Returns how many rows were cleared.
+pub async fn clear_ls_attempt(pool: &SqlitePool, session_id: i64, value: i64) -> Result<u64> {
+    let res =
+        sqlx::query("UPDATE runs SET ls_attempt = NULL WHERE ls_attempt = ? AND session_id = ?")
+            .bind(value)
+            .bind(session_id)
+            .execute(pool)
+            .await?;
+    Ok(res.rows_affected())
+}
+
 /// Close sessions left open by a process that died: ended at their last
 /// run's end, or at their start when they recorded nothing. Returns how many.
 pub async fn close_stale_sessions(pool: &SqlitePool) -> Result<u64> {
@@ -476,6 +489,11 @@ pub struct DayStats {
     pub finished: i64,
     pub resets: i64,
     pub best_ms: Option<i64>,
+    /// The runner's own attempt counter at the day's first and last recorded
+    /// run: `last_no - first_no + 1` is how many attempts he really made,
+    /// which is the honest denominator for how many we captured.
+    pub first_no: Option<i64>,
+    pub last_no: Option<i64>,
 }
 
 /// Per-local-day breakdown for one game/category, oldest first.
@@ -485,7 +503,8 @@ pub async fn daily_stats(pool: &SqlitePool, game: &str, category: &str) -> Resul
          COUNT(*) AS attempts, \
          COALESCE(SUM(CASE WHEN outcome = 'finished' THEN 1 ELSE 0 END), 0) AS finished, \
          COALESCE(SUM(CASE WHEN outcome = 'reset' THEN 1 ELSE 0 END), 0) AS resets, \
-         MIN(CASE WHEN outcome = 'finished' THEN final_time_ms END) AS best_ms \
+         MIN(CASE WHEN outcome = 'finished' THEN final_time_ms END) AS best_ms, \
+         MIN(ls_attempt) AS first_no, MAX(ls_attempt) AS last_no \
          FROM runs WHERE game = ? AND category = ? GROUP BY day ORDER BY day",
     )
     .bind(game)
@@ -500,6 +519,8 @@ pub async fn daily_stats(pool: &SqlitePool, game: &str, category: &str) -> Resul
             finished: r.get("finished"),
             resets: r.get("resets"),
             best_ms: r.get("best_ms"),
+            first_no: r.get("first_no"),
+            last_no: r.get("last_no"),
         })
         .collect())
 }

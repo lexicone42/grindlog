@@ -225,7 +225,20 @@ probe again, so a scene switch or a few-pixel nudge is picked up and logged
 (`layout switched …` / `re-anchored: LiveSplit moved +18,+12 px`) rather than
 silently losing runs. The union of every rectangle (plus the drift margin)
 is the only crop ffmpeg decodes, so extra layouts cost OCR calls only while
-probing.
+probing. A lock whose digits sit within a few pixels of the crop's top or
+bottom gets the crop enlarged around them (a themed layout's 90px timer in a
+100px crop would otherwise read as clipped after any small drift and be
+dropped), and a re-anchor needs drift measurements spanning several different
+final digits, since digits differ in width and the hundredths digit repeats
+for many frames.
+
+**The hundredths font.** LiveSplit draws the fraction of the main timer in a
+smaller font, and at stream resolution its decimal point is a couple of
+pixels that thresholding erases: `4.76` reads as `476`, `3:06.12` as
+`3:06 12`. Every attempt starts in that sub-ten-second range, so the timer's
+text — and only the timer's — is parsed leniently (`parse_timer_text`),
+which is what makes a reset a few seconds after starting visible at all.
+Split rows and reference times stay strict.
 
 **Pane geometry.** A resized LiveSplit window changes the row pitch, which
 no shift of the configured rectangles can follow, so at every lock the bot
@@ -244,6 +257,8 @@ the same way: the one whose splits column reads as times wins.
 |---|---|
 | `scripts/build-release.sh` | build `target/release/ngtwitchtimer`, with the in-process OCR engine when the `~/.local/opt/ocr-dev` toolchain is staged (see Requirements), else the CLI engine |
 | `scripts/run-live.sh` | supervise the live bot (restart on exit, log rotation, `logs/live.log`); run it inside tmux |
+| `scripts/rollout.sh [--allow-dirty]` | ship a build to the live bot: build, tests, a one-minute smoke replay that must read ≥90%, wait for the bot to be between runs (or offline), restart it through the supervisor, confirm it came back |
+| `scripts/replay-window.sh <cfg> <vod_id> <start_secs> <dur_secs> [binary] [label]` | replay one window of a VOD and score the capture against the runner's own attempt counter (runs found, run numbers, lock events); run it with the old and the new binary before trusting any OCR or detection change |
 | `scripts/backfill-vods.sh <vod_id>...` | analyze Twitch VODs straight from Twitch, one database each in `backfill-db/`; run several chains in parallel |
 | `scripts/import-vod.sh <vod_id> [--deploy]` | replace one broadcast day in the live database from its completed VOD database |
 | `scripts/import-when-done.sh <vod_id>...` | detached: import each VOD as its chain finishes and redeploy the site |
