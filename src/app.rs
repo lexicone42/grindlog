@@ -1386,6 +1386,10 @@ pub async fn run(cfg: Config) -> Result<()> {
         .collect();
     // (dx, dy, last glyph of the reading it came from)
     let mut drift_hits: Vec<(i32, i32, char)> = Vec::new();
+    // Eight seconds of agreeing measurements before a re-anchor, whatever the
+    // frame rate: counted in frames, 2 fps re-anchored twice as eagerly and
+    // churned (19 lock events in 40 minutes against 2 at 1 fps).
+    let drift_hits_needed = (8 * cfg.stream.fps.max(1)) as usize;
     let mut drift_warned = false;
     // Previous frame (brightest-channel union) and what the timer read on it:
     // an unchanged timer crop reuses the reading instead of paying for OCR,
@@ -2125,7 +2129,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         g.dedup();
                         g.len()
                     };
-                    if drift_hits.len() >= 8 && distinct_glyphs >= 3 {
+                    if drift_hits.len() >= drift_hits_needed && distinct_glyphs >= 3 {
                         let mut xs: Vec<i32> = drift_hits.iter().map(|h| h.0).collect();
                         let mut ys: Vec<i32> = drift_hits.iter().map(|h| h.1).collect();
                         xs.sort_unstable();
