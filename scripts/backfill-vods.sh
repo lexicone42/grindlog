@@ -27,6 +27,9 @@ vod_id = "$id"
 # 480p30: timer, splits AND the attempt counter all read cleanly (verified
 # against 1080p on the same footage) at ~10x less decode work than 1080p60.
 quality = "480p30"
+# Two reads a second: catches attempts that die within three seconds and the
+# run number on far more short ones; halves backfill speed (still ~6x realtime).
+fps = 2
 
 [ocr]
 engine = "auto"
