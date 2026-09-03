@@ -1915,7 +1915,11 @@ pub async fn run(cfg: Config) -> Result<()> {
                 let c = &mut cands[ci];
                 let crop = c.regs.timer;
                 let (png, proc, g) = read_timer(&union_bright, crop)?;
-                let (rd, bbox) = match glyph_reader.as_ref().and_then(|gr| gr.read(&g)) {
+                let glyph_hit = glyph_reader
+                    .as_ref()
+                    .and_then(|gr| gr.read(&g))
+                    .filter(|r| parse_time(&r.text).is_some());
+                let (rd, bbox) = match glyph_hit {
                     Some(r) => {
                         reader_used = "glyph";
                         // Only the box's left edge matters here: it is where

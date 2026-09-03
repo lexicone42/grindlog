@@ -99,6 +99,11 @@ enum GlyphsAction {
         /// Save the crops the reader got wrong here, named by label and reading
         #[arg(long)]
         dump_wrong: Option<std::path::PathBuf>,
+        /// Try other decision floors than the reader's own
+        #[arg(long)]
+        min_score: Option<f32>,
+        #[arg(long)]
+        min_margin: Option<f32>,
     },
 }
 
@@ -159,11 +164,14 @@ async fn main() -> Result<()> {
                 corpus,
                 templates,
                 dump_wrong,
+                min_score,
+                min_margin,
             } => glyph::cli_test(
                 &corpus,
                 &templates,
                 cfg.timer.threshold,
                 dump_wrong.as_deref(),
+                min_score.zip(min_margin),
             ),
         },
     }
