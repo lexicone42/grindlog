@@ -13,6 +13,9 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p backfill-logs backfill-db
+# One OpenMP thread per worker: tesseract's threads only spin-wait on crops
+# this small, and several workers on one box otherwise starve each other.
+export OMP_THREAD_LIMIT=1 OMP_NUM_THREADS=1
 
 for id in "$@"; do
   cfg=$(mktemp /tmp/ngbackfill-XXXXXX.toml)

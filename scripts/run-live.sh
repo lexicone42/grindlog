@@ -8,6 +8,8 @@
 # Stop for good:   tmux kill-session -t ngtimer
 set -u
 cd "$(dirname "$0")/.." || exit 1
+# One OpenMP thread: tesseract's threads only spin-wait on crops this small.
+export OMP_THREAD_LIMIT=1 OMP_NUM_THREADS=1
 mkdir -p logs
 LOG=logs/live.log
 # Rotate unbounded logs when they grow past ~100MB (months of runtime).
