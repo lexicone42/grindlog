@@ -398,6 +398,12 @@ pub struct GameCfg {
     /// it beats this too, so the bot never claims a record it can't back.
     #[serde(default)]
     pub baseline_best: Option<String>,
+    /// Only record runs while the layout's own title row names this game.
+    /// Lets a marathon broadcast be captured, recording just the segments
+    /// that are actually this game. Off by default: a misread title would
+    /// otherwise stop recording.
+    #[serde(default)]
+    pub require_title_match: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -445,6 +451,7 @@ impl Default for GameCfg {
             record_label: d_record_label(),
             references: Vec::new(),
             baseline_best: None,
+            require_title_match: false,
         }
     }
 }

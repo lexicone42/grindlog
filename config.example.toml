@@ -88,6 +88,10 @@ crop_h = 90
 [lifetime_sob]                  # optional: LiveSplit's sum-of-best row
 # enabled = false
 # crop_x = 0 ... crop_h = 0     # canvas coords; threshold / invert as for [splits]
+# Set this to the rows UNDER the timer even if you only care about one of
+# them: only what the configured rectangles span is decoded, and the bot
+# reads every labelled reference time it finds there (Sum of Best, the
+# season best the streamer labels with a year, PB, WR) at each layout lock.
 
 # With [splits] enabled, the bot also measures the pane at every layout lock
 # (row pitch, cumulative column, counter, Sum of Best row) and uses those

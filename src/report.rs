@@ -50,7 +50,7 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
                 })
             })
             .collect();
-        let references: Vec<serde_json::Value> = cfg
+        let mut references: Vec<serde_json::Value> = cfg
             .game
             .references
             .iter()
@@ -59,13 +59,32 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
                     .map(|ms| serde_json::json!({"label": r.label, "ms": ms}))
             })
             .collect();
+        // Reference times read off the layout itself replace the configured
+        // ones of the same name — the streamer keeps them current, we don't.
+        for (key, label) in [("ls_wr_ms", "WR"), ("ls_pb_ms", "Lifetime PB")] {
+            if let Some(ms) = db::get_setting(&pool, key)
+                .await?
+                .and_then(|s| s.parse::<i64>().ok())
+            {
+                references.retain(|r| r["label"] != label);
+                references.push(serde_json::json!({"label": label, "ms": ms}));
+            }
+        }
         let doc = serde_json::json!({
             "generated_at_ms": util::unix_ms(),
             "current_game": game,
             "current_category": category,
             "record_label": cfg.game.record_label,
             "references": references,
-            "baseline_best_ms": cfg.game.baseline_best_ms(),
+            // The layout's own season best outranks the configured baseline:
+            // it is what his comparison column actually shows.
+            "baseline_best_ms": db::get_setting(&pool, "ls_season_best_ms")
+                .await?
+                .and_then(|s| s.parse::<i64>().ok())
+                .or(cfg.game.baseline_best_ms()),
+            "ls_pb_ms": db::get_setting(&pool, "ls_pb_ms")
+                .await?
+                .and_then(|s| s.parse::<i64>().ok()),
             "ls_sob_ms": db::get_setting(&pool, "ls_sob_ms")
                 .await?
                 .and_then(|s| s.parse::<i64>().ok()),
