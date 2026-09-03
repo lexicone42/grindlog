@@ -896,6 +896,7 @@ async fn measure_pane(
         upscale: UP,
         threshold: pre.threshold,
         invert: pre.invert,
+        auto_threshold: false,
     };
     let proc = ocr::preprocess(union_img, &pre2);
     let png = ocr::to_png(&proc)?;
@@ -1363,6 +1364,17 @@ pub async fn run(cfg: Config) -> Result<()> {
     // anchor from the first lock instead would enshrine a bad lock: digits
     // clipped at the crop edge would be "corrected" back to the edge, the
     // timer would keep going dark, and the layout probe would thrash.
+    // The anchor must always describe the CURRENT timer crop: it is recomputed
+    // whenever the crop changes shape (a lock restores the configured crop, a
+    // growth enlarges it, a re-anchor keeps the grown one). A stale anchor
+    // from a taller crop, measured against the configured one, reads as a
+    // fabricated drift of several pixels on every frame.
+    let anchor_of = |r: R| -> (i32, i32) {
+        (
+            (r.2 as f32 * 0.94).round() as i32,
+            (r.3 as f32 * 0.47).round() as i32,
+        )
+    };
     let mut anchors: Vec<Option<(i32, i32)>> = regs
         .iter()
         .map(|r| {
@@ -1375,8 +1387,6 @@ pub async fn run(cfg: Config) -> Result<()> {
     // (dx, dy, last glyph of the reading it came from)
     let mut drift_hits: Vec<(i32, i32, char)> = Vec::new();
     let mut drift_warned = false;
-    // The timer crop has been enlarged to fit the digits since the last lock.
-    let mut crop_grown = false;
     // Previous frame (brightest-channel union) and what the timer read on it:
     // an unchanged timer crop reuses the reading instead of paying for OCR,
     // and a fully static union skips the probe entirely.
@@ -1416,11 +1426,13 @@ pub async fn run(cfg: Config) -> Result<()> {
         upscale: cfg.timer.upscale,
         threshold: cfg.splits.threshold,
         invert: cfg.splits.invert,
+        auto_threshold: false,
     };
     let pre_counter = ocr::PreprocessCfg {
         upscale: cfg.timer.upscale,
         threshold: cfg.attempts_counter.threshold,
         invert: cfg.attempts_counter.invert,
+        auto_threshold: false,
     };
     // Which attempt-counter reading to believe (see counter.rs), seeded with
     // the highest number already recorded.
@@ -1642,6 +1654,8 @@ pub async fn run(cfg: Config) -> Result<()> {
         let mut text = String::new();
         let mut ink: Option<(i32, i32)> = None;
         let mut frame_static = false;
+        // The fallback threshold that rescued this frame's read, if any.
+        let mut retry_thr: Option<u8> = None;
         // An OCR failure must not be cached as "the reading": forget the
         // previous frame so the next one is read again.
         let mut ocr_failed = false;
@@ -1658,10 +1672,49 @@ pub async fn run(cfg: Config) -> Result<()> {
                 ocr_skipped += 1;
             } else {
                 let g = image::imageops::crop_imm(&union_bright, r.0, r.1, r.2, r.3).to_image();
-                let proc = ocr::preprocess(&g, &pre);
+                let mut proc = ocr::preprocess(&g, &pre);
+                // NG_DUMP_TIMER=1: save the raw timer crop every 25 frames (for
+                // threshold tuning against real pixels) and log what Otsu
+                // would have chosen for it.
+                if std::env::var_os("NG_DUMP_TIMER").is_some() && frame_idx % 25 == 0 {
+                    let _ = std::fs::create_dir_all("calibration");
+                    let _ = g.save(format!("calibration/timer-{frame_idx}.png"));
+                    debug!(
+                        "timer crop {frame_idx} dumped; otsu would pick {:?}, configured {}",
+                        ocr::otsu_threshold(&g),
+                        pre.threshold
+                    );
+                }
                 match ocr_engine.recognize_boxed(&ocr::to_png(&proc)?).await {
                     Ok((t, bbox)) => {
+                        let mut bbox = bbox;
                         text = t.trim().to_string();
+                        // A read that did not parse gets a second chance at
+                        // each fallback threshold: the themes want different
+                        // cutoffs (60 for one, 75 for the other), and this
+                        // pays for the extra OCR only on frames that failed.
+                        if parse_timer_text(&text).is_none() {
+                            for &th in &cfg.timer.retry_thresholds {
+                                let alt = ocr::PreprocessCfg {
+                                    threshold: th,
+                                    auto_threshold: false,
+                                    ..pre.clone()
+                                };
+                                let proc2 = ocr::preprocess(&g, &alt);
+                                if let Ok((t2, b2)) =
+                                    ocr_engine.recognize_boxed(&ocr::to_png(&proc2)?).await
+                                {
+                                    let t2 = t2.trim().to_string();
+                                    if parse_timer_text(&t2).is_some() {
+                                        text = t2;
+                                        bbox = b2;
+                                        proc = proc2;
+                                        retry_thr = Some(th);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         last_text = text.clone();
                         // A trailing "1" is a narrow glyph: its ink ends ~9px
                         // short of the other digits' right edge, and at 2 fps the
@@ -1679,42 +1732,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                         } else {
                             clipped_frames = 0;
                         }
-                        // Digits within a few pixels of the crop's top or
-                        // bottom leave no room for the window to move: a lock
-                        // a few pixels off reads clipped, gets dropped, and
-                        // the probe lands a few pixels off again. The union is
-                        // decoded with padding, so give the digits 12px of
-                        // margin instead — once per lock, and only when they
-                        // really are against the edge: a crop that already
-                        // fits is left alone, because a taller one takes in
-                        // whatever sits above or below the timer.
-                        if let Some(e) = ext.filter(|_| legible && !crop_grown) {
-                            let ink_h = (e.bottom - e.top).max(1) as u32;
-                            let margin = e.top.min(r.3 as i32 - e.bottom);
-                            // A band spanning the whole crop is not digits
-                            // measured, it is everything in view merged; no
-                            // growth on that.
-                            let measured = ink_h * 100 < r.3 * 95;
-                            if measured && margin < 5 && ink_h + 24 > r.3 {
-                                let want_h = (ink_h + 24).min(active_regs.union.3);
-                                let max_y = active_regs.union.3.saturating_sub(want_h) as i64;
-                                let y = (r.1 as i64 + e.cy() as i64 - want_h as i64 / 2)
-                                    .clamp(0, max_y);
-                                info!(
-                                    "timer crop grown to {want_h}px tall around {ink_h}px digits (was {}px)",
-                                    r.3
-                                );
-                                active_regs.timer = (r.0, y as u32, r.2, want_h);
-                                anchors[active_layout] = Some((
-                                    (r.2 as f32 * 0.94).round() as i32,
-                                    (want_h as f32 * 0.47).round() as i32,
-                                ));
-                                crop_grown = true;
-                                // This frame's ink was measured in the old crop.
-                                ink = None;
-                                clipped_frames = 0;
-                            }
-                        }
+                        // No automatic enlargement of the crop around tall
+                        // digits: a taller crop takes in the row of text
+                        // under the timer, and tesseract then drops the small
+                        // hundredths ("3." for 3.45) on frame after frame.
+                        // Measured on Jul 29: the grown crop lost two runs the
+                        // configured one caught. Clipped locks are handled by
+                        // the digit-band extent and the poor-lock re-probe.
                     }
                     Err(e) => {
                         warn!("ocr failed: {e:#}");
@@ -2000,6 +2024,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                 ever_locked = true;
                 drift_hits.clear();
                 drift_warned = false;
+                // A lock installs the configured crop again: the anchor must
+                // describe that crop, not whatever the previous lock had.
+                anchors[new_layout] = Some(anchor_of(active_regs.timer));
                 for c in cands.iter_mut() {
                     c.streak = 0;
                     c.last = None;
@@ -2011,7 +2038,17 @@ pub async fn run(cfg: Config) -> Result<()> {
         } else {
             Some(union_bright.clone())
         };
-        let parsed = parse_timer_text(&text);
+        // A reading rescued at a fallback threshold is trusted only where it
+        // agrees with the running clock. Rescued fragments ("772" for
+        // 1:57.72) are legible enough to parse and, three in a row, to look
+        // like a restart; a genuine restart is read at the primary threshold
+        // on the very next frame anyway.
+        let parsed = parse_timer_text(&text).filter(|&v| {
+            retry_thr.is_none()
+                || tracker
+                    .smoothed_now(t)
+                    .is_none_or(|s| (v - s).abs() <= cfg.detection.max_jump_ms)
+        });
         // Resume probing after a dark stretch on the active position: either
         // the scene changed or the LiveSplit window was nudged.
         if cands.len() > 1 {
@@ -2097,6 +2134,18 @@ pub async fn run(cfg: Config) -> Result<()> {
                         let new_off = (active_off.0 + d.0, active_off.1 + d.1);
                         match shifted(&regs[active_layout], new_off) {
                             Some(mut nr) => {
+                                // Keep the crop as it is now (possibly grown
+                                // around tall digits), just moved by the
+                                // measured drift; rebuilding it from the
+                                // configured height would undo the growth and
+                                // leave the anchor describing a crop that no
+                                // longer exists.
+                                if let Some(tr) =
+                                    move_rect(active_regs.timer, d.0, d.1, nr.union.2, nr.union.3)
+                                {
+                                    nr.timer = tr;
+                                }
+                                anchors[active_layout] = Some(anchor_of(nr.timer));
                                 info!(
                                     "layout {:?} re-anchored: LiveSplit moved {:+},{:+} px (now {:+},{:+} from configured)",
                                     layout_names[active_layout], d.0, d.1, new_off.0, new_off.1
@@ -2364,6 +2413,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 "ink": ink.map(|(r, cy)| vec![r, cy]),
                 "anchor": anchors[active_layout].map(|(r, cy)| vec![r, cy]),
                 "static": frame_static,
+                "retry": retry_thr,
             });
             if let Some(v) = &splits_values {
                 line["splits"] = serde_json::json!(v);
@@ -2399,6 +2449,18 @@ pub async fn run(cfg: Config) -> Result<()> {
                             CounterEvent::Ignore => {}
                             CounterEvent::Adopt(v) => {
                                 info!("livesplit attempt counter: {v}");
+                                health.counter_reads += 1;
+                                cr.ls_attempt = Some(v);
+                            }
+                            CounterEvent::Rebase(v) => {
+                                warn!(
+                                    "attempt counter restarted at {v} (a new splits file?); numbering follows it"
+                                );
+                                health.event(
+                                    time_base.map(|b| b + t).unwrap_or_else(util::unix_ms),
+                                    "counter",
+                                    format!("restarted at {v}"),
+                                );
                                 health.counter_reads += 1;
                                 cr.ls_attempt = Some(v);
                             }

@@ -38,6 +38,10 @@ crop_w = 330
 crop_h = 90
 # upscale = 4                   # 3-4x upscaling helps tesseract a lot
 # threshold = 140               # gray cutoff 0-255 for black/white
+# auto_threshold = false        # pick the cutoff per frame from the crop's own
+                                #   histogram (Otsu) — measured worse here
+# retry_thresholds = []         # e.g. [75, 45]: when a read fails to parse,
+                                #   re-read the same crop at these cutoffs
 # invert = true                 # true for light digits on dark background
 
 [ocr]

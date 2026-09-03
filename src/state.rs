@@ -168,6 +168,24 @@ struct Run {
     /// The previous raw reading, accepted or not: the pre-start offset is
     /// recognised by being frozen, a run at 0:05 by moving on to 0:06.
     last_raw: i64,
+    /// When a reading under six seconds was last seen. A genuine restart
+    /// always passes through one (the -5.00 countdown, the zero); a chain of
+    /// small values with none in the last fifteen seconds is the current
+    /// timer with its leading digits lost, not a new run.
+    last_low_at: i64,
+    /// Consecutive readings set aside as truncated. The OCR gets the leading
+    /// digits back within a frame or two; a real new run that happened to
+    /// start at the same phase would keep matching forever, so after two the
+    /// readings go back through the normal desync logic — a quick restart
+    /// still gets its run, two frames later.
+    truncated_streak: u32,
+}
+
+/// Is `v` the expected reading with its leading digits dropped? "1:56.71"
+/// read as "6.71" or "56.71" keeps the low-order digits exactly, so `v`
+/// equals the expected value modulo ten seconds or modulo one minute.
+fn truncated_read(expected: i64, v: i64) -> bool {
+    expected > v && ((v - expected % 60_000).abs() <= 300 || (v - expected % 10_000).abs() <= 300)
 }
 
 impl Run {
@@ -184,6 +202,10 @@ impl Run {
             suspects: Vec::new(),
             smoother,
             last_raw: v,
+            // The run last read near zero when it started, `v` ago — also
+            // right for a run joined mid-way, whose start we never saw.
+            last_low_at: t - v,
+            truncated_streak: 0,
         }
     }
 }
@@ -296,6 +318,13 @@ impl Tracker {
         run.illegible = 0;
         let last_raw = run.last_raw;
         run.last_raw = v;
+        let expected = run.last_good_ms + (t - run.last_good_at);
+        // A low reading — unless it is the running timer with its leading
+        // digits lost, which is low only in appearance and must not count as
+        // the countdown that would vouch for the next such fragment.
+        if v < 6_000 && !truncated_read(expected, v) {
+            run.last_low_at = t;
+        }
 
         // 1. Same value as last accepted reading: the timer is not advancing.
         //    Checked before the expected-window test, because a frozen timer
@@ -321,7 +350,6 @@ impl Tracker {
         }
 
         // 2. Advancing consistently with elapsed wall time: a good reading.
-        let expected = run.last_good_ms + (t - run.last_good_at);
         let monotonic = v + cfg.stall_tolerance_ms >= run.last_good_ms;
         if monotonic && (v - expected).abs() <= cfg.max_jump_ms {
             run.last_good_at = t;
@@ -330,6 +358,7 @@ impl Tracker {
             run.streak_repeats = 0;
             run.zeroish = 0;
             run.suspects.clear();
+            run.truncated_streak = 0;
             run.smoother.push(t, v);
             return Phase::Running(run);
         }
@@ -363,6 +392,15 @@ impl Tracker {
         // "7:22" reading as "1:22" for frames on end) is OCR, not a desync;
         // it must not accumulate as evidence of one.
         if glyph_confusion(expected, v) {
+            return Phase::Running(run);
+        }
+        // "1:56.71" with the "1:5" lost reads "6.71", the next frame "7.72":
+        // valid times, advancing a second per second near zero — exactly what
+        // a restart looks like, and three of them would fire a desync into a
+        // phantom run. They carry the expected value's low digits, and no
+        // countdown or zero preceded them; a real restart shows both.
+        if truncated_read(expected, v) && t - run.last_low_at > 15_000 && run.truncated_streak < 2 {
+            run.truncated_streak += 1;
             return Phase::Running(run);
         }
         run.suspects.push((t, v));
@@ -804,6 +842,59 @@ mod tests {
         assert_eq!(s.time(361_000), vec![]);
         let ev = s.time(362_000);
         assert!(matches!(ev.first(), Some(Event::Resynced { .. })), "{ev:?}");
+    }
+
+    #[test]
+    fn readings_with_the_leading_digits_lost_are_not_a_restart() {
+        // Run at 1:53, one reading a second. The OCR drops the "1:5" for four
+        // frames: 1:54.00 reads 4.00, then 5.00, 6.00, 7.00 — advancing near
+        // zero like a new run, but each equals the expected time modulo ten
+        // seconds, and nothing low preceded them. No desync, no phantom run.
+        let mut s = Sim::new(cfg());
+        s.start_run(113_000);
+        for v in [4_000, 5_000, 6_000, 7_000] {
+            assert_eq!(s.time(v), vec![], "fragment {v} must be ignored");
+        }
+        assert_eq!(s.tr.phase_name(), "RUNNING");
+        // The real timer comes back and is simply accepted.
+        assert_eq!(s.time(118_000), vec![]);
+        // Dropped minutes only ("54.00" for 1:54.00) likewise.
+        let mut s = Sim::new(cfg());
+        s.start_run(113_000);
+        for v in [54_000, 55_000, 56_000] {
+            assert_eq!(s.time(v), vec![]);
+        }
+        assert_eq!(s.tr.phase_name(), "RUNNING");
+        // A genuine restart passes through the countdown and the zero first;
+        // the zero is what ends the old run, and the new one starts as usual.
+        let mut s = Sim::new(cfg());
+        s.start_run(113_000);
+        assert_eq!(s.time(4_990), vec![]); // -4.99 read as 4.99: a low reading
+        assert_eq!(s.time(500), vec![]); // ...through the zero
+        let ev = s.time(800);
+        assert!(
+            matches!(
+                ev.first(),
+                Some(Event::Reset {
+                    reason: ResetReason::Zeroed,
+                    ..
+                })
+            ),
+            "{ev:?}"
+        );
+        // And a new run that starts at the same phase as the old timeline —
+        // matching it modulo ten seconds forever — is only set aside for a
+        // few frames before the desync logic sees it for what it is.
+        let mut s = Sim::new(cfg());
+        s.start_run(113_000);
+        let mut events = Vec::new();
+        for v in [4_000, 5_000, 6_000, 7_000, 8_000, 9_000, 10_000, 11_000] {
+            events.extend(s.time(v));
+        }
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Started { .. })),
+            "a persistent lockstep chain must become a new run: {events:?}"
+        );
     }
 
     #[test]

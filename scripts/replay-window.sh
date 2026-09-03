@@ -28,6 +28,10 @@ grep -q '^source = "vod"' "$work/cfg.toml" || sed -i 's/^\[stream\]/[stream]\nso
 grep -q '^vod_id = ' "$work/cfg.toml" || sed -i "s/^\[stream\]/[stream]\nvod_id = \"$vod\"/" "$work/cfg.toml"
 grep -q '^start_secs = ' "$work/cfg.toml" || sed -i "s/^\[stream\]/[stream]\nstart_secs = $start/" "$work/cfg.toml"
 grep -q '^obs_log = ' "$work/cfg.toml" || printf '\n[debug]\nobs_log = "%s/obs.jsonl"\n' "$work" >> "$work/cfg.toml"
+# A replay must never talk in the real channel: force chat off whatever the
+# config says (the live config is exactly what this script is handed).
+awk 'BEGIN{s=0} /^\[/{ if (s && !done) {print "enabled = false"; done=1}; s=($0=="[chat]") } { if (s && $0 ~ /^enabled *=/) {print "enabled = false"; done=1; next} print } END{ if (s && !done) print "enabled = false"; if (!seen_chat) {} }' "$work/cfg.toml" > "$work/cfg.tmp" && mv "$work/cfg.tmp" "$work/cfg.toml"
+grep -q '^\[chat\]' "$work/cfg.toml" || printf '\n[chat]\nenabled = false\n' >> "$work/cfg.toml"
 fps=$(grep -oE '^fps = [0-9]+' "$work/cfg.toml" | grep -oE '[0-9]+' || true); fps=${fps:-1}
 want=$(( dur * fps ))
 # Frame metrics cover exactly the window; the bot runs 12 more minutes of
@@ -37,10 +41,19 @@ want=$(( dur * fps ))
 export OMP_THREAD_LIMIT=1
 "$bin" --config "$work/cfg.toml" run > "$work/log" 2>&1 &
 pid=$!
+# Bounded: a capture that never produces a frame (VOD gone, Twitch API
+# trouble) must fail here, not hang whoever called us. First frame within two
+# minutes; the whole window within a generous multiple of its length.
+waited=0
 while kill -0 $pid 2>/dev/null; do
   have=0; [ -f "$work/obs.jsonl" ] && have=$(wc -l < "$work/obs.jsonl")
   [ "$have" -ge $(( want + 720 * fps )) ] && break
-  sleep 2
+  sleep 2; waited=$((waited + 2))
+  if { [ "$have" -eq 0 ] && [ "$waited" -ge 120 ]; } || [ "$waited" -ge $(( dur + 900 )) ]; then
+    kill $pid 2>/dev/null || true
+    echo "replay produced $have frames in ${waited}s; giving up (see $work/log)" >&2
+    exit 1
+  fi
 done
 kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true
 sed -i 's/\x1b\[[0-9;]*m//g' "$work/log"

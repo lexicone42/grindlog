@@ -29,13 +29,12 @@ pub fn parse_timer_text(raw: &str) -> Option<i64> {
             return parse_time(&format!("{head}.{tail}"));
         }
     }
-    // Bare digits with no separator at all: seconds and hundredths.
-    if !t.is_empty() && t.len() <= 4 && t.chars().all(|c| c.is_ascii_digit()) {
-        return match t.len() {
-            2 => parse_time(&format!("0.{t}")),
-            3 | 4 => parse_time(&format!("{}.{}", &t[..t.len() - 2], &t[t.len() - 2..])),
-            _ => None,
-        };
+    // Bare digits with no separator at all: seconds and hundredths. Three or
+    // four of them only — two bare digits are the small hundredths alone,
+    // which also appear when the big digits of a mid-run "1:45.xx" are lost,
+    // and reading those as 0.45 twice in a row would reset a running run.
+    if t.len() >= 3 && t.len() <= 4 && t.chars().all(|c| c.is_ascii_digit()) {
+        return parse_time(&format!("{}.{}", &t[..t.len() - 2], &t[t.len() - 2..]));
     }
     None
 }
@@ -250,7 +249,10 @@ mod timer_text_tests {
         // The point of the small fraction font lost to thresholding.
         assert_eq!(parse_timer_text("476"), Some(4_760));
         assert_eq!(parse_timer_text("4571"), Some(45_710));
-        assert_eq!(parse_timer_text("45"), Some(450));
+        // Two bare digits are the hundredths alone — also what a mid-run
+        // "1:45.xx" degrades to when its big digits are lost — so they are
+        // NOT a near-zero reading.
+        assert_eq!(parse_timer_text("45"), None);
         // A gap where the point was.
         assert_eq!(parse_timer_text("3:06 12"), Some(186_120));
         assert_eq!(parse_timer_text("1 86"), Some(1_860));
