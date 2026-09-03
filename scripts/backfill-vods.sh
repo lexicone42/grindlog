@@ -9,7 +9,8 @@
 # database, or merge-backfill.sh rebuilds everything chronologically.
 # Broadcast start times are fetched from Twitch automatically, so runs land
 # on the original timeline. Workers run under `nice` so the live bot keeps
-# priority. OCR is the bottleneck: expect ~4x realtime per chain.
+# priority. With the glyph reader the timer costs ~2 ms a frame; the splits
+# and counter crops still go through tesseract.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p backfill-logs backfill-db
@@ -42,6 +43,9 @@ crop_w = 390
 crop_h = 100
 threshold = 60
 retry_thresholds = [75, 45]
+# The purpose-built digit reader, as live; tesseract reads what it declines.
+reader = "glyph"
+glyph_templates = "$PWD/assets/glyphs.json"
 
 [splits]
 enabled = true
