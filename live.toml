@@ -43,6 +43,9 @@ threshold = 60
 # A read that fails to parse is retried at these cutoffs (measured: the NES
 # theme wants 75 where the default theme wants 60; both are covered).
 retry_thresholds = [75, 45]
+# The purpose-built digit reader (assets/glyphs.json, trained on both of his
+# themes) reads the timer; tesseract reads only the frames it declines.
+reader = "glyph"
 
 [splits]
 # LiveSplit's per-act cumulative-time column: detected splits enable
