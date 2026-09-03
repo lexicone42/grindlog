@@ -110,6 +110,38 @@ cp config.example.toml config.toml   # edit: channel, crop rectangle
    digits on white), and prints live OCR readings. Tune `threshold` /
    `invert` / the crop until readings parse cleanly.
 
+### Reading the timer with templates instead of tesseract
+
+The timer is one font at one size, and a general-purpose OCR engine is the
+wrong tool for it: over ~15,000 labelled frames of the reference channel,
+tesseract misreads the small hundredths digits on 2-4% of frames ("11" as
+"14", "77" as "71") and fails outright on a few more. `reader = "glyph"`
+under `[timer]` switches the timer to a purpose-built reader: it cuts the
+crop into glyphs at empty columns (cutting touching glyphs where the
+templates agree on both halves), frames each in its place in the digit band
+and matches it against templates harvested from the streamer's own footage
+by normalised correlation. Anything uncertain it declines, and tesseract
+reads that frame instead — so tesseract stays a requirement, also for the
+splits and counter crops. On the same frames it reads 99% with no verified
+error, in about 2 ms a frame rather than 100+.
+
+The templates ship in `assets/glyphs.json`, trained on the reference
+channel's two themes. To retrain for another font, size or theme:
+
+1. Replay a VOD window with every locked crop saved:
+   `NG_DUMP_TIMER=all ngtwitchtimer --config replay.toml run` leaves
+   `calibration/timer-<frame>.png` for each frame and, in the `obs_log`,
+   tesseract's reading of it. A directory holding both is a corpus.
+2. `ngtwitchtimer glyphs train corpus-a corpus-b --out assets/glyphs.json`
+   harvests templates from the frames tesseract read consistently with the
+   running clock (a few thousand frames per theme is plenty).
+3. `ngtwitchtimer glyphs test held-out-corpus --templates assets/glyphs.json`
+   scores a corpus the templates were not trained on: right, declined and
+   disagreeing frames against tesseract's labels. `--dump-wrong dir` saves
+   the disagreements to look at (most turn out to be tesseract's), and
+   `ngtwitchtimer glyphs boxes crop.png` shows how one crop is cut and
+   scored.
+
 ### Finding the LiveSplit pane automatically
 
 `ngtwitchtimer locate` OCRs a whole frame (from the configured source, or

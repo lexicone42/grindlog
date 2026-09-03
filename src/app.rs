@@ -320,7 +320,22 @@ fn ink_extent(proc: &GrayImage, text_left: Option<u32>, upscale: u32) -> Option<
         .iter()
         .position(|&c| c >= h * 95 / 100)
         .map(|i| start + i);
-    let end = border.map_or(w as usize, |b| b.saturating_sub(3 * up as usize));
+    // The border's anti-aliased inner edge — a few source pixels of
+    // partial-height ink contiguous with it — is inked over more than half
+    // the crop in some frames and less in others, as the stream's
+    // compression renders it. Counted as digit columns when it is, the
+    // ink's right edge moved by the edge's width from frame to frame,
+    // enough to re-anchor the layout back and forth. Walk in over it: no
+    // digit column is inked over half the crop where a digit ends the
+    // timer (the small hundredths digits are about half as tall as the
+    // crop's band).
+    let end = border.map_or(w as usize, |b| {
+        let mut e = b;
+        while e > start && cols[e - 1] * 100 > h * 55 {
+            e -= 1;
+        }
+        e.saturating_sub(up as usize)
+    });
     let min = 3 * up;
     let digit_col = |x: usize| x >= start && x < end && cols[x] >= min && cols[x] <= h * 9 / 10;
     let n_digit_cols = (start..end).filter(|&x| digit_col(x)).count() as u32;
@@ -1275,6 +1290,24 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     let mut ocr_engine = OcrEngine::from_config(&cfg.ocr)?;
     let pre = PreprocessCfg::from(&cfg.timer);
+    // The purpose-built digit reader for the timer, when configured; it
+    // declines frames it is unsure of, which then go to tesseract as before.
+    let glyph_reader = match cfg.timer.reader.as_str() {
+        "glyph" => {
+            let path = std::path::Path::new(&cfg.timer.glyph_templates);
+            let gr =
+                crate::glyph::GlyphReader::load(path, cfg.timer.threshold).with_context(|| {
+                    format!(
+                        "timer.reader = \"glyph\" needs templates at {}",
+                        path.display()
+                    )
+                })?;
+            info!("timer reader: glyph templates from {}", path.display());
+            Some(gr)
+        }
+        "tesseract" => None,
+        other => anyhow::bail!("unknown timer.reader {other:?} (tesseract | glyph)"),
+    };
     let mut tracker = Tracker::new(cfg.detection.clone());
 
     let (frame_tx, mut frame_rx) = mpsc::channel::<capture::CaptureEvent>(4);
@@ -1397,6 +1430,11 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut prev_bright: Option<GrayImage> = None;
     let mut last_text = String::new();
     let mut ocr_skipped: u64 = 0;
+    // Frames the glyph reader read, and frames it left to tesseract; the
+    // window pair is reset every few hundred frames to notice a theme or
+    // font the templates do not cover.
+    let (mut glyph_hits, mut glyph_declines) = (0u64, 0u64);
+    let (mut glyph_win_hits, mut glyph_win_declines) = (0u64, 0u64);
     // Consecutive probe frames skipped as static; capped so a frozen timer
     // is still found.
     let mut static_probe_skips: u32 = 0;
@@ -1621,11 +1659,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                         warn!("failed to close session {id}: {e:#}");
                     } else {
                         info!(
-                            "session #{id} closed ({} of {} frames read, {} layout events, {} OCR passes skipped as static)",
+                            "session #{id} closed ({} of {} frames read, {} layout events, {} OCR passes skipped as static, glyph reader {} read / {} declined)",
                             health.parsed,
                             health.frames,
                             health.events.len(),
-                            ocr_skipped
+                            ocr_skipped,
+                            glyph_hits,
+                            glyph_declines
                         );
                     }
                 }
@@ -1653,13 +1693,16 @@ pub async fn run(cfg: Config) -> Result<()> {
         let read_timer = |img: &GrayImage, r: (u32, u32, u32, u32)| {
             let g = image::imageops::crop_imm(img, r.0, r.1, r.2, r.3).to_image();
             let proc = ocr::preprocess(&g, &pre);
-            ocr::to_png(&proc).map(|png| (png, proc))
+            ocr::to_png(&proc).map(|png| (png, proc, g))
         };
         let mut text = String::new();
         let mut ink: Option<(i32, i32)> = None;
         let mut frame_static = false;
         // The fallback threshold that rescued this frame's read, if any.
         let mut retry_thr: Option<u8> = None;
+        // Which reader produced this frame's text ("" when none ran: a
+        // static frame repeats the last reading).
+        let mut reader_used = "";
         // An OCR failure must not be cached as "the reading": forget the
         // previous frame so the next one is read again.
         let mut ocr_failed = false;
@@ -1679,17 +1722,81 @@ pub async fn run(cfg: Config) -> Result<()> {
                 let mut proc = ocr::preprocess(&g, &pre);
                 // NG_DUMP_TIMER=1: save the raw timer crop every 25 frames (for
                 // threshold tuning against real pixels) and log what Otsu
-                // would have chosen for it.
-                if std::env::var_os("NG_DUMP_TIMER").is_some() && frame_idx % 25 == 0 {
-                    let _ = std::fs::create_dir_all("calibration");
-                    let _ = g.save(format!("calibration/timer-{frame_idx}.png"));
+                // would have chosen for it. NG_DUMP_TIMER=all: every frame —
+                // the training corpus for the glyph reader, labelled by the
+                // observation log written for the same frame.
+                let dump = std::env::var("NG_DUMP_TIMER").ok();
+                if dump
+                    .as_deref()
+                    .is_some_and(|v| v == "all" || frame_idx % 25 == 0)
+                {
+                    // Beside the observation log when there is one, so a
+                    // replay directory is a corpus as it stands and parallel
+                    // replays do not overwrite each other's frames.
+                    let dir = cfg
+                        .debug
+                        .obs_log
+                        .as_deref()
+                        .and_then(|p| std::path::Path::new(p).parent())
+                        .filter(|d| !d.as_os_str().is_empty())
+                        .map(|d| d.join("calibration"))
+                        .unwrap_or_else(|| "calibration".into());
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = g.save(dir.join(format!("timer-{frame_idx}.png")));
                     debug!(
                         "timer crop {frame_idx} dumped; otsu would pick {:?}, configured {}",
                         ocr::otsu_threshold(&g),
                         pre.threshold
                     );
                 }
-                match ocr_engine.recognize_boxed(&ocr::to_png(&proc)?).await {
+                // The glyph reader gets the raw crop first; tesseract only
+                // sees the frames it declines — or reads as something the
+                // parser will not take, which counts as a decline. Its boxes
+                // are in crop pixels, tesseract's in the upscaled image, so
+                // scale to match.
+                let glyph_hit = glyph_reader
+                    .as_ref()
+                    .and_then(|gr| gr.read(&g))
+                    .filter(|rd| parse_timer_text(&rd.text).is_some());
+                if glyph_reader.is_some() {
+                    if glyph_hit.is_some() {
+                        glyph_hits += 1;
+                        glyph_win_hits += 1;
+                    } else {
+                        glyph_declines += 1;
+                        glyph_win_declines += 1;
+                    }
+                    if glyph_win_hits + glyph_win_declines >= 600 {
+                        if glyph_win_declines > glyph_win_hits {
+                            warn!(
+                                "glyph reader declined {} of the last {} timer frames (tesseract read them): a theme or font the templates do not cover? see README on retraining",
+                                glyph_win_declines,
+                                glyph_win_hits + glyph_win_declines
+                            );
+                        }
+                        glyph_win_hits = 0;
+                        glyph_win_declines = 0;
+                    }
+                }
+                let ocr_result = match &glyph_hit {
+                    Some(rd) => {
+                        reader_used = "glyph";
+                        let up = pre.upscale.max(1);
+                        let x0 = rd.boxes.iter().map(|b| b.x).min().unwrap_or(0);
+                        let y0 = rd.boxes.iter().map(|b| b.y).min().unwrap_or(0);
+                        let x1 = rd.boxes.iter().map(|b| b.x + b.w).max().unwrap_or(0);
+                        let y1 = rd.boxes.iter().map(|b| b.y + b.h).max().unwrap_or(0);
+                        Ok((
+                            rd.text.clone(),
+                            Some((x0 * up, y0 * up, (x1 - x0) * up, (y1 - y0) * up)),
+                        ))
+                    }
+                    None => {
+                        reader_used = "tess";
+                        ocr_engine.recognize_boxed(&ocr::to_png(&proc)?).await
+                    }
+                };
+                match ocr_result {
                     Ok((t, bbox)) => {
                         let mut bbox = bbox;
                         text = t.trim().to_string();
@@ -1807,10 +1914,23 @@ pub async fn run(cfg: Config) -> Result<()> {
             for ci in to_read {
                 let c = &mut cands[ci];
                 let crop = c.regs.timer;
-                let (png, proc) = read_timer(&union_bright, crop)?;
-                let (rd, bbox) = match ocr_engine.recognize_boxed(&png).await {
-                    Ok((t, b)) => (t.trim().to_string(), b),
-                    Err(_) => (String::new(), None),
+                let (png, proc, g) = read_timer(&union_bright, crop)?;
+                let (rd, bbox) = match glyph_reader.as_ref().and_then(|gr| gr.read(&g)) {
+                    Some(r) => {
+                        reader_used = "glyph";
+                        // Only the box's left edge matters here: it is where
+                        // the ink search below starts.
+                        let up = pre.upscale.max(1);
+                        let x0 = r.boxes.iter().map(|b| b.x).min().unwrap_or(0);
+                        (r.text, Some((x0 * up, 0, 0, 0)))
+                    }
+                    None => {
+                        reader_used = "tess";
+                        match ocr_engine.recognize_boxed(&png).await {
+                            Ok((t, b)) => (t.trim().to_string(), b),
+                            Err(_) => (String::new(), None),
+                        }
+                    }
                 };
                 // A reading whose digits touch the crop edge is a clipped
                 // position: it may parse, but it can't be the lock.
@@ -2418,6 +2538,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 "anchor": anchors[active_layout].map(|(r, cy)| vec![r, cy]),
                 "static": frame_static,
                 "retry": retry_thr,
+                "reader": reader_used,
             });
             if let Some(v) = &splits_values {
                 line["splits"] = serde_json::json!(v);

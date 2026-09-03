@@ -42,6 +42,11 @@ crop_h = 90
                                 #   histogram (Otsu) — measured worse here
 # retry_thresholds = []         # e.g. [75, 45]: when a read fails to parse,
                                 #   re-read the same crop at these cutoffs
+# reader = "tesseract"          # or "glyph": match each digit against templates
+                                #   harvested from the streamer's own footage
+                                #   (`ngtwitchtimer glyphs train <corpus>...`);
+                                #   tesseract remains the fallback
+# glyph_templates = "assets/glyphs.json"
 # invert = true                 # true for light digits on dark background
 
 [ocr]
