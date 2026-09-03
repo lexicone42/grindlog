@@ -324,6 +324,18 @@ pub struct TimerCfg {
     /// Gray level above which a pixel counts as lit (0-255).
     #[serde(default = "d_threshold")]
     pub threshold: u8,
+    /// Choose the timer's threshold from each crop's own histogram (Otsu)
+    /// instead of the fixed value above. Themes differ in how bright the
+    /// timer is; measured on this stream, the fixed 60 that reads one theme
+    /// at 97% reads another at 92% while 75 does the reverse (98% / 56%).
+    #[serde(default)]
+    pub auto_threshold: bool,
+    /// When a locked timer read does not parse, re-threshold the same crop at
+    /// each of these and read again; the first that parses wins. Costs OCR
+    /// only on frames that already failed. Measured on this stream, the
+    /// themes want different cutoffs (60 vs 75), and this covers both.
+    #[serde(default)]
+    pub retry_thresholds: Vec<u8>,
     /// true when the timer is light text on a dark background (the usual
     /// LiveSplit look); produces black digits on white for tesseract.
     #[serde(default = "d_true")]
@@ -339,6 +351,8 @@ impl Default for TimerCfg {
             crop_h: d_crop_h(),
             upscale: d_upscale(),
             threshold: d_threshold(),
+            auto_threshold: false,
+            retry_thresholds: Vec::new(),
             invert: true,
         }
     }

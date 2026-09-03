@@ -225,12 +225,11 @@ probe again, so a scene switch or a few-pixel nudge is picked up and logged
 (`layout switched …` / `re-anchored: LiveSplit moved +18,+12 px`) rather than
 silently losing runs. The union of every rectangle (plus the drift margin)
 is the only crop ffmpeg decodes, so extra layouts cost OCR calls only while
-probing. A lock whose digits sit within a few pixels of the crop's top or
-bottom gets the crop enlarged around them (a themed layout's 90px timer in a
-100px crop would otherwise read as clipped after any small drift and be
-dropped), and a re-anchor needs drift measurements spanning several different
-final digits, since digits differ in width and the hundredths digit repeats
-for many frames.
+probing. The digits' extent is measured as the band of rows holding the most
+ink, so a separator line or the row of text under the timer cannot make them
+look clipped, and a re-anchor needs drift measurements spanning several
+different final digits, since digits differ in width and the hundredths digit
+repeats for many frames.
 
 **The hundredths font.** LiveSplit draws the fraction of the main timer in a
 smaller font, and at stream resolution its decimal point is a couple of

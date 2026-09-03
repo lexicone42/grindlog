@@ -20,6 +20,11 @@ pub struct PreprocessCfg {
     pub upscale: u32,
     pub threshold: u8,
     pub invert: bool,
+    /// Pick the threshold from the crop itself (Otsu) instead of `threshold`,
+    /// which then only bounds it. Different LiveSplit themes render the timer
+    /// at different brightnesses, and a fixed value that suits one sits on a
+    /// cliff for another.
+    pub auto_threshold: bool,
 }
 
 impl From<&crate::config::TimerCfg> for PreprocessCfg {
@@ -28,14 +33,62 @@ impl From<&crate::config::TimerCfg> for PreprocessCfg {
             upscale: t.upscale,
             threshold: t.threshold,
             invert: t.invert,
+            auto_threshold: t.auto_threshold,
         }
     }
+}
+
+/// Otsu's threshold: the gray level that best separates the crop's two
+/// populations (background and digits), maximizing between-class variance.
+/// Returns None when the crop has no second population to separate (blank,
+/// or all one shade).
+pub fn otsu_threshold(gray: &GrayImage) -> Option<u8> {
+    let mut hist = [0u64; 256];
+    for p in gray.pixels() {
+        hist[p.0[0] as usize] += 1;
+    }
+    let total: u64 = hist.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let sum_all: u64 = hist.iter().enumerate().map(|(i, &c)| i as u64 * c).sum();
+    let (mut w_b, mut sum_b) = (0u64, 0u64);
+    let mut best = (0.0f64, 0usize);
+    for (t, &count) in hist.iter().enumerate() {
+        w_b += count;
+        if w_b == 0 {
+            continue;
+        }
+        let w_f = total - w_b;
+        if w_f == 0 {
+            break;
+        }
+        sum_b += t as u64 * count;
+        let m_b = sum_b as f64 / w_b as f64;
+        let m_f = (sum_all - sum_b) as f64 / w_f as f64;
+        let between = w_b as f64 * w_f as f64 * (m_b - m_f) * (m_b - m_f);
+        if between > best.0 {
+            best = (between, t);
+        }
+    }
+    // No spread at all between the two classes: nothing to separate.
+    (best.0 > 0.0).then_some(best.1 as u8)
 }
 
 /// Upscale, threshold to pure black/white, and orient as dark-text-on-light,
 /// which is what tesseract is happiest with.
 pub fn preprocess(gray: &GrayImage, cfg: &PreprocessCfg) -> GrayImage {
     let up = cfg.upscale.max(1);
+    // The automatic threshold is taken on the source pixels (before the
+    // resampler blurs the edges into a third population) and kept within a
+    // sane band: a crop with no digits in it would otherwise "separate" noise.
+    let threshold = if cfg.auto_threshold {
+        otsu_threshold(gray)
+            .map(|t| t.clamp(30, 200))
+            .unwrap_or(cfg.threshold)
+    } else {
+        cfg.threshold
+    };
     let mut img = if up > 1 {
         imageops::resize(
             gray,
@@ -47,7 +100,7 @@ pub fn preprocess(gray: &GrayImage, cfg: &PreprocessCfg) -> GrayImage {
         gray.clone()
     };
     for px in img.pixels_mut() {
-        let lit = px.0[0] > cfg.threshold;
+        let lit = px.0[0] > threshold;
         // With invert=true, bright source pixels (digits on a dark LiveSplit
         // background) come out black on white.
         px.0[0] = if lit ^ cfg.invert { 255 } else { 0 };
@@ -515,6 +568,7 @@ mod tests {
             upscale: 1,
             threshold: 140,
             invert: true,
+            auto_threshold: false,
         };
         let out = preprocess(&img, &cfg);
         // Bright pixels (digits) -> black; dark background -> white.
@@ -539,6 +593,7 @@ mod tests {
             upscale: 4,
             threshold: 128,
             invert: true,
+            auto_threshold: false,
         };
         let out = preprocess(&img, &cfg);
         assert_eq!((out.width(), out.height()), (40, 16));
@@ -571,5 +626,66 @@ mod tests {
         assert_eq!(text, "1:41 .26");
         assert_eq!(bbox, Some((600, 80, 900, 300)));
         assert_eq!(words_to_line(&[]), (String::new(), None));
+    }
+}
+
+#[cfg(test)]
+mod otsu_tests {
+    use super::*;
+
+    #[test]
+    fn otsu_splits_two_populations_and_declines_a_flat_crop() {
+        // Dark background (~40) with bright digits (~180): the threshold
+        // lands between the two populations, wherever exactly they sit.
+        let mut img = GrayImage::from_pixel(100, 40, image::Luma([40]));
+        for y in 10..30 {
+            for x in 20..60 {
+                img.put_pixel(x, y, image::Luma([180]));
+            }
+        }
+        let t = otsu_threshold(&img).unwrap();
+        assert!(
+            (40..180).contains(&t),
+            "threshold {t} should fall between the populations"
+        );
+        // Dimmer digits (a different theme): the threshold follows them down.
+        let mut dim = GrayImage::from_pixel(100, 40, image::Luma([20]));
+        for y in 10..30 {
+            for x in 20..60 {
+                dim.put_pixel(x, y, image::Luma([90]));
+            }
+        }
+        let t2 = otsu_threshold(&dim).unwrap();
+        assert!((20..90).contains(&t2) && t2 < t, "dim digits: {t2} vs {t}");
+        // Nothing to separate.
+        assert_eq!(
+            otsu_threshold(&GrayImage::from_pixel(50, 20, image::Luma([77]))),
+            None
+        );
+        // preprocess with auto_threshold reads dim digits that a fixed 140
+        // would erase entirely.
+        let auto = PreprocessCfg {
+            upscale: 1,
+            threshold: 140,
+            invert: true,
+            auto_threshold: true,
+        };
+        let fixed = PreprocessCfg {
+            upscale: 1,
+            threshold: 140,
+            invert: true,
+            auto_threshold: false,
+        };
+        let ink = |img: &GrayImage| img.pixels().filter(|p| p.0[0] == 0).count();
+        assert_eq!(
+            ink(&preprocess(&dim, &fixed)),
+            0,
+            "fixed 140 sees no digits"
+        );
+        assert_eq!(
+            ink(&preprocess(&dim, &auto)),
+            40 * 20,
+            "auto finds the digit block"
+        );
     }
 }

@@ -154,6 +154,7 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
         upscale: UP,
         threshold: cfg.timer.threshold,
         invert: cfg.timer.invert,
+        auto_threshold: false,
     };
     let proc = ocr::preprocess(gray, &pre);
     let png = ocr::to_png(&proc)?;
@@ -172,15 +173,19 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
         .map(|w| (bbox(w, UP), w.text.trim().to_string()))
         .collect();
     let mut candidates: Vec<(R, String)> = Vec::new();
+    // Bare digits repair to a time only when the word is tall enough to be
+    // the main timer (its glyphs are 60px+ on the canvas); a score or an
+    // in-game timer in the HUD is a third of that and is not a candidate.
+    let tall_enough = |r: &R| r.3 >= 40;
     for (i, (ra, ta)) in single.iter().enumerate() {
-        if is_time(ta) || crate::timeparse::parse_timer_text(ta).is_some() {
+        if is_time(ta) || (tall_enough(ra) && crate::timeparse::parse_timer_text(ta).is_some()) {
             candidates.push((*ra, ta.clone()));
         }
         for (rb, tb) in single.iter().skip(i + 1) {
             let same_line = (ra.1 as i64 + ra.3 as i64 / 2 - rb.1 as i64 - rb.3 as i64 / 2).abs()
                 <= (ra.3 as i64 / 2).max(4);
             let adjacent = rb.0 >= ra.0 + ra.2 && rb.0 - (ra.0 + ra.2) <= ra.3;
-            if same_line && adjacent {
+            if same_line && adjacent && tall_enough(ra) {
                 let joined = format!("{ta} {tb}");
                 if crate::timeparse::parse_timer_text(&joined).is_some() {
                     if let Some(u) = union_rects(&[*ra, *rb]) {
