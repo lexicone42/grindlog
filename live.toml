@@ -36,6 +36,9 @@ crop_y = 800
 crop_w = 390
 crop_h = 100
 threshold = 60
+# A read that fails to parse is retried at these cutoffs (measured: the NES
+# theme wants 75 where the default theme wants 60; both are covered).
+retry_thresholds = [75, 45]
 
 [splits]
 # LiveSplit's per-act cumulative-time column: detected splits enable

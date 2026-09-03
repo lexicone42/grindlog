@@ -38,6 +38,7 @@ crop_y = 800
 crop_w = 390
 crop_h = 100
 threshold = 60
+retry_thresholds = [75, 45]
 
 [splits]
 enabled = true
