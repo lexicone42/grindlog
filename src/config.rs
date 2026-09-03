@@ -398,6 +398,12 @@ pub struct GameCfg {
     /// it beats this too, so the bot never claims a record it can't back.
     #[serde(default)]
     pub baseline_best: Option<String>,
+    /// Only record runs while the layout's own title row names this game.
+    /// Lets a marathon broadcast be captured, recording just the segments
+    /// that are actually this game. Off by default: a misread title would
+    /// otherwise stop recording.
+    #[serde(default)]
+    pub require_title_match: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -445,6 +451,7 @@ impl Default for GameCfg {
             record_label: d_record_label(),
             references: Vec::new(),
             baseline_best: None,
+            require_title_match: false,
         }
     }
 }
@@ -490,6 +497,16 @@ pub struct ChatCfg {
 }
 
 impl Config {
+    /// A default config with one knob set, for tests that exercise logic
+    /// depending on the category's fastest plausible time.
+    #[cfg(test)]
+    pub fn for_test_with_min_final(min_final_ms: i64) -> Self {
+        let mut cfg: Config = toml::from_str("[stream]\nchannel = \"test\"\n")
+            .expect("the minimal config must parse");
+        cfg.detection.min_final_ms = min_final_ms;
+        cfg
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading config file {}", path.display()))?;

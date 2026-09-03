@@ -28,3 +28,7 @@ nohup.out
 
 # Downloaded VODs for file-source analysis
 /vods/
+
+# Build lock and the alternate-engine build tree
+/.build-site.lock
+/target-leptess/

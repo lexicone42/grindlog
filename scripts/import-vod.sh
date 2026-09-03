@@ -32,7 +32,11 @@ for c in frames parsed probing relocks counter_reads events; do
 done
 hc="${hc%, }"
 
-sqlite3 "$LIVE" "
+# SQL on STDIN with -bail, never as an argument: given SQL as an argument the
+# CLI keeps going after a runtime error (reaching the COMMIT, making the
+# day-wipe DELETEs permanent) and still exits 0. On stdin with -bail it stops
+# at the error, the transaction rolls back, and the exit code is non-zero.
+sqlite3 -bail "$LIVE" <<SQL
   PRAGMA busy_timeout = 20000;
   BEGIN IMMEDIATE;
   ATTACH '$f' AS s;
@@ -61,7 +65,8 @@ sqlite3 "$LIVE" "
     SELECT COUNT(*) FROM runs r2 WHERE r2.game = runs.game AND r2.category = runs.category
       AND (r2.started_at_ms < runs.started_at_ms OR (r2.started_at_ms = runs.started_at_ms AND r2.id <= runs.id)));
   COMMIT;
-  DETACH s;"
+  DETACH s;
+SQL
 
 ./scripts/fill-run-numbers.sh "$LIVE"
 echo "now in $LIVE for $days: $(sqlite3 "$LIVE" "SELECT COUNT(*)||' runs, '||SUM(outcome='finished')||' finished, '||COUNT(ls_attempt)||' numbered, best '||IFNULL(printf('%d:%05.2f', MIN(final_time_ms)/60000, (MIN(final_time_ms)%60000)/1000.0), '-') FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days)")"

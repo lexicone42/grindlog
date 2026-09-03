@@ -215,7 +215,7 @@ async fn build_reply(ctx: &ChatCtx, cmd: &Cmd) -> Result<Option<String>> {
         Cmd::Pb => {
             let tracked = db::personal_best(&ctx.pool, &game, &category).await?;
             let label = &ctx.shared.record_label;
-            let baseline = ctx.shared.baseline_best_ms;
+            let baseline = *ctx.shared.baseline_best_ms.read().await;
             match (tracked, baseline) {
                 (Some(pb), Some(base))
                     if base < pb.final_time_ms.unwrap_or(i64::MAX) =>

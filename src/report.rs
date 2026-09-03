@@ -27,6 +27,19 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
     let daily = db::daily_stats(&pool, &game, &category).await?;
     // Every session: the site needs tags and capture health per day.
     let sessions = db::recent_sessions(&pool, 100_000).await?;
+    // The whole JSON is embedded in a public page: a session's label is a
+    // channel name for live capture but a local file path for source =
+    // "file", which has no business being published.
+    let public_sessions: Vec<serde_json::Value> = sessions
+        .iter()
+        .map(|s| {
+            let mut v = serde_json::to_value(s).unwrap_or_default();
+            if let Some(o) = v.as_object_mut() {
+                o.remove("label");
+            }
+            v
+        })
+        .collect();
     let recent = db::recent_runs(&pool, 15).await?;
     let brief = db::runs_brief(&pool, &game, &category).await?;
     let acts = cfg.game.act_list();
@@ -50,7 +63,7 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
                 })
             })
             .collect();
-        let references: Vec<serde_json::Value> = cfg
+        let mut references: Vec<serde_json::Value> = cfg
             .game
             .references
             .iter()
@@ -59,13 +72,32 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
                     .map(|ms| serde_json::json!({"label": r.label, "ms": ms}))
             })
             .collect();
+        // Reference times read off the layout itself replace the configured
+        // ones of the same name — the streamer keeps them current, we don't.
+        for (key, label) in [("ls_wr_ms", "WR"), ("ls_pb_ms", "Lifetime PB")] {
+            if let Some(ms) = db::get_setting(&pool, key)
+                .await?
+                .and_then(|s| s.parse::<i64>().ok())
+            {
+                references.retain(|r| r["label"] != label);
+                references.push(serde_json::json!({"label": label, "ms": ms}));
+            }
+        }
         let doc = serde_json::json!({
             "generated_at_ms": util::unix_ms(),
             "current_game": game,
             "current_category": category,
             "record_label": cfg.game.record_label,
             "references": references,
-            "baseline_best_ms": cfg.game.baseline_best_ms(),
+            // The layout's own season best outranks the configured baseline:
+            // it is what his comparison column actually shows.
+            "baseline_best_ms": db::get_setting(&pool, "ls_season_best_ms")
+                .await?
+                .and_then(|s| s.parse::<i64>().ok())
+                .or(cfg.game.baseline_best_ms()),
+            "ls_pb_ms": db::get_setting(&pool, "ls_pb_ms")
+                .await?
+                .and_then(|s| s.parse::<i64>().ok()),
             "ls_sob_ms": db::get_setting(&pool, "ls_sob_ms")
                 .await?
                 .and_then(|s| s.parse::<i64>().ok()),
@@ -74,7 +106,12 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
             "runs": all_runs,
             "splits_by_run": splits_by_run,
             "daily": daily,
-            "sessions": sessions,
+            "sessions": public_sessions,
+            // Days are the streamer's, not the reader's: the browser must not
+            // re-derive them in its own timezone or a reader abroad sees a
+            // broadcast split across two chips that the rest of the page
+            // counts as one.
+            "day_offset_minutes": util::local_utc_offset_minutes(),
             "death_chart": deaths,
             "survival": survival,
             "acts": cfg.game.acts,

@@ -11,7 +11,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DB="${1:-ninja-gaiden.db}"
-sqlite3 "$DB" "
+# On stdin with -bail so a failure stops and exits non-zero, and with a busy
+# timeout because the live bot writes this database: without one the UPDATE
+# fails instantly with "database is locked", prints what looks like a clean
+# "filled|0", and takes the deploy down with it.
+sqlite3 -bail "$DB" <<'SQL'
+PRAGMA busy_timeout = 20000;
 CREATE TEMP TABLE ord AS
   SELECT id, game, category, ls_attempt,
          ROW_NUMBER() OVER (PARTITION BY game, category ORDER BY started_at_ms, id) AS rn
@@ -31,4 +36,5 @@ CREATE TEMP TABLE fill AS
 UPDATE runs SET ls_attempt = (SELECT inferred FROM fill WHERE fill.id = runs.id)
   WHERE id IN (SELECT id FROM fill);
 SELECT 'filled', (SELECT COUNT(*) FROM fill);
-SELECT 'coverage', SUM(ls_attempt IS NOT NULL) || '/' || COUNT(*) FROM runs;"
+SELECT 'coverage', SUM(ls_attempt IS NOT NULL) || '/' || COUNT(*) FROM runs;
+SQL

@@ -13,6 +13,7 @@ use crate::ocr::{self, OcrEngine, PreprocessCfg};
 use crate::state::{Event, Obs, Tracker};
 use crate::timeparse::{format_ms, parse_time};
 use crate::{capture, chat, util};
+use sqlx::SqlitePool;
 
 /// State shared with the chat task.
 pub struct Shared {
@@ -26,8 +27,9 @@ pub struct Shared {
     /// What the tracked best is called ("PB", "season best", ...).
     pub record_label: String,
     /// Best known time from before tracking started; a "NEW record"
-    /// announcement must beat this too.
-    pub baseline_best_ms: Option<i64>,
+    /// announcement must beat this too. Replaced at runtime when the layout
+    /// itself advertises the streamer's season best.
+    pub baseline_best_ms: RwLock<Option<i64>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -358,16 +360,21 @@ struct PaneGeometry {
 }
 
 impl PaneGeometry {
+    /// A timer-relative rectangle in union coordinates, or None when it would
+    /// fall outside the decoded crop.
+    fn place_rect(regs: &Regions, (dx, dy, w, h): (i32, i32, u32, u32)) -> Option<R> {
+        let (_, _, uw, uh) = regs.union;
+        let x = regs.timer.0 as i64 + dx as i64;
+        let y = regs.timer.1 as i64 + dy as i64;
+        let inside = x >= 0 && y >= 0 && x + w as i64 <= uw as i64 && y + h as i64 <= uh as i64;
+        inside.then_some((x as u32, y as u32, w, h))
+    }
+
     /// Rebuild `regs`' splits/counter rectangles from the geometry (union
     /// coordinates, clamped to the union).
     fn apply(&self, regs: &mut Regions) {
-        let (_, _, uw, uh) = regs.union;
-        let place = |(dx, dy, w, h): (i32, i32, u32, u32)| -> Option<R> {
-            let x = regs.timer.0 as i64 + dx as i64;
-            let y = regs.timer.1 as i64 + dy as i64;
-            let inside = x >= 0 && y >= 0 && x + w as i64 <= uw as i64 && y + h as i64 <= uh as i64;
-            inside.then_some((x as u32, y as u32, w, h))
-        };
+        let snapshot = regs.clone();
+        let place = |r: (i32, i32, u32, u32)| Self::place_rect(&snapshot, r);
         if let Some(r) = place(self.splits) {
             regs.splits = Some(r);
         }
@@ -383,6 +390,244 @@ impl PaneGeometry {
 fn time_shaped(text: &str) -> bool {
     let t = text.trim().trim_end_matches('.');
     t.contains([':', '.']) && parse_time(t).is_some()
+}
+
+/// What a labelled time on the layout means. LiveSplit panes carry a row of
+/// reference times under the timer — the streamer's own record-keeping, which
+/// is more authoritative than anything in our config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefKind {
+    /// "Sum of Best Segments".
+    SumOfBest,
+    /// The current season/year's best, labelled with a year ("2026: 11:35.1").
+    SeasonBest,
+    /// "PB:" — the lifetime personal best.
+    LifetimePb,
+    /// "WR is 11:32.183 by ..." — the world record.
+    WorldRecord,
+}
+
+impl RefKind {
+    fn setting_key(self) -> &'static str {
+        match self {
+            RefKind::SumOfBest => "ls_sob_ms",
+            RefKind::SeasonBest => "ls_season_best_ms",
+            RefKind::LifetimePb => "ls_pb_ms",
+            RefKind::WorldRecord => "ls_wr_ms",
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            RefKind::SumOfBest => "sum of best",
+            RefKind::SeasonBest => "season best",
+            RefKind::LifetimePb => "lifetime PB",
+            RefKind::WorldRecord => "world record",
+        }
+    }
+
+    /// Classify a row's label text (lowercased words joined by spaces).
+    fn classify(label: &str) -> Option<Self> {
+        if label.contains("sob")
+            || (label.contains("best") && (label.contains("sum") || label.contains("segment")))
+        {
+            return Some(RefKind::SumOfBest);
+        }
+        if label.contains("wr") || label.contains("world record") {
+            return Some(RefKind::WorldRecord);
+        }
+        if label.contains("pb") || label.contains("personal") {
+            return Some(RefKind::LifetimePb);
+        }
+        // A bare year ("2026:") is how this streamer labels the season best.
+        if label.split_whitespace().any(|w| {
+            let w = w.trim_end_matches(':');
+            w.len() == 4 && w.chars().all(|c| c.is_ascii_digit()) && w.starts_with("20")
+        }) || label.contains("season")
+        {
+            return Some(RefKind::SeasonBest);
+        }
+        None
+    }
+}
+
+/// A rectangle relative to the timer's top-left: (dx, dy, w, h).
+type RelRect = (i32, i32, u32, u32);
+
+/// What the pane says about itself, read at lock time: the game it is timing
+/// and the reference times printed under the timer.
+#[derive(Debug, Clone, Default)]
+struct PaneReadings {
+    /// Title row text ("Ninja Gaiden (NES)") and the category under it.
+    game: Option<String>,
+    category: Option<String>,
+    /// Labelled reference times, with the rectangle each was read from
+    /// (relative to the timer, like `PaneGeometry`) so they can be re-read.
+    refs: Vec<(RefKind, i64, RelRect)>,
+}
+
+/// Group boxes into lines by vertical centre, each line sorted left to right.
+fn into_lines(mut boxes: Vec<(R, String)>) -> Vec<Vec<(R, String)>> {
+    let cy = |r: R| r.1 as i64 + r.3 as i64 / 2;
+    boxes.sort_by_key(|(r, _)| cy(*r));
+    let mut lines: Vec<Vec<(R, String)>> = Vec::new();
+    for b in boxes {
+        match lines.last_mut() {
+            Some(line) if (cy(line[0].0) - cy(b.0)).abs() <= (b.0 .3 as i64 / 2).max(6) => {
+                line.push(b)
+            }
+            _ => lines.push(vec![b]),
+        }
+    }
+    for line in &mut lines {
+        line.sort_by_key(|(r, _)| r.0);
+    }
+    lines
+}
+
+/// Read the pane's own words: the game title above the split rows, and the
+/// labelled reference times below the timer. A line may hold several
+/// label/value pairs ("Today: 11:48.8  2026: 11:35.1  PB: 11:33.9"), so each
+/// time takes the words between it and the previous time on its line.
+fn pane_readings(
+    words: &[ocr::Word],
+    letters: &[ocr::Word],
+    scale: u32,
+    timer: R,
+    splits_top: i64,
+) -> PaneReadings {
+    let sc = scale.max(1);
+    let band_x0 = timer.0.saturating_sub(timer.2) as i64;
+    let band_x1 = (timer.0 + timer.2 * 2) as i64;
+    let scaled = |w: &ocr::Word| -> (R, String) {
+        (
+            (w.x / sc, w.y / sc, w.w.max(1) / sc, w.h.max(1) / sc),
+            w.text.trim().to_string(),
+        )
+    };
+    let in_band = |r: &R| (r.0 + r.2) as i64 > band_x0 && (r.0 as i64) < band_x1;
+
+    // Below the timer: every word from either pass (a time is trustworthy at
+    // low confidence; a stray glyph merged in drags tesseract's score down).
+    let below: Vec<(R, String)> = letters
+        .iter()
+        .chain(words.iter())
+        .filter(|w| w.conf >= 10.0 && !w.text.trim().is_empty())
+        .map(scaled)
+        .filter(|(r, _)| {
+            r.1 as i64 >= (timer.1 + timer.3) as i64 - 4 && in_band(r) && r.3 < timer.3
+        })
+        .collect();
+    // Both passes see the same words; keep one box per position.
+    let mut seen: Vec<R> = Vec::new();
+    let below: Vec<(R, String)> = below
+        .into_iter()
+        .filter(|(r, _)| {
+            let dup = seen.iter().any(|s| {
+                (s.0 as i64 - r.0 as i64).abs() <= 4 && (s.1 as i64 - r.1 as i64).abs() <= 4
+            });
+            if !dup {
+                seen.push(*r);
+            }
+            !dup
+        })
+        .collect();
+
+    let mut refs = Vec::new();
+    for line in into_lines(below) {
+        let mut label = String::new();
+        for (r, text) in line {
+            match parse_time(text.trim_end_matches('.')).filter(|_| time_shaped(&text)) {
+                Some(ms) => {
+                    if let Some(kind) = RefKind::classify(&label) {
+                        refs.push((
+                            kind,
+                            ms,
+                            (
+                                (r.0 as i64 - 14 - timer.0 as i64) as i32,
+                                (r.1 as i64 - 8 - timer.1 as i64) as i32,
+                                r.2 + 28,
+                                r.3 + 16,
+                            ),
+                        ));
+                    }
+                    label.clear();
+                }
+                None => {
+                    if !label.is_empty() {
+                        label.push(' ');
+                    }
+                    label.push_str(&text.to_lowercase());
+                }
+            }
+        }
+    }
+    // Keep the first reading of each kind (leftmost on the topmost line).
+    refs.dedup_by_key(|(k, _, _)| *k);
+
+    // Above the split rows: the title lines. Digits-only words there are the
+    // attempt counter, not part of the name.
+    let above: Vec<(R, String)> = letters
+        .iter()
+        .filter(|w| w.conf >= 30.0 && !w.text.trim().is_empty())
+        .map(scaled)
+        .filter(|(r, text)| {
+            (r.1 + r.3) as i64 <= splits_top + 4
+                && in_band(r)
+                && r.3 < timer.3
+                && !text
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == ':' || c == '.')
+        })
+        .collect();
+    let title_lines: Vec<String> = into_lines(above)
+        .into_iter()
+        .map(|line| {
+            line.into_iter()
+                .map(|(_, t)| t)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|s| s.chars().any(|c| c.is_alphabetic()))
+        .collect();
+    PaneReadings {
+        game: title_lines.first().cloned(),
+        category: title_lines.get(1).cloned(),
+        refs,
+    }
+}
+
+/// Do two game names refer to the same game? Tesseract mangles a character
+/// here and there, so compare on lowercase alphanumerics and accept a small
+/// edit distance relative to length.
+fn game_matches(detected: &str, configured: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let (a, b) = (norm(detected), norm(configured));
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a.contains(&b) || b.contains(&a) {
+        return true;
+    }
+    // Levenshtein, capped: names of different games differ by far more.
+    let (m, n) = (a.len(), b.len());
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut cur = vec![0usize; n + 1];
+    for (i, ca) in a.chars().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.chars().enumerate() {
+            cur[j + 1] = (prev[j] + usize::from(ca != cb))
+                .min(prev[j + 1] + 1)
+                .min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[n] * 5 <= m.max(n)
 }
 
 /// Derive the pane geometry from the split rows visible above the timer:
@@ -580,8 +825,7 @@ async fn measure_pane(
     timer: R,
     acts: u32,
     pre: &PreprocessCfg,
-    want_sob: bool,
-) -> Result<Option<PaneGeometry>> {
+) -> Result<(Option<PaneGeometry>, PaneReadings)> {
     const UP: u32 = 2;
     let pre2 = PreprocessCfg {
         upscale: UP,
@@ -593,15 +837,12 @@ async fn measure_pane(
     let words = ocr_engine
         .recognize_words(&png, Some("0123456789:."), 11)
         .await?;
-    // The letters pass only serves the SoB label; skip it when not wanted.
-    let letters = if want_sob {
-        ocr_engine
-            .recognize_words(&png, None, 11)
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    // The letters pass reads the pane's own words: the row labels that name
+    // each reference time, and the game title. One extra call per lock.
+    let letters = ocr_engine
+        .recognize_words(&png, None, 11)
+        .await
+        .unwrap_or_default();
     // NG_DUMP_PANE=1 saves what this pass saw (debugging a layout).
     if std::env::var_os("NG_DUMP_PANE").is_some() {
         let _ = std::fs::create_dir_all("calibration");
@@ -621,7 +862,192 @@ async fn measure_pane(
                 .collect::<Vec<_>>()
         );
     }
-    Ok(pane_geometry(&words, &letters, UP, timer, acts))
+    let geom = pane_geometry(&words, &letters, UP, timer, acts);
+    // Title lines sit above the split rows; without geometry, above the timer.
+    let splits_top = geom
+        .map(|g| timer.1 as i64 + g.splits.1 as i64)
+        .unwrap_or(timer.1 as i64);
+    let readings = pane_readings(&words, &letters, UP, timer, splits_top);
+    Ok((geom, readings))
+}
+
+/// Reference times the pane advertises, tracked until they are stable enough
+/// to persist. LiveSplit prints them as static text, so a value seen twice is
+/// the streamer's own record-keeping — better than anything in our config.
+#[derive(Default)]
+struct RefTracker {
+    /// (kind, value, consecutive sightings).
+    pending: Vec<(RefKind, i64, usize)>,
+    /// What has been written to settings this run.
+    recorded: Vec<(RefKind, i64)>,
+}
+
+impl RefTracker {
+    /// Count one sighting; true when it is newly confirmed and differs from
+    /// what is already stored. A first value needs two sightings; replacing
+    /// an established one needs three, since these rows change rarely and a
+    /// stuck misread would otherwise overwrite a good value.
+    fn observe(&mut self, kind: RefKind, ms: i64) -> bool {
+        match self.pending.iter_mut().find(|(k, _, _)| *k == kind) {
+            Some(slot) if slot.1 == ms => slot.2 += 1,
+            Some(slot) => *slot = (kind, ms, 1),
+            None => self.pending.push((kind, ms, 1)),
+        }
+        let need = match self.get(kind) {
+            Some(prev) if prev != ms => 3,
+            _ => 2,
+        };
+        let confirmed = self
+            .pending
+            .iter()
+            .any(|(k, v, n)| *k == kind && *v == ms && *n >= need);
+        confirmed && !self.recorded.iter().any(|(k, v)| *k == kind && *v == ms)
+    }
+
+    fn mark(&mut self, kind: RefKind, ms: i64) {
+        self.recorded.retain(|(k, _)| *k != kind);
+        self.recorded.push((kind, ms));
+    }
+
+    fn get(&self, kind: RefKind) -> Option<i64> {
+        self.recorded
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, v)| *v)
+    }
+}
+
+/// Is this reference time believable? These rows are static text, so a
+/// misread repeats identically on every re-read and "seen twice" proves
+/// nothing on its own. The real evidence is that the four values stand in a
+/// fixed order — world record <= lifetime PB <= season best, and a sum of
+/// best segments is faster than any run that contains them — so each new
+/// value is checked against the ones already confirmed.
+fn sane_reference(kind: RefKind, ms: i64, refs: &RefTracker, cfg: &Config) -> bool {
+    let floor = cfg.detection.min_final_ms.max(1);
+    // A sum of best is faster than any completed run and may fall below the
+    // "shortest plausible finish" floor as segments improve.
+    let low = if kind == RefKind::SumOfBest {
+        floor / 2
+    } else {
+        floor
+    };
+    if ms < low || ms > floor * 3 {
+        return false;
+    }
+    let known = |k: RefKind| refs.get(k);
+    let at_most = |other: Option<i64>| other.is_none_or(|o| ms <= o);
+    let at_least = |other: Option<i64>| other.is_none_or(|o| ms >= o);
+    match kind {
+        // Faster than every real run, but not absurdly so.
+        RefKind::SumOfBest => {
+            let bound = known(RefKind::SeasonBest).or(known(RefKind::LifetimePb));
+            at_most(bound) && bound.is_none_or(|b| ms >= b / 2)
+        }
+        RefKind::SeasonBest => at_least(known(RefKind::LifetimePb).or(known(RefKind::WorldRecord))),
+        RefKind::LifetimePb => {
+            at_least(known(RefKind::WorldRecord)) && at_most(known(RefKind::SeasonBest))
+        }
+        RefKind::WorldRecord => at_most(known(RefKind::LifetimePb).or(known(RefKind::SeasonBest))),
+    }
+}
+
+/// Apply a freshly read title row. Recording is suppressed only after two
+/// consecutive mismatches, and resumes on the first match: one garbled read
+/// of the game's name must not take the rest of a broadcast with it.
+#[allow(clippy::too_many_arguments)]
+fn apply_title(
+    readings: &PaneReadings,
+    cfg: &Config,
+    pane_game: &mut Option<String>,
+    pane_game_ok: &mut bool,
+    mismatches: &mut u32,
+    health: &mut db::SessionHealth,
+    at_ms: i64,
+) {
+    let Some(name) = readings.game.as_deref() else {
+        return; // title unreadable: leave the verdict as it stands
+    };
+    let matches = game_matches(name, &cfg.game.name);
+    *mismatches = if matches { 0 } else { *mismatches + 1 };
+    if pane_game.as_deref() != Some(name) {
+        info!(
+            "layout title: {name:?}{}{}",
+            readings
+                .category
+                .as_deref()
+                .map(|c| format!(" [{c}]"))
+                .unwrap_or_default(),
+            if matches {
+                ""
+            } else {
+                " — NOT the tracked game"
+            }
+        );
+        health.event(at_ms, "title", name.to_string());
+        *pane_game = Some(name.to_string());
+    }
+    if !cfg.game.require_title_match {
+        *pane_game_ok = true;
+        return;
+    }
+    let ok = matches || *mismatches < 2;
+    if ok != *pane_game_ok {
+        if ok {
+            info!(
+                "layout is timing {:?} again; recording resumed",
+                cfg.game.name
+            );
+        } else {
+            warn!(
+                "layout is timing {name:?}, not {:?}; recording suspended",
+                cfg.game.name
+            );
+        }
+        health.event(
+            at_ms,
+            if ok { "resumed" } else { "suspended" },
+            name.to_string(),
+        );
+        *pane_game_ok = ok;
+    }
+}
+
+/// Persist a confirmed reference time and, for the season best, adopt it as
+/// the record to beat.
+async fn record_reference(
+    pool: &SqlitePool,
+    shared: &Shared,
+    refs: &mut RefTracker,
+    health: &mut db::SessionHealth,
+    at_ms: i64,
+    kind: RefKind,
+    ms: i64,
+) {
+    info!("layout {}: {}", kind.describe(), format_ms(ms));
+    if let Err(e) = db::set_setting(pool, kind.setting_key(), &ms.to_string()).await {
+        warn!("failed to store {}: {e:#}", kind.describe());
+        return;
+    }
+    refs.mark(kind, ms);
+    health.event(
+        at_ms,
+        "reference",
+        format!("{} {}", kind.describe(), format_ms(ms)),
+    );
+    if kind == RefKind::SeasonBest {
+        // His comparison column IS the season best; it outranks the
+        // configured baseline, which only exists because we could not read it.
+        let mut b = shared.baseline_best_ms.write().await;
+        if *b != Some(ms) {
+            info!(
+                "{} to beat is now {} (from the layout)",
+                shared.record_label,
+                format_ms(ms)
+            );
+            *b = Some(ms);
+        }
+    }
 }
 
 /// OCR the splits column as `rows` equal-height rows: one parsed time (or
@@ -778,7 +1204,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         acts: cfg.game.act_list(),
         current_splits: RwLock::new(Vec::new()),
         record_label: cfg.game.record_label.clone(),
-        baseline_best_ms: cfg.game.baseline_best_ms(),
+        baseline_best_ms: RwLock::new(cfg.game.baseline_best_ms()),
     });
 
     let mut ocr_engine = OcrEngine::from_config(&cfg.ocr)?;
@@ -938,11 +1364,42 @@ pub async fn run(cfg: Config) -> Result<()> {
         sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(ls_attempt) FROM runs")
             .fetch_one(&pool)
             .await?;
-    let mut sob_stable: Option<(i64, u32)> = None;
-    let mut sob_recorded: Option<i64> = db::get_setting(&pool, "ls_sob_ms")
-        .await?
-        .and_then(|s| s.parse().ok());
+    // Reference times the layout advertises (Sum of Best, season best, PB,
+    // WR), seeded with what a previous run already persisted so a restart
+    // does not re-announce them.
+    let mut refs = RefTracker::default();
+    for kind in [
+        RefKind::SumOfBest,
+        RefKind::SeasonBest,
+        RefKind::LifetimePb,
+        RefKind::WorldRecord,
+    ] {
+        if let Some(v) = db::get_setting(&pool, kind.setting_key())
+            .await?
+            .and_then(|s| s.parse::<i64>().ok())
+        {
+            refs.mark(kind, v);
+            // Marking it recorded stops the value being re-announced, but the
+            // record to beat has to be adopted here too: re-sighting an
+            // already-stored value never fires again, so without this the
+            // layout's season best would silently revert to the config value
+            // on every restart.
+            if kind == RefKind::SeasonBest {
+                info!(
+                    "{} to beat is {} (read from the layout previously)",
+                    cfg.game.record_label,
+                    format_ms(v)
+                );
+                *shared.baseline_best_ms.write().await = Some(v);
+            }
+        }
+    }
     let mut last_sob_read_t: i64 = i64::MIN / 2;
+    // The game the layout says it is timing, whether runs may be recorded,
+    // and how many consecutive reads disagreed with the configured game.
+    let mut pane_game: Option<String> = None;
+    let mut pane_game_ok = true;
+    let mut title_mismatches: u32 = 0;
 
     // Recorded sources (vod/file) may decode much faster than realtime, so
     // the state machine is ticked by frame index instead of wall clock —
@@ -1308,49 +1765,83 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // configured rectangles are only the fallback.
                 if new_regs.splits.is_some() {
                     let acts = shared.acts.len().max(1) as u32;
-                    let want_sob = new_regs.sob.is_some();
                     match measure_pane(
                         &mut ocr_engine,
                         &union_img,
                         new_regs.timer,
                         acts,
                         &pre_splits,
-                        want_sob,
                     )
                     .await
                     {
-                        Ok(Some(g)) => {
-                            g.apply(&mut new_regs);
-                            let (ux, uy) = (new_regs.union.0, new_regs.union.1);
-                            let s = new_regs.splits.unwrap();
-                            let at = |r: Option<R>, measured: bool, what: &str| match r {
-                                Some(c) if measured => {
-                                    format!(", {what} at {},{} {}x{}", ux + c.0, uy + c.1, c.2, c.3)
+                        Ok((geom, readings)) => {
+                            let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
+                            // What the pane says it is timing. Only gates
+                            // recording when the operator asked it to.
+                            apply_title(
+                                &readings,
+                                &cfg,
+                                &mut pane_game,
+                                &mut pane_game_ok,
+                                &mut title_mismatches,
+                                &mut health,
+                                at_ms,
+                            );
+                            // Reference times printed under the timer.
+                            for (kind, ms, _) in &readings.refs {
+                                if sane_reference(*kind, *ms, &refs, &cfg)
+                                    && refs.observe(*kind, *ms)
+                                {
+                                    record_reference(
+                                        &pool,
+                                        &shared,
+                                        &mut refs,
+                                        &mut health,
+                                        at_ms,
+                                        *kind,
+                                        *ms,
+                                    )
+                                    .await;
                                 }
-                                _ => String::new(),
-                            };
-                            info!(
+                            }
+                            if let Some(g) = geom {
+                                g.apply(&mut new_regs);
+                                let (ux, uy) = (new_regs.union.0, new_regs.union.1);
+                                let s = new_regs.splits.unwrap();
+                                let at = |r: Option<R>, measured: bool, what: &str| match r {
+                                    Some(c) if measured => {
+                                        format!(
+                                            ", {what} at {},{} {}x{}",
+                                            ux + c.0,
+                                            uy + c.1,
+                                            c.2,
+                                            c.3
+                                        )
+                                    }
+                                    _ => String::new(),
+                                };
+                                info!(
                                 "pane geometry: {}/{acts} split rows read, pitch {}px; splits at {},{} {}x{} (canvas){}{}",
                                 g.rows_read, g.pitch, ux + s.0, uy + s.1, s.2, s.3,
                                 at(new_regs.counter, g.counter.is_some(), "counter"),
                                 at(new_regs.sob, g.sob.is_some(), "SoB"),
                             );
-                            pane_geom = Some(g);
-                            geom_abs = Some((new_regs.splits, new_regs.counter, new_regs.sob));
-                            geom_ink_abs = None;
-                            health.event(
-                                time_base.map(|b| b + t).unwrap_or_else(util::unix_ms),
-                                "geometry",
-                                format!("{}/{acts} rows, pitch {}px", g.rows_read, g.pitch),
-                            );
-                        }
-                        Ok(None) => {
-                            debug!(
-                                "pane geometry not measurable here; using configured rectangles"
-                            );
-                            pane_geom = None;
-                            geom_abs = None;
-                            geom_ink_abs = None;
+                                pane_geom = Some(g);
+                                geom_abs = Some((new_regs.splits, new_regs.counter, new_regs.sob));
+                                geom_ink_abs = None;
+                                health.event(
+                                    time_base.map(|b| b + t).unwrap_or_else(util::unix_ms),
+                                    "geometry",
+                                    format!("{}/{acts} rows, pitch {}px", g.rows_read, g.pitch),
+                                );
+                            } else {
+                                debug!(
+                                    "pane geometry not measurable here; using configured rectangles"
+                                );
+                                pane_geom = None;
+                                geom_abs = None;
+                                geom_ink_abs = None;
+                            }
                         }
                         Err(e) => warn!("pane geometry pass failed: {e:#}"),
                     }
@@ -1560,7 +2051,14 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
         }
         let reg = &active_regs;
-        let obs = parsed.map(Obs::Time).unwrap_or(Obs::Illegible);
+        // The layout is timing a different game (a marathon broadcast moving
+        // on to the next one): read on so the title is re-checked at the next
+        // lock, but record nothing.
+        let obs = if pane_game_ok {
+            parsed.map(Obs::Time).unwrap_or(Obs::Illegible)
+        } else {
+            Obs::Illegible
+        };
         last_t = t;
         health.frames += 1;
         if parsed.is_some() {
@@ -1798,36 +2296,79 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
         }
 
-        // Lifetime Sum of Best row: static text that changes only when he
-        // golds a segment; a slow read keeps it current in settings.
-        if let Some((bx, by, bw2, bh2)) = reg.sob {
-            if t - last_sob_read_t >= 60_000 {
-                last_sob_read_t = t;
-                let bimg = image::imageops::crop_imm(&union_bright, bx, by, bw2, bh2).to_image();
-                let bp = ocr::preprocess(&bimg, &pre_counter);
-                if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&bp)?).await {
-                    // Plausibility: a Sum of Best can never exceed the record
-                    // (and can't be wildly below it) — this rejects consistent
-                    // misreads when the layout shifts under the crop.
-                    let bound = shared.baseline_best_ms.unwrap_or(i64::MAX);
-                    if let Some(v) = parse_time(txt.trim()).filter(|&v| v <= bound && v > bound / 2)
-                    {
-                        sob_stable = match sob_stable {
-                            Some((pv, n)) if pv == v => Some((v, n + 1)),
-                            _ => Some((v, 1)),
-                        };
-                        if matches!(sob_stable, Some((_, n)) if n >= 2) && sob_recorded != Some(v) {
-                            info!("season sum of best: {}", format_ms(v));
-                            if let Err(e) =
-                                db::set_setting(&pool, "ls_sob_ms", &v.to_string()).await
-                            {
-                                warn!("failed to store lifetime SoB: {e:#}");
-                            } else {
-                                sob_recorded = Some(v);
+        // Re-read the pane's own words on a slow cadence: the reference rows
+        // (static text that changes only when the streamer beats one) and the
+        // title. The title MUST be re-read here and not only at a lock —
+        // relocking is driven by the timer going dark or reading poorly, and
+        // a suppressed run leaves the timer parsing perfectly, so a single
+        // misread title would otherwise turn recording off for the rest of
+        // the broadcast with nothing able to turn it back on.
+        if layout_locked && t - last_sob_read_t >= 60_000 {
+            last_sob_read_t = t;
+            let acts = shared.acts.len().max(1) as u32;
+            match measure_pane(
+                &mut ocr_engine,
+                &union_img,
+                active_regs.timer,
+                acts,
+                &pre_splits,
+            )
+            .await
+            {
+                Ok((_, readings)) => {
+                    let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
+                    apply_title(
+                        &readings,
+                        &cfg,
+                        &mut pane_game,
+                        &mut pane_game_ok,
+                        &mut title_mismatches,
+                        &mut health,
+                        at_ms,
+                    );
+                    for (kind, ms, _) in &readings.refs {
+                        if sane_reference(*kind, *ms, &refs, &cfg) && refs.observe(*kind, *ms) {
+                            record_reference(
+                                &pool,
+                                &shared,
+                                &mut refs,
+                                &mut health,
+                                at_ms,
+                                *kind,
+                                *ms,
+                            )
+                            .await;
+                        }
+                    }
+                    // A configured Sum of Best crop still covers layouts whose
+                    // rows the pane pass cannot label.
+                    if readings.refs.is_empty() {
+                        if let Some((bx, by, bw2, bh2)) = reg.sob {
+                            let bimg = image::imageops::crop_imm(&union_bright, bx, by, bw2, bh2)
+                                .to_image();
+                            let bp = ocr::preprocess(&bimg, &pre_counter);
+                            if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&bp)?).await {
+                                if let Some(v) = parse_time(txt.trim())
+                                    .filter(|&v| sane_reference(RefKind::SumOfBest, v, &refs, &cfg))
+                                {
+                                    if refs.observe(RefKind::SumOfBest, v) {
+                                        record_reference(
+                                            &pool,
+                                            &shared,
+                                            &mut refs,
+                                            &mut health,
+                                            at_ms,
+                                            RefKind::SumOfBest,
+                                            v,
+                                        )
+                                        .await;
+                                    }
+                                }
                             }
                         }
                     }
                 }
+                Err(e) => warn!("pane re-read failed: {e:#}"),
             }
         }
 
@@ -1984,7 +2525,7 @@ async fn handle_event(
                 .and_then(|r| r.final_time_ms);
             // The record to beat includes any pre-tracking baseline, so we
             // never announce a "record" the runner has already beaten.
-            let prior_pb = match (tracked_best, shared.baseline_best_ms) {
+            let prior_pb = match (tracked_best, *shared.baseline_best_ms.read().await) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
             };
@@ -2172,6 +2713,229 @@ mod tests {
             conf: 90.0,
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn pane_readings_from_a_real_layout() {
+        // The bottom of this streamer's pane, as tesseract reports it at 2x:
+        //   Previous Segment          -0.0
+        //   Sum of Best Segments   11:31.7
+        //   Today: 11:48.8  2026: 11:35.1  PB: 11:33.9
+        //   World Record: 11:32.183 by TheRetroRunner
+        // and above the splits: "Ninja Gaiden (NES)" / "Any%" + the counter.
+        let timer = (60, 400, 300, 90);
+        let letters: Vec<ocr::Word> = [
+            (156, 49, 120, 22, "Ninja"),
+            (282, 49, 130, 22, "Gaiden"),
+            (458, 54, 100, 22, "(NES)"),
+            (307, 113, 80, 20, "Any%"),
+            (746, 112, 90, 20, "96454"),
+            (60, 936, 140, 20, "Previous"),
+            (210, 936, 140, 20, "Segment"),
+            (60, 1018, 70, 20, "Sum"),
+            (140, 1018, 30, 20, "of"),
+            (180, 1018, 70, 20, "Best"),
+            (260, 1018, 150, 20, "Segments"),
+            (681, 1017, 130, 20, "11:31.7"),
+            (0, 1101, 90, 20, "Today:"),
+            (100, 1101, 130, 20, "11:48.8"),
+            (256, 1101, 90, 20, "2026:"),
+            (400, 1100, 130, 20, "11:35.1"),
+            (605, 1100, 50, 20, "PB:"),
+            (702, 1101, 130, 20, "11:33.9"),
+            (0, 1180, 90, 20, "World"),
+            (100, 1180, 110, 20, "Record:"),
+            (230, 1180, 160, 20, "11:32.183"),
+            (410, 1180, 40, 20, "by"),
+        ]
+        .iter()
+        .map(|&(x, y, w, h, t)| ocr::Word {
+            x,
+            y,
+            w,
+            h,
+            conf: 90.0,
+            text: t.into(),
+        })
+        .collect();
+        let r = pane_readings(&[], &letters, 2, timer, 300);
+        assert_eq!(r.game.as_deref(), Some("Ninja Gaiden (NES)"));
+        assert_eq!(r.category.as_deref(), Some("Any%"));
+        let val = |k: RefKind| {
+            r.refs
+                .iter()
+                .find(|(kk, _, _)| *kk == k)
+                .map(|(_, v, _)| *v)
+        };
+        // Each time takes the labels between it and the previous time on its
+        // line, so the three-column row does not smear its labels.
+        assert_eq!(val(RefKind::SumOfBest), Some(691_700));
+        assert_eq!(val(RefKind::SeasonBest), Some(695_100));
+        assert_eq!(val(RefKind::LifetimePb), Some(693_900));
+        assert_eq!(val(RefKind::WorldRecord), Some(692_183));
+        // "Today:" is not a reference — it changes every run.
+        assert_eq!(r.refs.len(), 4);
+    }
+
+    #[test]
+    fn game_name_matching_tolerates_ocr_damage() {
+        assert!(game_matches("Ninja Gaiden (NES)", "Ninja Gaiden (NES)"));
+        assert!(game_matches("Ninja Gaiden", "Ninja Gaiden (NES)"));
+        assert!(game_matches("Ninja Gaiden (NES}", "Ninja Gaiden (NES)"));
+        assert!(game_matches("Ninia Gaiden (NES)", "Ninja Gaiden (NES)"));
+        assert!(!game_matches("Super Mario Bros.", "Ninja Gaiden (NES)"));
+        assert!(!game_matches("Ninja Gaiden II", "Castlevania"));
+        assert!(!game_matches("", "Ninja Gaiden (NES)"));
+    }
+
+    #[test]
+    fn reference_kinds_from_labels() {
+        assert_eq!(
+            RefKind::classify("sum of best segments"),
+            Some(RefKind::SumOfBest)
+        );
+        assert_eq!(RefKind::classify("2026:"), Some(RefKind::SeasonBest));
+        assert_eq!(RefKind::classify("season best"), Some(RefKind::SeasonBest));
+        assert_eq!(RefKind::classify("pb:"), Some(RefKind::LifetimePb));
+        assert_eq!(
+            RefKind::classify("world record:"),
+            Some(RefKind::WorldRecord)
+        );
+        assert_eq!(RefKind::classify("today:"), None);
+        assert_eq!(RefKind::classify("previous segment"), None);
+        assert_eq!(RefKind::classify(""), None);
+    }
+
+    #[test]
+    fn reference_tracker_needs_two_sightings() {
+        let mut t = RefTracker::default();
+        assert!(
+            !t.observe(RefKind::SeasonBest, 695_100),
+            "one sighting is not enough"
+        );
+        assert!(t.observe(RefKind::SeasonBest, 695_100), "second confirms");
+        t.mark(RefKind::SeasonBest, 695_100);
+        assert!(!t.observe(RefKind::SeasonBest, 695_100), "already stored");
+        assert_eq!(t.get(RefKind::SeasonBest), Some(695_100));
+        // Replacing an established value needs three: these rows change
+        // rarely, and a misread that sticks would otherwise overwrite a
+        // perfectly good number on its second appearance.
+        assert!(!t.observe(RefKind::SeasonBest, 694_000));
+        assert!(!t.observe(RefKind::SeasonBest, 694_000));
+        assert!(t.observe(RefKind::SeasonBest, 694_000));
+    }
+
+    #[test]
+    fn reference_values_must_respect_their_ordering() {
+        let cfg = Config::for_test_with_min_final(660_000);
+        let mut refs = RefTracker::default();
+        // Nothing known yet: only the coarse band applies.
+        assert!(sane_reference(RefKind::SeasonBest, 695_100, &refs, &cfg));
+        assert!(
+            !sane_reference(RefKind::SeasonBest, 600_000, &refs, &cfg),
+            "faster than any run"
+        );
+        assert!(
+            !sane_reference(RefKind::SeasonBest, 2_000_000, &refs, &cfg),
+            "absurdly slow"
+        );
+        refs.mark(RefKind::SeasonBest, 695_100);
+        refs.mark(RefKind::WorldRecord, 692_183);
+        // A 1 read as a 7 turns 11:35.1 into 17:35.1: inside the old band,
+        // but it cannot be a PB when the season best is 11:35.1.
+        assert!(!sane_reference(RefKind::LifetimePb, 1_055_100, &refs, &cfg));
+        assert!(sane_reference(RefKind::LifetimePb, 693_933, &refs, &cfg));
+        // A PB faster than the world record is a misread, not a record.
+        assert!(!sane_reference(RefKind::LifetimePb, 690_000, &refs, &cfg));
+        // A sum of best is faster than the run it belongs to, and may drop
+        // below the "shortest plausible finish" floor as segments improve.
+        assert!(sane_reference(RefKind::SumOfBest, 691_700, &refs, &cfg));
+        assert!(
+            !sane_reference(RefKind::SumOfBest, 700_000, &refs, &cfg),
+            "slower than the record"
+        );
+        assert!(
+            !sane_reference(RefKind::SumOfBest, 300_000, &refs, &cfg),
+            "impossibly fast"
+        );
+    }
+
+    #[test]
+    fn title_gate_needs_two_misreads_and_recovers() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.require_title_match = true;
+        let (mut game, mut ok, mut miss) = (None, true, 0u32);
+        let mut health = db::SessionHealth::default();
+        let titled = |s: &str| PaneReadings {
+            game: Some(s.into()),
+            category: None,
+            refs: Vec::new(),
+        };
+        // One garbled read must not suspend a six-hour broadcast.
+        apply_title(
+            &titled("Nlnja Galden (NE5)"),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        assert!(ok, "a single misread is tolerated");
+        apply_title(
+            &titled("Nlnja Galden (NE5)"),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        assert!(!ok, "a second disagreeing read suspends recording");
+        // An unreadable title leaves the verdict alone...
+        apply_title(
+            &PaneReadings::default(),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        assert!(!ok);
+        // ...and one good read brings it straight back.
+        apply_title(
+            &titled("Ninja Gaiden (NES)"),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        assert!(ok, "recording resumes as soon as the title reads right");
+        // With the gate off, a different game never suppresses anything.
+        cfg.game.require_title_match = false;
+        apply_title(
+            &titled("Super Mario Bros."),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        apply_title(
+            &titled("Super Mario Bros."),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        assert!(ok);
     }
 
     #[test]
