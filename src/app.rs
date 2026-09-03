@@ -1915,12 +1915,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                 let c = &mut cands[ci];
                 let crop = c.regs.timer;
                 let (png, proc, g) = read_timer(&union_bright, crop)?;
-                let glyph_hit = glyph_reader
-                    .as_ref()
-                    .and_then(|gr| gr.read(&g))
-                    .filter(|r| parse_time(&r.text).is_some());
-                let (rd, bbox) = match glyph_hit {
-                    Some(r) => {
+                let glyph = glyph_reader.as_ref().map(|gr| gr.read_diag(&g));
+                let (rd, bbox) = match glyph {
+                    Some(Ok(r)) if parse_time(&r.text).is_some() => {
                         reader_used = "glyph";
                         // Only the box's left edge matters here: it is where
                         // the ink search below starts.
@@ -1928,7 +1925,18 @@ pub async fn run(cfg: Config) -> Result<()> {
                         let x0 = r.boxes.iter().map(|b| b.x).min().unwrap_or(0);
                         (r.text, Some((x0 * up, 0, 0, 0)))
                     }
-                    None => {
+                    // Nothing glyph-shaped at this position — no digit band,
+                    // or ink in a hundred pieces: the timer is not here, and
+                    // tesseract would only confirm it at a hundred times the
+                    // cost. A probe frame tries a dozen positions, and the
+                    // stretches with no timer on screen are long; with
+                    // tesseract at every one of them the bot fell behind the
+                    // stream. (Light digits on dark only: on an inverted
+                    // theme the reader sees the background as ink.)
+                    Some(Err(crate::glyph::Decline::Segmentation(_))) if pre.invert => {
+                        (String::new(), None)
+                    }
+                    _ => {
                         reader_used = "tess";
                         match ocr_engine.recognize_boxed(&png).await {
                             Ok((t, b)) => (t.trim().to_string(), b),
