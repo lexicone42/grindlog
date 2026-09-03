@@ -343,8 +343,11 @@ const fmt = ms => {
   const m = Math.floor(t / 60), s = (t - m * 60).toFixed(1).padStart(4, '0');
   return m >= 60 ? `${Math.floor(m/60)}:${String(m%60).padStart(2,'0')}:${s}` : `${m}:${s}`;
 };
-const dshort = ms => new Date(ms).toLocaleDateString(undefined, {month:'short', day:'numeric'});
-const dtime = ms => new Date(ms).toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+// Every time on this page is the streamer's local time, whoever is reading:
+// shift by the recording machine's offset and format in UTC.
+const TZ = (D.day_offset_minutes || 0) * 60000;
+const dshort = ms => new Date(ms + TZ).toLocaleDateString(undefined, {month:'short', day:'numeric', timeZone:'UTC'});
+const dtime = ms => new Date(ms + TZ).toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit', timeZone:'UTC'});
 // The run's identity is the runner's own LiveSplit counter; our tracked
 // number is only a muted fallback for runs where it wasn't read.
 const runNo = r => r.ls_attempt != null
@@ -487,15 +490,20 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   const W = svg.clientWidth || 980, H = 240, L = 58, R = 16, T = 14, B = 30;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   // X axis: his LiveSplit counter once every finish carries one, else ours.
-  const useLs = finishes.every(f => f.ls_attempt != null) && D.pb_history.every(p => p.ls_attempt != null);
-  const xOf = r => useLs ? r.ls_attempt : r.attempt_number;
-  const xs = finishes.map(xOf);
+  // Finishes are placed evenly, oldest first, rather than on an attempt-number
+  // axis: his lifetime counter starts near 95,000 (so a zero-based axis packs
+  // every dot against the right edge) and tracking has gaps of hundreds of
+  // attempts between visits (so a min-based axis is mostly dead space). The
+  // run number lives in the tooltip.
+  const xIndex = new Map(finishes.map((f, i) => [f.attempt_number, i]));
+  const xOf = r => xIndex.get(r.attempt_number);
+  const xs = finishes.map((_, i) => i);
   const ys = finishes.map(f => f.final_time_ms);
   const refs = (D.references || []).filter(r => r.ms);
   if (D.baseline_best_ms != null && (!D.pb_history.length || D.baseline_best_ms < D.pb_history[D.pb_history.length-1].time_ms)) {
     refs.push({ label: D.record_label || 'best', ms: D.baseline_best_ms });
   }
-  const xmin = 0, xmax = Math.max(...xs) + 4;
+  const xmin = -0.5, xmax = Math.max(...xs) + 0.5;
   const pad = 10000;
   const ymin = Math.min(...ys, ...D.pb_history.map(p => p.time_ms), ...refs.map(r => r.ms)) - pad;
   const ymax = Math.max(...ys) + pad;
@@ -508,7 +516,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     out += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)" stroke-width="1"/>`;
     out += `<text x="${L - 8}" y="${Y(v) + 3.5}" text-anchor="end">${fmt(v)}</text>`;
   }
-  out += `<text x="${(L + W - R) / 2}" y="${H - 6}" text-anchor="middle">${useLs ? "his run №" : "tracked attempt №"}</text>`;
+  out += `<text x="${(L + W - R) / 2}" y="${H - 6}" text-anchor="middle">every finish, oldest first</text>`;
   // Reference times cluster within seconds of each other — render them as
   // one shaded "target zone" band (labels live in the caption instead).
   if (refs.length) {
@@ -521,9 +529,11 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
       [...refs].sort((a, b) => a.ms - b.ms).map(r => `${r.label} ${fmt(r.ms)}`).join(' · ');
   }
   // PB step line (gold)
-  if (D.pb_history.length) {
+  // Only PB points that correspond to a finish on this chart can be placed.
+  const pbPoints = D.pb_history.filter(p => xOf(p) != null);
+  if (pbPoints.length) {
     let d = '', prev = null;
-    for (const p of D.pb_history) {
+    for (const p of pbPoints) {
       if (prev == null) d += `M ${X(xOf(p))} ${Y(p.time_ms)}`;
       else d += ` L ${X(xOf(p))} ${Y(prev)} L ${X(xOf(p))} ${Y(p.time_ms)}`;
       prev = p.time_ms;
@@ -568,17 +578,12 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   // included), not merely the best run the tracker has seen so far.
   const isPB = r => D.pb_history.some(p => p.attempt_number === r.attempt_number)
     && (D.baseline_best_ms == null || r.final_time_ms < D.baseline_best_ms);
-  const dayBestMs = new Map();
-  for (const [k, list] of byDay) {
-    const f = list.filter(r => r.outcome === 'finished').map(r => r.final_time_ms);
-    if (f.length) dayBestMs.set(k, Math.min(...f));
-  }
-  const isDayBest = r => r.outcome === 'finished' && dayBestMs.get(dayKey(r.started_at_ms)) === r.final_time_ms;
-  const finPill = r => isPB(r) ? '<span class="pill pb">record</span>'
-    : isDayBest(r) ? '<span class="pill day">day best</span>'
-    : '<span class="pill fin">finished</span>';
-  const dayKey = ms => { const d = new Date(ms);
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
+  // Days are the streamer's, so shift into the recording machine's zone and
+  // read the date in UTC. Using the reader's own zone would split a broadcast
+  // across two chips for anyone outside it, and disagree with every figure
+  // the database grouped by day.
+  const dayKey = ms => { const d = new Date(ms + (D.day_offset_minutes || 0) * 60000);
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`; };
   const byDay = new Map();
   for (const r of all) {
     const k = dayKey(r.started_at_ms);
@@ -589,6 +594,16 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   // and clock-slip re-anchors back-date their start).
   for (const list of byDay.values()) list.sort((a, b) => a.started_at_ms - b.started_at_ms);
   const days = [...byDay.keys()].sort();
+  // The fastest finish of each day gets its own pill when it isn't a record.
+  const dayBestMs = new Map();
+  for (const [k, list] of byDay) {
+    const f = list.filter(r => r.outcome === 'finished').map(r => r.final_time_ms);
+    if (f.length) dayBestMs.set(k, Math.min(...f));
+  }
+  const isDayBest = r => r.outcome === 'finished' && dayBestMs.get(dayKey(r.started_at_ms)) === r.final_time_ms;
+  const finPill = r => isPB(r) ? '<span class="pill pb">record</span>'
+    : isDayBest(r) ? '<span class="pill day">day best</span>'
+    : '<span class="pill fin">finished</span>';
 
   // The fastest finished run that has a full set of splits: the pace
   // reference for every other run's detail.
@@ -729,7 +744,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
       if (dh.relocks) parts.push(`${dh.relocks} layout ${dh.relocks === 1 ? 'event' : 'events'}`);
       if (dh.pitch) parts.push(`rows ${dh.pitch}px`);
       const evText = dh.events.slice(-12).map(e =>
-        `${new Date(e.t).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'})} ${e.k}: ${e.d}`).join('\n');
+        `${dtime(e.t)} ${e.k}: ${e.d}`).join('\n');
       healthEl.innerHTML = `<span style="color:${dh.warn ? 'var(--behind)' : 'inherit'}">capture</span> · ${parts.join(' · ')}` +
         (dh.events.length ? ` <span title="${evText.replace(/"/g, '&quot;')}" style="cursor:help;text-decoration:underline dotted">details</span>` : '');
       healthEl.hidden = false;
@@ -770,7 +785,7 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
     out += `<line x1="${L}" x2="${W-R}" y1="${H-B}" y2="${H-B}" stroke="var(--grid)" stroke-width="1"/>`;
     const hStep = 3600e3;
     for (let h = Math.ceil(t0/hStep)*hStep; h <= t1; h += hStep) {
-      out += `<text x="${X(h)}" y="${H-8}" text-anchor="middle">${new Date(h).toLocaleTimeString(undefined,{hour:'numeric'})}</text>`;
+      out += `<text x="${X(h)}" y="${H-8}" text-anchor="middle">${new Date(h + TZ).toLocaleTimeString(undefined,{hour:'numeric',timeZone:'UTC'})}</text>`;
     }
     runs.forEach((r, i) => {
       const d = depth(r), x = X(r.started_at_ms), y = Yd(d);
@@ -845,8 +860,9 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   const slots = 48; // half-hours
   const tot = new Array(slots).fill(0), fin = new Array(slots).fill(0);
   for (const r of all) {
-    const d = new Date(r.started_at_ms);
-    const s = d.getHours() * 2 + (d.getMinutes() >= 30 ? 1 : 0);
+    // The streamer's clock, not the reader's.
+    const d = new Date(r.started_at_ms + TZ);
+    const s = d.getUTCHours() * 2 + (d.getUTCMinutes() >= 30 ? 1 : 0);
     tot[s]++; if (r.outcome === 'finished') fin[s]++;
   }
   let lo = tot.findIndex(v => v > 0), hi = slots - 1; while (hi > lo && !tot[hi]) hi--;
@@ -863,17 +879,21 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
       out += `<rect x="${x}" y="${Y(tot[s])}" width="${w}" height="${(H-B)-Y(tot[s])}" fill="var(--deemph)" opacity=".55" rx="1"><title>${String(Math.floor(s/2)).padStart(2,'0')}:${s%2?'30':'00'} — ${tot[s]} attempts, ${fin[s]} finished</title></rect>`;
       if (fin[s]) out += `<rect x="${x}" y="${Y(fin[s])}" width="${w}" height="${(H-B)-Y(fin[s])}" fill="var(--series)" rx="1"/>`;
     }
-    if (s % 2 === 0) out += `<text x="${x + bw - 1}" y="${H-7}" text-anchor="middle">${new Date(2000,0,1,s/2).toLocaleTimeString(undefined,{hour:'numeric'})}</text>`;
+    if (s % 2 === 0) out += `<text x="${x + bw - 1}" y="${H-7}" text-anchor="middle">${new Date(Date.UTC(2000,0,1,s/2)).toLocaleTimeString(undefined,{hour:'numeric',timeZone:'UTC'})}</text>`;
   }
   out += `<text x="${L-6}" y="${Y(max)+4}" text-anchor="end">${max}</text>`;
   svg.innerHTML = out;
   const finTot = fin.reduce((a, b) => a + b, 0);
   const peak = tot.indexOf(Math.max(...tot));
-  const bestRate = fin.map((f, i) => tot[i] >= 20 ? f / tot[i] : -1);
-  const br = bestRate.indexOf(Math.max(...bestRate));
+  // Only half-hours with enough attempts to mean anything; -1 as a sentinel
+  // inside the array would come back as slot 0 from indexOf and read
+  // "best finish rate -100% around 00:00" on a young dataset.
+  const rated = fin.map((f, i) => ({ i, rate: f / tot[i] })).filter(x => tot[x.i] >= 20);
+  const best = rated.length ? rated.reduce((a, b) => (b.rate > a.rate ? b : a)) : null;
+  const at = s => `${String(Math.floor(s/2)).padStart(2,'0')}:${s%2?'30':'00'}`;
   document.getElementById('hours-sub').textContent =
-    `${all.length.toLocaleString()} attempts, ${finTot} finished. Busiest half-hour starts ${String(Math.floor(peak/2)).padStart(2,'0')}:${peak%2?'30':'00'}` +
-    (br >= 0 ? `; best finish rate ${Math.round(bestRate[br]*100)}% around ${String(Math.floor(br/2)).padStart(2,'0')}:${br%2?'30':'00'}.` : '.');
+    `${all.length.toLocaleString()} attempts, ${finTot} finished. Busiest half-hour starts ${at(peak)}` +
+    (best ? `; best finish rate ${Math.round(best.rate*100)}% around ${at(best.i)}.` : '.');
 })();
 
 /* golds table */

@@ -7,6 +7,13 @@ pub fn unix_ms() -> i64 {
 }
 
 /// Unix ms of local midnight today — the boundary for `!today`.
+/// This machine's current UTC offset in minutes. The database groups days in
+/// local time (the streamer's), so anything that re-derives a day elsewhere —
+/// the site, in a reader's browser — needs the same offset to agree.
+pub fn local_utc_offset_minutes() -> i64 {
+    Local::now().offset().local_minus_utc() as i64 / 60
+}
+
 pub fn local_day_start_ms() -> i64 {
     let now = Local::now();
     now.date_naive()
