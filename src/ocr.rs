@@ -461,6 +461,11 @@ pub mod leptess_worker {
             .map_err(|e| anyhow!("setting whitelist: {e}"))?;
         lt.set_variable(leptess::Variable::TesseditPagesegMode, "7")
             .map_err(|e| anyhow!("setting psm: {e}"))?;
+        // libtesseract chats on stderr ("Detected 3 diacritics", leptonica
+        // warnings on tiny crops) at every other frame; that is noise in the
+        // bot's log, not diagnostics. Send it to the void. Best effort: an
+        // engine build without the variable just stays chatty.
+        let _ = lt.set_variable(leptess::Variable::DebugFile, "/dev/null");
         Ok(lt)
     }
 

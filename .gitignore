@@ -32,3 +32,6 @@ nohup.out
 # Build lock and the alternate-engine build tree
 /.build-site.lock
 /target-leptess/
+
+# Replay-window work files (configs, dbs, obs logs per replay)
+/replays/
