@@ -549,10 +549,7 @@ impl GlyphReader {
 
     /// The crop's glyphs as the reader cuts and scores them, left to right,
     /// with the digit band `(top, bottom)` they sit in.
-    pub fn glyphs(
-        &self,
-        img: &GrayImage,
-    ) -> std::result::Result<(Vec<(GlyphBox, Option<Scored>)>, (u32, u32)), Decline> {
+    pub fn glyphs(&self, img: &GrayImage) -> std::result::Result<Glyphs, Decline> {
         // Nothing this small holds a timer; the geometry below assumes a
         // few rows of margin and a glyph's width of columns.
         if img.width() < 8 || img.height() < 8 {
@@ -611,6 +608,9 @@ impl GlyphReader {
     /// anti-aliased inner edge can be stuck to it: a cut there may also
     /// simply discard the right-hand piece, if the digit left of it reads
     /// clearly better than the box did whole.
+    // The crop, its column ink and band travel together through the
+    // recursion; the box, depth, trailing flag and output are per call.
+    #[allow(clippy::too_many_arguments)]
     fn refine(
         &self,
         img: &GrayImage,
@@ -619,7 +619,7 @@ impl GlyphReader {
         b: GlyphBox,
         depth: u32,
         trailing: bool,
-        out: &mut Vec<(GlyphBox, Option<Scored>)>,
+        out: &mut Vec<Glyph>,
     ) {
         let whole = self.score_box(img, band, b);
         let band_h = band.1 - band.0;
@@ -632,7 +632,7 @@ impl GlyphReader {
         let min_piece = (band_h as usize / 6).max(4);
         let (x0, x1) = (b.x as usize, (b.x + b.w) as usize);
         let rows = (band.0, band.1.saturating_sub(1));
-        let mut best: Option<(f32, Vec<(GlyphBox, Option<Scored>)>)> = None;
+        let mut best: Option<(f32, Vec<Glyph>)> = None;
         if depth > 0 && digit_height && b.w > expected * 5 / 4 && x1 >= x0 + 2 * min_piece {
             // Every other column of a pair of digits; coarser on a box far
             // wider than any pair (a crop the threshold turned into one
@@ -690,6 +690,10 @@ impl GlyphReader {
 
 /// A glyph's classification: class, score, margin over the runner-up.
 type Scored = (char, f32, f32);
+/// A glyph box with its classification (None: a speck, or no class).
+pub type Glyph = (GlyphBox, Option<Scored>);
+/// The glyphs of a crop, left to right, and the digit band they sit in.
+pub type Glyphs = (Vec<Glyph>, (u32, u32));
 
 /// Why a crop was not read.
 #[derive(Debug, Clone, PartialEq)]
@@ -864,8 +868,11 @@ pub struct TrainStats {
     pub per_class: Vec<(char, usize)>,
     /// A few frames whose segmentation did not match the label: (label,
     /// boxes as (x, y, w, h)).
-    pub mismatches: Vec<(String, Vec<(u32, u32, u32, u32)>)>,
+    pub mismatches: Vec<(String, Vec<Rect>)>,
 }
+
+/// A box as (x, y, w, h).
+pub type Rect = (u32, u32, u32, u32);
 
 #[cfg(test)]
 mod tests {
@@ -1318,7 +1325,7 @@ pub fn cli_test(
         100.0 * wrong as f64 / total.max(1) as f64,
     );
     let mut sorted: Vec<(String, usize)> = reasons.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|a| std::cmp::Reverse(a.1));
     for (key, n) in sorted.iter().take(10) {
         println!("  declined, {key}: {n}   e.g. {}", reason_examples[key]);
     }
