@@ -497,6 +497,16 @@ pub struct ChatCfg {
 }
 
 impl Config {
+    /// A default config with one knob set, for tests that exercise logic
+    /// depending on the category's fastest plausible time.
+    #[cfg(test)]
+    pub fn for_test_with_min_final(min_final_ms: i64) -> Self {
+        let mut cfg: Config = toml::from_str("[stream]\nchannel = \"test\"\n")
+            .expect("the minimal config must parse");
+        cfg.detection.min_final_ms = min_final_ms;
+        cfg
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading config file {}", path.display()))?;

@@ -876,8 +876,6 @@ async fn measure_pane(
 /// the streamer's own record-keeping — better than anything in our config.
 #[derive(Default)]
 struct RefTracker {
-    /// Where each kind was last seen, in union coordinates.
-    rects: Vec<(RefKind, R)>,
     /// (kind, value, consecutive sightings).
     pending: Vec<(RefKind, i64, usize)>,
     /// What has been written to settings this run.
@@ -885,18 +883,24 @@ struct RefTracker {
 }
 
 impl RefTracker {
-    /// Count one sighting; true when it is newly confirmed (twice) and
-    /// differs from what is already stored.
+    /// Count one sighting; true when it is newly confirmed and differs from
+    /// what is already stored. A first value needs two sightings; replacing
+    /// an established one needs three, since these rows change rarely and a
+    /// stuck misread would otherwise overwrite a good value.
     fn observe(&mut self, kind: RefKind, ms: i64) -> bool {
         match self.pending.iter_mut().find(|(k, _, _)| *k == kind) {
             Some(slot) if slot.1 == ms => slot.2 += 1,
             Some(slot) => *slot = (kind, ms, 1),
             None => self.pending.push((kind, ms, 1)),
         }
+        let need = match self.get(kind) {
+            Some(prev) if prev != ms => 3,
+            _ => 2,
+        };
         let confirmed = self
             .pending
             .iter()
-            .any(|(k, v, n)| *k == kind && *v == ms && *n >= 2);
+            .any(|(k, v, n)| *k == kind && *v == ms && *n >= need);
         confirmed && !self.recorded.iter().any(|(k, v)| *k == kind && *v == ms)
     }
 
@@ -913,10 +917,100 @@ impl RefTracker {
     }
 }
 
-/// A reference time must look like a completed run of this category.
-fn plausible_reference(ms: i64, cfg: &Config) -> bool {
+/// Is this reference time believable? These rows are static text, so a
+/// misread repeats identically on every re-read and "seen twice" proves
+/// nothing on its own. The real evidence is that the four values stand in a
+/// fixed order — world record <= lifetime PB <= season best, and a sum of
+/// best segments is faster than any run that contains them — so each new
+/// value is checked against the ones already confirmed.
+fn sane_reference(kind: RefKind, ms: i64, refs: &RefTracker, cfg: &Config) -> bool {
     let floor = cfg.detection.min_final_ms.max(1);
-    ms >= floor && ms <= floor * 3
+    // A sum of best is faster than any completed run and may fall below the
+    // "shortest plausible finish" floor as segments improve.
+    let low = if kind == RefKind::SumOfBest {
+        floor / 2
+    } else {
+        floor
+    };
+    if ms < low || ms > floor * 3 {
+        return false;
+    }
+    let known = |k: RefKind| refs.get(k);
+    let at_most = |other: Option<i64>| other.is_none_or(|o| ms <= o);
+    let at_least = |other: Option<i64>| other.is_none_or(|o| ms >= o);
+    match kind {
+        // Faster than every real run, but not absurdly so.
+        RefKind::SumOfBest => {
+            let bound = known(RefKind::SeasonBest).or(known(RefKind::LifetimePb));
+            at_most(bound) && bound.is_none_or(|b| ms >= b / 2)
+        }
+        RefKind::SeasonBest => at_least(known(RefKind::LifetimePb).or(known(RefKind::WorldRecord))),
+        RefKind::LifetimePb => {
+            at_least(known(RefKind::WorldRecord)) && at_most(known(RefKind::SeasonBest))
+        }
+        RefKind::WorldRecord => at_most(known(RefKind::LifetimePb).or(known(RefKind::SeasonBest))),
+    }
+}
+
+/// Apply a freshly read title row. Recording is suppressed only after two
+/// consecutive mismatches, and resumes on the first match: one garbled read
+/// of the game's name must not take the rest of a broadcast with it.
+#[allow(clippy::too_many_arguments)]
+fn apply_title(
+    readings: &PaneReadings,
+    cfg: &Config,
+    pane_game: &mut Option<String>,
+    pane_game_ok: &mut bool,
+    mismatches: &mut u32,
+    health: &mut db::SessionHealth,
+    at_ms: i64,
+) {
+    let Some(name) = readings.game.as_deref() else {
+        return; // title unreadable: leave the verdict as it stands
+    };
+    let matches = game_matches(name, &cfg.game.name);
+    *mismatches = if matches { 0 } else { *mismatches + 1 };
+    if pane_game.as_deref() != Some(name) {
+        info!(
+            "layout title: {name:?}{}{}",
+            readings
+                .category
+                .as_deref()
+                .map(|c| format!(" [{c}]"))
+                .unwrap_or_default(),
+            if matches {
+                ""
+            } else {
+                " — NOT the tracked game"
+            }
+        );
+        health.event(at_ms, "title", name.to_string());
+        *pane_game = Some(name.to_string());
+    }
+    if !cfg.game.require_title_match {
+        *pane_game_ok = true;
+        return;
+    }
+    let ok = matches || *mismatches < 2;
+    if ok != *pane_game_ok {
+        if ok {
+            info!(
+                "layout is timing {:?} again; recording resumed",
+                cfg.game.name
+            );
+        } else {
+            warn!(
+                "layout is timing {name:?}, not {:?}; recording suspended",
+                cfg.game.name
+            );
+        }
+        health.event(
+            at_ms,
+            if ok { "resumed" } else { "suspended" },
+            name.to_string(),
+        );
+        *pane_game_ok = ok;
+    }
 }
 
 /// Persist a confirmed reference time and, for the season best, adopt it as
@@ -1285,12 +1379,27 @@ pub async fn run(cfg: Config) -> Result<()> {
             .and_then(|s| s.parse::<i64>().ok())
         {
             refs.mark(kind, v);
+            // Marking it recorded stops the value being re-announced, but the
+            // record to beat has to be adopted here too: re-sighting an
+            // already-stored value never fires again, so without this the
+            // layout's season best would silently revert to the config value
+            // on every restart.
+            if kind == RefKind::SeasonBest {
+                info!(
+                    "{} to beat is {} (read from the layout previously)",
+                    cfg.game.record_label,
+                    format_ms(v)
+                );
+                *shared.baseline_best_ms.write().await = Some(v);
+            }
         }
     }
     let mut last_sob_read_t: i64 = i64::MIN / 2;
-    // The game the layout says it is timing, and whether runs may be recorded.
+    // The game the layout says it is timing, whether runs may be recorded,
+    // and how many consecutive reads disagreed with the configured game.
     let mut pane_game: Option<String> = None;
     let mut pane_game_ok = true;
+    let mut title_mismatches: u32 = 0;
 
     // Recorded sources (vod/file) may decode much faster than realtime, so
     // the state machine is ticked by frame index instead of wall clock —
@@ -1669,30 +1778,20 @@ pub async fn run(cfg: Config) -> Result<()> {
                             let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
                             // What the pane says it is timing. Only gates
                             // recording when the operator asked it to.
-                            if let Some(name) = readings.game.as_deref() {
-                                let ok = game_matches(name, &cfg.game.name);
-                                if pane_game.as_deref() != Some(name) {
-                                    info!(
-                                        "layout title: {name:?}{}{}",
-                                        readings
-                                            .category
-                                            .as_deref()
-                                            .map(|c| format!(" [{c}]"))
-                                            .unwrap_or_default(),
-                                        if ok { "" } else { " — NOT the tracked game" }
-                                    );
-                                    health.event(at_ms, "title", name.to_string());
-                                    pane_game = Some(name.to_string());
-                                }
-                                pane_game_ok = ok || !cfg.game.require_title_match;
-                            }
+                            apply_title(
+                                &readings,
+                                &cfg,
+                                &mut pane_game,
+                                &mut pane_game_ok,
+                                &mut title_mismatches,
+                                &mut health,
+                                at_ms,
+                            );
                             // Reference times printed under the timer.
-                            refs.rects.clear();
-                            for (kind, ms, rect) in &readings.refs {
-                                if let Some(r) = PaneGeometry::place_rect(&new_regs, *rect) {
-                                    refs.rects.push((*kind, r));
-                                }
-                                if plausible_reference(*ms, &cfg) && refs.observe(*kind, *ms) {
+                            for (kind, ms, _) in &readings.refs {
+                                if sane_reference(*kind, *ms, &refs, &cfg)
+                                    && refs.observe(*kind, *ms)
+                                {
                                     record_reference(
                                         &pool,
                                         &shared,
@@ -2197,47 +2296,79 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
         }
 
-        // Reference rows (Sum of Best, season best, PB, WR): static text that
-        // changes only when the streamer beats one, so a slow re-read keeps
-        // settings current and confirms what the lock-time pass found.
-        // Rectangles measured at lock take precedence; the configured
-        // lifetime_sob crop is the fallback when nothing was measured.
-        if t - last_sob_read_t >= 60_000 {
+        // Re-read the pane's own words on a slow cadence: the reference rows
+        // (static text that changes only when the streamer beats one) and the
+        // title. The title MUST be re-read here and not only at a lock —
+        // relocking is driven by the timer going dark or reading poorly, and
+        // a suppressed run leaves the timer parsing perfectly, so a single
+        // misread title would otherwise turn recording off for the rest of
+        // the broadcast with nothing able to turn it back on.
+        if layout_locked && t - last_sob_read_t >= 60_000 {
             last_sob_read_t = t;
-            let fallback: Vec<(RefKind, R)> = match (refs.rects.is_empty(), reg.sob) {
-                (true, Some(r)) => vec![(RefKind::SumOfBest, r)],
-                _ => Vec::new(),
-            };
-            let to_read: Vec<(RefKind, R)> = if refs.rects.is_empty() {
-                fallback
-            } else {
-                refs.rects.clone()
-            };
-            for (kind, (bx, by, bw2, bh2)) in to_read {
-                let bimg = image::imageops::crop_imm(&union_bright, bx, by, bw2, bh2).to_image();
-                let bp = ocr::preprocess(&bimg, &pre_counter);
-                let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&bp)?).await else {
-                    continue;
-                };
-                let Some(v) = parse_time(txt.trim()).filter(|&v| plausible_reference(v, &cfg))
-                else {
-                    continue;
-                };
-                // A Sum of Best can never exceed the record it belongs to.
-                if kind == RefKind::SumOfBest {
-                    if let Some(best) = refs
-                        .get(RefKind::SeasonBest)
-                        .or(*shared.baseline_best_ms.read().await)
-                    {
-                        if v > best || v < best / 2 {
-                            continue;
+            let acts = shared.acts.len().max(1) as u32;
+            match measure_pane(
+                &mut ocr_engine,
+                &union_img,
+                active_regs.timer,
+                acts,
+                &pre_splits,
+            )
+            .await
+            {
+                Ok((_, readings)) => {
+                    let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
+                    apply_title(
+                        &readings,
+                        &cfg,
+                        &mut pane_game,
+                        &mut pane_game_ok,
+                        &mut title_mismatches,
+                        &mut health,
+                        at_ms,
+                    );
+                    for (kind, ms, _) in &readings.refs {
+                        if sane_reference(*kind, *ms, &refs, &cfg) && refs.observe(*kind, *ms) {
+                            record_reference(
+                                &pool,
+                                &shared,
+                                &mut refs,
+                                &mut health,
+                                at_ms,
+                                *kind,
+                                *ms,
+                            )
+                            .await;
+                        }
+                    }
+                    // A configured Sum of Best crop still covers layouts whose
+                    // rows the pane pass cannot label.
+                    if readings.refs.is_empty() {
+                        if let Some((bx, by, bw2, bh2)) = reg.sob {
+                            let bimg = image::imageops::crop_imm(&union_bright, bx, by, bw2, bh2)
+                                .to_image();
+                            let bp = ocr::preprocess(&bimg, &pre_counter);
+                            if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&bp)?).await {
+                                if let Some(v) = parse_time(txt.trim())
+                                    .filter(|&v| sane_reference(RefKind::SumOfBest, v, &refs, &cfg))
+                                {
+                                    if refs.observe(RefKind::SumOfBest, v) {
+                                        record_reference(
+                                            &pool,
+                                            &shared,
+                                            &mut refs,
+                                            &mut health,
+                                            at_ms,
+                                            RefKind::SumOfBest,
+                                            v,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-                if refs.observe(kind, v) {
-                    let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
-                    record_reference(&pool, &shared, &mut refs, &mut health, at_ms, kind, v).await;
-                }
+                Err(e) => warn!("pane re-read failed: {e:#}"),
             }
         }
 
@@ -2686,9 +2817,125 @@ mod tests {
         t.mark(RefKind::SeasonBest, 695_100);
         assert!(!t.observe(RefKind::SeasonBest, 695_100), "already stored");
         assert_eq!(t.get(RefKind::SeasonBest), Some(695_100));
-        // A different value has to earn its two sightings too.
+        // Replacing an established value needs three: these rows change
+        // rarely, and a misread that sticks would otherwise overwrite a
+        // perfectly good number on its second appearance.
+        assert!(!t.observe(RefKind::SeasonBest, 694_000));
         assert!(!t.observe(RefKind::SeasonBest, 694_000));
         assert!(t.observe(RefKind::SeasonBest, 694_000));
+    }
+
+    #[test]
+    fn reference_values_must_respect_their_ordering() {
+        let cfg = Config::for_test_with_min_final(660_000);
+        let mut refs = RefTracker::default();
+        // Nothing known yet: only the coarse band applies.
+        assert!(sane_reference(RefKind::SeasonBest, 695_100, &refs, &cfg));
+        assert!(
+            !sane_reference(RefKind::SeasonBest, 600_000, &refs, &cfg),
+            "faster than any run"
+        );
+        assert!(
+            !sane_reference(RefKind::SeasonBest, 2_000_000, &refs, &cfg),
+            "absurdly slow"
+        );
+        refs.mark(RefKind::SeasonBest, 695_100);
+        refs.mark(RefKind::WorldRecord, 692_183);
+        // A 1 read as a 7 turns 11:35.1 into 17:35.1: inside the old band,
+        // but it cannot be a PB when the season best is 11:35.1.
+        assert!(!sane_reference(RefKind::LifetimePb, 1_055_100, &refs, &cfg));
+        assert!(sane_reference(RefKind::LifetimePb, 693_933, &refs, &cfg));
+        // A PB faster than the world record is a misread, not a record.
+        assert!(!sane_reference(RefKind::LifetimePb, 690_000, &refs, &cfg));
+        // A sum of best is faster than the run it belongs to, and may drop
+        // below the "shortest plausible finish" floor as segments improve.
+        assert!(sane_reference(RefKind::SumOfBest, 691_700, &refs, &cfg));
+        assert!(
+            !sane_reference(RefKind::SumOfBest, 700_000, &refs, &cfg),
+            "slower than the record"
+        );
+        assert!(
+            !sane_reference(RefKind::SumOfBest, 300_000, &refs, &cfg),
+            "impossibly fast"
+        );
+    }
+
+    #[test]
+    fn title_gate_needs_two_misreads_and_recovers() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.require_title_match = true;
+        let (mut game, mut ok, mut miss) = (None, true, 0u32);
+        let mut health = db::SessionHealth::default();
+        let titled = |s: &str| PaneReadings {
+            game: Some(s.into()),
+            category: None,
+            refs: Vec::new(),
+        };
+        // One garbled read must not suspend a six-hour broadcast.
+        apply_title(
+            &titled("Nlnja Galden (NE5)"),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        assert!(ok, "a single misread is tolerated");
+        apply_title(
+            &titled("Nlnja Galden (NE5)"),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        assert!(!ok, "a second disagreeing read suspends recording");
+        // An unreadable title leaves the verdict alone...
+        apply_title(
+            &PaneReadings::default(),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        assert!(!ok);
+        // ...and one good read brings it straight back.
+        apply_title(
+            &titled("Ninja Gaiden (NES)"),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        assert!(ok, "recording resumes as soon as the title reads right");
+        // With the gate off, a different game never suppresses anything.
+        cfg.game.require_title_match = false;
+        apply_title(
+            &titled("Super Mario Bros."),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        apply_title(
+            &titled("Super Mario Bros."),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        assert!(ok);
     }
 
     #[test]
