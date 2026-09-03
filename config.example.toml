@@ -61,6 +61,8 @@ crop_h = 90
 # min_final_ms = 60000          # a frozen timer below this is a stall, not a
                                 #   finish; set near the category's fastest
                                 #   plausible time (e.g. just under the WR)
+# prestart_offset_ms = 5000     # LiveSplit's pre-start offset as OCR reads it
+                                #   ("-5.00" -> 5000): mid-run it means "reset"
 # desync_confirmations = 3      # consistent "misreads" before re-syncing
 # desync_restart_max_ms = 90000 # a desync onto a value below this is a missed
                                 #   reset (new run); above it, the same run on

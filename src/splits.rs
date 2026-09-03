@@ -43,6 +43,18 @@ impl SplitsTracker {
         }
     }
 
+    /// Forget the baseline and candidates (the column is about to be read
+    /// from a different crop after a re-lock) but keep what was recorded:
+    /// the next read becomes the new baseline, and acts already recorded
+    /// are never re-emitted.
+    pub fn rebaseline(&mut self) {
+        for i in 0..self.recorded.len() {
+            self.baseline[i] = None;
+            self.pending[i] = None;
+            self.stable[i] = None;
+        }
+    }
+
     /// One OCR pass over the panel: one value per row (None = unreadable).
     /// `timer_ms` is the current main-timer estimate, used as a plausibility
     /// bound (a split can't be later than "now"). Returns newly confirmed
