@@ -5,6 +5,7 @@ mod chat;
 mod config;
 mod counter;
 mod db;
+mod glyph;
 mod locate;
 mod ocr;
 mod report;
@@ -60,6 +61,45 @@ enum Command {
         #[arg(long, default_value_t = 12)]
         frames: u32,
     },
+    /// The purpose-built timer digit reader: harvest templates from replay
+    /// corpora (NG_DUMP_TIMER=all) and score them
+    Glyphs {
+        #[command(subcommand)]
+        action: GlyphsAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GlyphsAction {
+    /// Build a template file from corpus directories
+    Train {
+        /// Corpus directories (each holds obs.jsonl and calibration/timer-*.png)
+        #[arg(required = true)]
+        corpus: Vec<std::path::PathBuf>,
+        /// Where to write the templates
+        #[arg(long, default_value = "assets/glyphs.json")]
+        out: std::path::PathBuf,
+        /// Templates kept per character
+        #[arg(long, default_value_t = 24)]
+        per_class: usize,
+    },
+    /// Show how crops segment and how each glyph scores
+    Boxes {
+        #[arg(required = true)]
+        files: Vec<std::path::PathBuf>,
+        #[arg(long, default_value = "assets/glyphs.json")]
+        templates: std::path::PathBuf,
+    },
+    /// Read every confirmed frame of the corpora and compare with its label
+    Test {
+        #[arg(required = true)]
+        corpus: Vec<std::path::PathBuf>,
+        #[arg(long, default_value = "assets/glyphs.json")]
+        templates: std::path::PathBuf,
+        /// Save the crops the reader got wrong here, named by label and reading
+        #[arg(long)]
+        dump_wrong: Option<std::path::PathBuf>,
+    },
 }
 
 /// libtesseract is built against OpenMP, and on crops this small its threads
@@ -106,5 +146,25 @@ async fn main() -> Result<()> {
         Command::Calibrate { full_frame } => calibrate::run(cfg, full_frame).await,
         Command::Report { json } => report::run(cfg, json).await,
         Command::Locate { image, frames } => locate::run(cfg, image, frames).await,
+        Command::Glyphs { action } => match action {
+            GlyphsAction::Train {
+                corpus,
+                out,
+                per_class,
+            } => glyph::cli_train(&corpus, &out, cfg.timer.threshold, per_class),
+            GlyphsAction::Boxes { files, templates } => {
+                glyph::cli_boxes(&files, &templates, cfg.timer.threshold)
+            }
+            GlyphsAction::Test {
+                corpus,
+                templates,
+                dump_wrong,
+            } => glyph::cli_test(
+                &corpus,
+                &templates,
+                cfg.timer.threshold,
+                dump_wrong.as_deref(),
+            ),
+        },
     }
 }

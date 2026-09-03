@@ -16,10 +16,11 @@
 /site/index.html
 /site/data.json
 
-# Local screenshots / scratch
+# Local screenshots / scratch — but the glyph reader's test crops are kept
 *.png
 *.jpg
 *.jpeg
+!/tests/fixtures/**/*.png
 /.playwright-mcp/
 nohup.out
 
@@ -29,9 +30,10 @@ nohup.out
 # Downloaded VODs for file-source analysis
 /vods/
 
-# Build lock and the alternate-engine build tree
+# Build lock and the alternate build trees
 /.build-site.lock
 /target-leptess/
+/target-*/
 
 # Replay-window work files (configs, dbs, obs logs per replay)
 /replays/
