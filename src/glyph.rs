@@ -18,7 +18,8 @@
 //! 4. assembles the characters left to right and checks them against the
 //!    timer grammar.
 //!
-//! Microseconds per frame, deterministic, and testable against saved crops.
+//! About a millisecond per frame (tens on a frame whose glyphs touch),
+//! deterministic, and testable against saved crops.
 
 use anyhow::{bail, Context, Result};
 use image::GrayImage;
@@ -476,6 +477,9 @@ pub struct GlyphReader {
     min_score: f32,
     /// ...or whose margin over the runner-up class is below this.
     min_margin: f32,
+    /// Scores one read may spend cutting touching glyphs before it gives
+    /// up and reads what is left whole.
+    max_scores: u32,
 }
 
 impl GlyphReader {
@@ -483,9 +487,32 @@ impl GlyphReader {
         Self {
             set,
             level,
+            // Measured on ~15,000 confirmed frames of both themes: a
+            // right reading's lowest glyph score is 0.63 at the very
+            // least (1st percentile 0.89), and its narrowest margin over
+            // the runner-up class 0.08 (1st percentile 0.20). A typeface
+            // the templates were not trained on (fourteen tried) reads
+            // its confusable pairs — a "3" as an "8" — at scores of
+            // 0.71-0.74, inside the real range, but at margins of
+            // 0.08-0.10: the margin floor is what turns an unknown font
+            // into declines for tesseract, at the price of a few real
+            // frames in a thousand.
             min_score: 0.55,
-            min_margin: 0.08,
+            min_margin: 0.12,
+            // A real frame spends at most ~2,500 scores (three glyphs
+            // merged, at the big size), ~100 µs each; a probe crop over
+            // something that is not a timer — art, the splits panel — can
+            // offer tens of thousands of cuts, which stalled the frame
+            // pipeline.
+            max_scores: 3000,
         }
+    }
+
+    /// The same reader with other decision floors (experiments).
+    pub fn with_floors(mut self, min_score: f32, min_margin: f32) -> Self {
+        self.min_score = min_score;
+        self.min_margin = min_margin;
+        self
     }
 
     pub fn load(path: &Path, level: u8) -> Result<Self> {
@@ -575,9 +602,15 @@ impl GlyphReader {
         }
         let mut glyphs = Vec::with_capacity(raw.len() + 2);
         let n = raw.len();
+        let search = Search {
+            img,
+            cols: &cols,
+            band,
+            spent: std::cell::Cell::new(0),
+        };
         for (i, b) in raw.into_iter().enumerate() {
             let trailing = i + 1 == n && b.x + b.w >= pane_end;
-            self.refine(img, &cols, band, b, 2, trailing, &mut glyphs);
+            self.refine(&search, b, 2, trailing, &mut glyphs);
         }
         if glyphs.len() > 10 {
             return Err(Decline::Segmentation(glyphs.len()));
@@ -585,12 +618,20 @@ impl GlyphReader {
         Ok((glyphs, band))
     }
 
-    fn score_box(&self, img: &GrayImage, band: (u32, u32), b: GlyphBox) -> Option<Scored> {
+    fn score_box(&self, s: &Search, b: GlyphBox) -> Option<Scored> {
         // Specks (a few pixels) are noise, not glyphs.
         if b.w * b.h < 6 {
             return None;
         }
-        classify(&self.set, &features(img, frame_for(b, band, img.width())))
+        s.spent.set(s.spent.get() + 1);
+        classify(
+            &self.set,
+            &features(s.img, frame_for(b, s.band, s.img.width())),
+        )
+    }
+
+    fn exhausted(&self, s: &Search) -> bool {
+        s.spent.get() >= self.max_scores
     }
 
     /// Classify a raw box, cutting it where two glyphs that touch meet.
@@ -608,20 +649,15 @@ impl GlyphReader {
     /// anti-aliased inner edge can be stuck to it: a cut there may also
     /// simply discard the right-hand piece, if the digit left of it reads
     /// clearly better than the box did whole.
-    // The crop, its column ink and band travel together through the
-    // recursion; the box, depth, trailing flag and output are per call.
-    #[allow(clippy::too_many_arguments)]
-    fn refine(
-        &self,
-        img: &GrayImage,
-        cols: &[u32],
-        band: (u32, u32),
-        b: GlyphBox,
-        depth: u32,
-        trailing: bool,
-        out: &mut Vec<Glyph>,
-    ) {
-        let whole = self.score_box(img, band, b);
+    ///
+    /// The search is bounded: once a read has spent `max_scores` scores,
+    /// what remains is read whole. A timer frame never gets near the
+    /// bound; a crop of something else — art, the splits panel, noise the
+    /// threshold turned into hundreds of thin columns — otherwise offers
+    /// tens of thousands of cuts and stalled the frame pipeline.
+    fn refine(&self, s: &Search, b: GlyphBox, depth: u32, trailing: bool, out: &mut Vec<Glyph>) {
+        let whole = self.score_box(s, b);
+        let band = s.band;
         let band_h = band.1 - band.0;
         let expected = (b.h * 2 / 3).max(4);
         // Only digit-height boxes are ever two glyphs: the point and the
@@ -635,24 +671,26 @@ impl GlyphReader {
         let mut best: Option<(f32, Vec<Glyph>)> = None;
         if depth > 0 && digit_height && b.w > expected * 5 / 4 && x1 >= x0 + 2 * min_piece {
             // Every other column of a pair of digits; coarser on a box far
-            // wider than any pair (a crop the threshold turned into one
-            // blob), which bounds the search at about a thousand scores.
+            // wider than any pair.
             let step = (b.w as usize / 32).max(2);
             for c in (x0 + min_piece..=x1 - min_piece).step_by(step) {
-                if cols[c] * 3 > band_h {
+                if self.exhausted(s) {
+                    break;
+                }
+                if s.cols[c] * 3 > band_h {
                     continue;
                 }
-                let Some(l) = tight_box(img, self.level, x0, c, rows, cols) else {
+                let Some(l) = tight_box(s.img, self.level, x0, c, rows, s.cols) else {
                     continue;
                 };
-                let Some(r) = tight_box(img, self.level, c, x1, rows, cols) else {
+                let Some(r) = tight_box(s.img, self.level, c, x1, rows, s.cols) else {
                     continue;
                 };
-                let Some(ls) = self.score_box(img, band, l) else {
+                let Some(ls) = self.score_box(s, l) else {
                     continue;
                 };
                 let mut pieces = vec![(l, Some(ls))];
-                self.refine(img, cols, band, r, depth - 1, trailing, &mut pieces);
+                self.refine(s, r, depth - 1, trailing, &mut pieces);
                 let worst = pieces
                     .iter()
                     .map(|p| p.1.map_or(f32::MIN, |s| s.1))
@@ -670,10 +708,13 @@ impl GlyphReader {
             let widest = (band_h as usize / 5).max(2);
             let floor = whole.map_or(0.0, |w| w.1 + 0.1);
             for c in (x1.saturating_sub(widest).max(x0 + min_piece)..x1).rev() {
-                let Some(l) = tight_box(img, self.level, x0, c, rows, cols) else {
+                if self.exhausted(s) {
+                    break;
+                }
+                let Some(l) = tight_box(s.img, self.level, x0, c, rows, s.cols) else {
                     continue;
                 };
-                let Some(ls) = self.score_box(img, band, l) else {
+                let Some(ls) = self.score_box(s, l) else {
                     continue;
                 };
                 if ls.1 > floor && best.as_ref().is_none_or(|(s, _)| ls.1 > *s) {
@@ -686,6 +727,15 @@ impl GlyphReader {
             _ => out.push((b, whole)),
         }
     }
+}
+
+/// One read's cut search: the crop, its column ink over the band, the
+/// band, and how many scores the read has spent so far.
+struct Search<'a> {
+    img: &'a GrayImage,
+    cols: &'a [u32],
+    band: (u32, u32),
+    spent: std::cell::Cell<u32>,
 }
 
 /// A glyph's classification: class, score, margin over the runner-up.
@@ -1160,6 +1210,12 @@ pub fn load_corpus(dir: &Path, max_frames: usize) -> Result<Vec<CorpusFrame>> {
         if o["retry"].as_u64().is_some() || o["static"].as_bool() == Some(true) {
             continue;
         }
+        // A label is only worth something when it came from the other
+        // reader: templates trained on the glyph reader's own readings
+        // would learn its mistakes.
+        if o["reader"].as_str() == Some("glyph") {
+            continue;
+        }
         let Some(smoothed) = o["smoothed_ms"].as_i64() else {
             continue; // not in a run: nothing vouches for the reading
         };
@@ -1250,13 +1306,18 @@ pub fn cli_test(
     templates: &Path,
     level: u8,
     dump_wrong: Option<&Path>,
+    floors: Option<(f32, f32)>,
 ) -> Result<()> {
-    let reader = GlyphReader::load(templates, level)?;
+    let mut reader = GlyphReader::load(templates, level)?;
+    if let Some((s, m)) = floors {
+        reader = reader.with_floors(s, m);
+    }
     let (mut total, mut declined, mut right, mut wrong) = (0usize, 0usize, 0usize, 0usize);
     let mut wrong_examples: Vec<(String, String)> = Vec::new();
     let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
     let mut reason_examples: std::collections::BTreeMap<String, String> = Default::default();
     let (mut right_margins, mut wrong_margins): (Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new());
+    let mut right_conf: Vec<f32> = Vec::new();
     if let Some(d) = dump_wrong {
         std::fs::create_dir_all(d)?;
     }
@@ -1267,6 +1328,7 @@ pub fn cli_test(
             if let Ok(r) = &result {
                 if r.text == f.label {
                     right_margins.push(r.margin);
+                    right_conf.push(r.confidence);
                 } else {
                     wrong_margins.push(r.margin);
                     if let Some(dir) = dump_wrong {
@@ -1340,13 +1402,20 @@ pub fn cli_test(
         v[((v.len() - 1) as f32 * p) as usize]
     };
     println!(
-        "  margins — right: p5 {:.3} p25 {:.3} p50 {:.3}; wrong: p50 {:.3} p75 {:.3} p95 {:.3}",
+        "  margins — right: min {:.3} p1 {:.3} p5 {:.3} p50 {:.3}; wrong: p50 {:.3} p95 {:.3}",
+        pct(&mut right_margins, 0.0),
+        pct(&mut right_margins, 0.01),
         pct(&mut right_margins, 0.05),
-        pct(&mut right_margins, 0.25),
         pct(&mut right_margins, 0.5),
         pct(&mut wrong_margins, 0.5),
-        pct(&mut wrong_margins, 0.75),
         pct(&mut wrong_margins, 0.95),
+    );
+    println!(
+        "  confidence (lowest glyph score) — right: min {:.3} p1 {:.3} p5 {:.3} p50 {:.3}",
+        pct(&mut right_conf, 0.0),
+        pct(&mut right_conf, 0.01),
+        pct(&mut right_conf, 0.05),
+        pct(&mut right_conf, 0.5),
     );
     Ok(())
 }
