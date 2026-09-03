@@ -61,6 +61,30 @@ enum Command {
     },
 }
 
+/// libtesseract is built against OpenMP, and on crops this small its threads
+/// cost far more in spin-waiting than they save: several workers on one box
+/// starve each other (measured: 4 in-process workers at 1.1x realtime each,
+/// versus 5-10x with one thread apiece). libgomp reads its environment in a
+/// load-time constructor, before `main`, so setting the variable here would
+/// be too late — re-exec once with it set instead. Cheap, happens before any
+/// work, and applies however the binary was launched.
+fn limit_openmp_threads() {
+    if std::env::var_os("OMP_THREAD_LIMIT").is_some() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env("OMP_THREAD_LIMIT", "1")
+        .env("OMP_NUM_THREADS", "1")
+        .exec();
+    // exec only returns on failure; carry on with OpenMP as it is.
+    eprintln!("could not re-exec with OMP_THREAD_LIMIT=1 ({err}); continuing");
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Die quietly on a closed pipe (`report | head`) like a normal unix tool
@@ -68,6 +92,7 @@ async fn main() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    limit_openmp_threads();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
