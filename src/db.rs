@@ -177,6 +177,19 @@ pub async fn open_session(
     Ok(res.last_insert_rowid())
 }
 
+/// Close sessions left open by a process that died: ended at their last
+/// run's end, or at their start when they recorded nothing. Returns how many.
+pub async fn close_stale_sessions(pool: &SqlitePool) -> Result<u64> {
+    let res = sqlx::query(
+        "UPDATE sessions SET ended_at_ms = COALESCE( \
+           (SELECT MAX(r.ended_at_ms) FROM runs r WHERE r.session_id = sessions.id), started_at_ms) \
+         WHERE ended_at_ms IS NULL",
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 pub async fn close_session(pool: &SqlitePool, id: i64, ended_at_ms: i64) -> Result<()> {
     sqlx::query("UPDATE sessions SET ended_at_ms = ? WHERE id = ?")
         .bind(ended_at_ms)

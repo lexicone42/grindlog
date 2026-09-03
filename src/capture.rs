@@ -259,6 +259,7 @@ async fn finish_pipeline(
     let timeout = Duration::from_secs(cfg.frame_timeout_secs);
     let mut frames: u64 = 0;
     let mut receiver_gone = false;
+    let mut timed_out = false;
     loop {
         let mut buf = vec![0u8; cfg.frame_len];
         match tokio::time::timeout(timeout, out.read_exact(&mut buf)).await {
@@ -267,6 +268,7 @@ async fn finish_pipeline(
                     "no frame for {}s; restarting the pipeline",
                     cfg.frame_timeout_secs
                 );
+                timed_out = true;
                 break;
             }
             Ok(Err(_)) => break, // EOF: stream ended or ffmpeg died
@@ -280,15 +282,36 @@ async fn finish_pipeline(
         }
     }
 
-    let _ = ffmpeg.kill().await;
+    if receiver_gone {
+        let _ = ffmpeg.kill().await;
+        if let Some(mut sl) = streamlink.take() {
+            let _ = sl.kill().await;
+        }
+        return Ok(Session::ReceiverGone);
+    }
+    // For a recording, "the input ended" is only true when ffmpeg exited
+    // cleanly at end of stream. A stall or an ffmpeg death mid-file would
+    // otherwise pass off a truncated VOD as complete — and an import would
+    // replace a whole day's data with the fragment.
+    if cfg.source.is_recorded() {
+        if timed_out {
+            let _ = ffmpeg.kill().await;
+            anyhow::bail!(
+                "recorded input stalled: no frame for {}s after {frames} frames",
+                cfg.frame_timeout_secs
+            );
+        }
+        let status = ffmpeg.wait().await.context("waiting for ffmpeg")?;
+        if !status.success() {
+            anyhow::bail!("ffmpeg exited with {status} after {frames} frames of recorded input");
+        }
+    } else {
+        let _ = ffmpeg.kill().await;
+    }
     if let Some(mut sl) = streamlink.take() {
         let _ = sl.kill().await;
     }
-    if receiver_gone {
-        Ok(Session::ReceiverGone)
-    } else {
-        Ok(Session::Ended { frames })
-    }
+    Ok(Session::Ended { frames })
 }
 
 fn drain_stderr(name: &'static str, stderr: Option<tokio::process::ChildStderr>) {

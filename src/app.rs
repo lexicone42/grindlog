@@ -201,6 +201,25 @@ fn region_changed(prev: &GrayImage, cur: &GrayImage, (x, y, w, h): R) -> bool {
     false
 }
 
+/// One rectangle moved by a pixel offset, or None if it would leave the union.
+fn move_rect(r: R, dx: i32, dy: i32, uw: u32, uh: u32) -> Option<R> {
+    let x = r.0 as i64 + dx as i64;
+    let y = r.1 as i64 + dy as i64;
+    let inside = x >= 0 && y >= 0 && x + r.2 as i64 <= uw as i64 && y + r.3 as i64 <= uh as i64;
+    inside.then_some((x as u32, y as u32, r.2, r.3))
+}
+
+/// Can this reading anchor a drift measurement? The narrow "1" glyph ends
+/// ~9px short of the other digits, so a reading whose last real digit is a
+/// 1 is skipped — and tesseract likes to append a phantom third fraction
+/// digit ("1:00.815"), which would otherwise hide that trailing 1.
+fn drift_measurable(text: &str) -> bool {
+    match text.rsplit_once('.') {
+        Some((_, frac)) => frac.len() == 2 && !frac.ends_with('1'),
+        None => !text.ends_with('1'),
+    }
+}
+
 /// Every rectangle of a layout moved by a pixel offset (the LiveSplit window
 /// nudged), or None if any of them would leave the union crop.
 fn shifted(reg: &Regions, (dx, dy): (i32, i32)) -> Option<Regions> {
@@ -768,9 +787,16 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     let (frame_tx, mut frame_rx) = mpsc::channel::<capture::CaptureEvent>(4);
     let cap = capture_cfg(&cfg);
+    // A capture failure must surface as a non-zero exit with the session left
+    // open, so a backfill chain sees the failure and the importer never takes
+    // a truncated day for a complete one.
+    let capture_error: Arc<std::sync::Mutex<Option<String>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let capture_error_w = capture_error.clone();
     tokio::spawn(async move {
         if let Err(e) = capture::capture_loop(cap, frame_tx).await {
             error!("capture loop died: {e:#}");
+            *capture_error_w.lock().unwrap() = Some(format!("{e:#}"));
         }
     });
 
@@ -878,6 +904,11 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut last_splits_values: Vec<Option<i64>> = Vec::new();
     // Splits/counter rectangles measured from the frame at the last lock.
     let mut pane_geom: Option<PaneGeometry> = None;
+    // The same rectangles in union coordinates, plus where the digits were
+    // (absolute) when first measured after that lock: a re-anchor moves them
+    // by the digits' real displacement, never by our crop correction.
+    let mut geom_abs: Option<(Option<R>, Option<R>, Option<R>)> = None;
+    let mut geom_ink_abs: Option<(i32, i32)> = None;
     // Capture health for the open session, flushed to its row every minute.
     let mut health = db::SessionHealth::default();
     let mut last_health_flush_t: i64 = i64::MIN / 2;
@@ -933,10 +964,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                         info!("vod broadcast started {}", util::datetime_of_ms(ms));
                         Some(ms)
                     }
-                    Ok(None) => None,
+                    // Without the broadcast start every run of the VOD would
+                    // be dated today, and an import would then replace
+                    // today's live data with it. Refuse rather than guess.
+                    Ok(None) => anyhow::bail!(
+                        "vod {} has no createdAt; set stream.recorded_start",
+                        cfg.stream.vod_id
+                    ),
                     Err(e) => {
-                        warn!("could not fetch vod start time ({e:#}); using analysis clock");
-                        None
+                        return Err(e.context("fetching the vod's broadcast start time"));
                     }
                 }
             }
@@ -975,12 +1011,36 @@ pub async fn run(cfg: Config) -> Result<()> {
     };
     let mut last_t: i64 = 0;
 
+    // Sessions from a previous process that never closed (crash, SIGKILL)
+    // would otherwise stay "live" forever — the site's live-deploy gate and
+    // the importer both key on that.
+    match db::close_stale_sessions(&pool).await {
+        Ok(0) => {}
+        Ok(n) => info!("closed {n} stale session(s) left open by an earlier process"),
+        Err(e) => warn!("could not close stale sessions: {e:#}"),
+    }
+
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
+    // The supervisor and the idle-restart helper stop the bot with SIGTERM;
+    // it must shut down as cleanly as on Ctrl-C (session closed, health
+    // flushed), not vanish mid-write.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("installing SIGTERM handler")?;
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .context("installing SIGHUP handler")?;
     loop {
         let event = tokio::select! {
             _ = &mut ctrl_c => {
                 info!("shutting down");
+                break;
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM: shutting down");
+                break;
+            }
+            _ = sighup.recv() => {
+                info!("SIGHUP: shutting down");
                 break;
             }
             maybe = frame_rx.recv() => match maybe {
@@ -1085,7 +1145,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         // hundredths digit repeats for many frames, which would
                         // read as a consistent shift. Measure on other digits.
                         let ext = ink_extent(&proc, bbox.map(|b| b.0), pre.upscale);
-                        if fine_drift && parse_time(&text).is_some() && !text.ends_with('1') {
+                        if fine_drift && parse_time(&text).is_some() && drift_measurable(&text) {
                             ink = ext.map(|e| (e.right, e.cy()));
                         }
                         // Digits against the crop edge: the position is wrong
@@ -1276,6 +1336,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 at(new_regs.sob, g.sob.is_some(), "SoB"),
                             );
                             pane_geom = Some(g);
+                            geom_abs = Some((new_regs.splits, new_regs.counter, new_regs.sob));
+                            geom_ink_abs = None;
                             health.event(
                                 time_base.map(|b| b + t).unwrap_or_else(util::unix_ms),
                                 "geometry",
@@ -1287,6 +1349,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 "pane geometry not measurable here; using configured rectangles"
                             );
                             pane_geom = None;
+                            geom_abs = None;
+                            geom_ink_abs = None;
                         }
                         Err(e) => warn!("pane geometry pass failed: {e:#}"),
                     }
@@ -1308,8 +1372,12 @@ pub async fn run(cfg: Config) -> Result<()> {
                         "switch",
                         format!("{name} {:+},{:+}{geom_note}", new_off.0, new_off.1),
                     );
-                    // A layout change invalidates any splits baseline.
-                    splits_tracker = None;
+                    // The column is about to be read from a different crop:
+                    // the run continues, but its comparison baseline must be
+                    // re-learned or the new crop's values all look like splits.
+                    if let Some(st) = splits_tracker.as_mut() {
+                        st.rebaseline();
+                    }
                 } else if new_off != active_off {
                     info!(
                         "layout {name:?} re-anchored: LiveSplit moved {:+},{:+} px (was {:+},{:+})",
@@ -1393,6 +1461,12 @@ pub async fn run(cfg: Config) -> Result<()> {
         // Fine drift: a nudge too small to break the timer still misaligns the
         // splits/counter crops, so re-anchor on a consistent shift of the ink.
         if let (true, Some(m)) = (layout_locked, ink) {
+            if geom_ink_abs.is_none() {
+                geom_ink_abs = Some((
+                    active_regs.timer.0 as i32 + m.0,
+                    active_regs.timer.1 as i32 + m.1,
+                ));
+            }
             match anchors[active_layout] {
                 None => {}
                 Some(a) => {
@@ -1420,7 +1494,39 @@ pub async fn run(cfg: Config) -> Result<()> {
                                     "layout {:?} re-anchored: LiveSplit moved {:+},{:+} px (now {:+},{:+} from configured)",
                                     layout_names[active_layout], d.0, d.1, new_off.0, new_off.1
                                 );
-                                if let Some(g) = pane_geom {
+                                // The pane geometry was measured on the
+                                // frame, in union coordinates. It moves only
+                                // by how far the digits have ACTUALLY moved
+                                // since that measurement — not by the
+                                // correction to our own crop placement, which
+                                // says nothing about the window.
+                                if let Some((gs, gc, gb)) = geom_abs {
+                                    let now_abs = (
+                                        active_regs.timer.0 as i32 + m.0,
+                                        active_regs.timer.1 as i32 + m.1,
+                                    );
+                                    let (mx, my) = match geom_ink_abs {
+                                        Some(r) => (now_abs.0 - r.0, now_abs.1 - r.1),
+                                        None => (0, 0),
+                                    };
+                                    let (uw2, uh2) = (nr.union.2, nr.union.3);
+                                    if let Some(s) = gs.and_then(|r| move_rect(r, mx, my, uw2, uh2))
+                                    {
+                                        nr.splits = Some(s);
+                                    }
+                                    if let Some(c) = gc.and_then(|r| move_rect(r, mx, my, uw2, uh2))
+                                    {
+                                        nr.counter = Some(c);
+                                    }
+                                    if let Some(b) = gb.and_then(|r| move_rect(r, mx, my, uw2, uh2))
+                                    {
+                                        nr.sob = Some(b);
+                                    }
+                                    if mx != 0 || my != 0 {
+                                        geom_abs = Some((nr.splits, nr.counter, nr.sob));
+                                        geom_ink_abs = Some(now_abs);
+                                    }
+                                } else if let Some(g) = pane_geom {
                                     g.apply(&mut nr);
                                 }
                                 health.relocks += 1;
@@ -1434,6 +1540,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 );
                                 active_off = new_off;
                                 active_regs = nr;
+                                if let Some(st) = splits_tracker.as_mut() {
+                                    st.rebaseline();
+                                }
                             }
                             None => {
                                 if !drift_warned {
@@ -1526,7 +1635,24 @@ pub async fn run(cfg: Config) -> Result<()> {
                     }
                     v
                 };
+                // A split is only believable while the timer is actually being
+                // read: a projected timer can't bound it, and after a dark
+                // stretch the column may be showing the comparison again.
+                let timer_fresh = tracker.accepted_age_ms(t).is_some_and(|a| a <= 5_000);
                 for (idx, cum) in st.observe(&values, tracker.smoothed_now(t)) {
+                    if !timer_fresh {
+                        debug!(
+                            "split candidate act {idx} at {} ignored: timer not read recently",
+                            format_ms(cum)
+                        );
+                        continue;
+                    }
+                    if current
+                        .as_ref()
+                        .is_some_and(|cr| cr.splits.iter().any(|s| s.act_index == idx))
+                    {
+                        continue;
+                    }
                     let act_name = shared
                         .acts
                         .get(idx)
@@ -1535,11 +1661,22 @@ pub async fn run(cfg: Config) -> Result<()> {
                     // A split far below the act's configured boundary is a
                     // misread column (wrong row, wrong pane), not a segment
                     // nobody has ever run; keep it out of the golds.
-                    let floor = shared
-                        .acts
-                        .get(idx)
-                        .and_then(|a| a.1)
-                        .map(|end| end * 6 / 10);
+                    // Floor: an act can't end before 90% of the previous
+                    // act's (PB-padded) boundary; the first act before 60%
+                    // of its own. The final act, which has no boundary,
+                    // uses the previous one too.
+                    let floor = match idx {
+                        0 => shared
+                            .acts
+                            .first()
+                            .and_then(|a| a.1)
+                            .map(|end| end * 6 / 10),
+                        k => shared
+                            .acts
+                            .get(k - 1)
+                            .and_then(|a| a.1)
+                            .map(|end| end * 9 / 10),
+                    };
                     if let Some(floor) = floor.filter(|&f| cum < f) {
                         warn!(
                             "ignoring implausible split: {act_name} at {} (below {} — misread column?)",
@@ -1620,7 +1757,12 @@ pub async fn run(cfg: Config) -> Result<()> {
         if let (Some((cx, cy, cw2, ch2)), Some(cr)) = (reg.counter, current.as_mut()) {
             // Read fast (every 2s) until the run's number is captured — short
             // runs are the ones that used to slip through without one.
-            if cr.ls_attempt.is_none() && t - last_counter_read_t >= 2000 {
+            // LiveSplit bumps the counter the instant the runner restarts,
+            // a few seconds before we notice the old run ended; only read it
+            // while the timer itself is being read cleanly, so a dying run
+            // can't take its successor's number.
+            let timer_fresh = tracker.accepted_age_ms(t).is_some_and(|a| a <= 3_000);
+            if cr.ls_attempt.is_none() && timer_fresh && t - last_counter_read_t >= 2000 {
                 last_counter_read_t = t;
                 let cimg = image::imageops::crop_imm(&union_bright, cx, cy, cw2, ch2).to_image();
                 let cp = ocr::preprocess(&cimg, &pre_counter);
@@ -1763,14 +1905,20 @@ pub async fn run(cfg: Config) -> Result<()> {
     }
     // Shutdown or end of input: close the session; a run still in progress
     // on a LIVE stream is simply not recorded (it's still happening).
+    let capture_failed = capture_error.lock().unwrap().clone();
     if let Some(id) = session_id.take() {
         let wall_now = time_base.map(|b| b + last_t).unwrap_or_else(util::unix_ms);
         if let Err(e) = db::update_session_health(&pool, id, &health).await {
             warn!("failed to update session health: {e:#}");
         }
-        if let Err(e) = db::close_session(&pool, id, wall_now).await {
+        if capture_failed.is_some() {
+            warn!("session #{id} left open: the capture did not complete");
+        } else if let Err(e) = db::close_session(&pool, id, wall_now).await {
             warn!("failed to close session {id}: {e:#}");
         }
+    }
+    if let Some(e) = capture_failed {
+        anyhow::bail!("capture failed: {e}");
     }
     Ok(())
 }
@@ -1820,12 +1968,11 @@ async fn handle_event(
                 return Ok(());
             };
             // The final act's split IS the finish; the run usually ends
-            // before the slow splits cadence can confirm the row change.
+            // before the slow splits cadence can confirm the row change, and
+            // the finish time outranks whatever the column said for that row.
             let n_acts = shared.acts.len();
-            if n_acts > 0
-                && !run.splits.is_empty()
-                && !run.splits.iter().any(|s| s.act_index == n_acts - 1)
-            {
+            if n_acts > 0 && !run.splits.is_empty() {
+                run.splits.retain(|s| s.act_index != n_acts - 1);
                 run.splits.push(crate::splits::RecordedSplit {
                     act_index: n_acts - 1,
                     act_name: shared.acts[n_acts - 1].0.clone(),

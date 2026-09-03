@@ -78,6 +78,16 @@ async fn resolve_inner(
         .await
         .context("twitch gql returned non-json")?;
 
+    // GQL reports failures as HTTP 200 with an `errors` array (a retired
+    // persisted-query hash, a rotated client-id, rate limiting). Those are
+    // NOT "offline" and must be loud, or a live stream is skipped forever.
+    if let Some(errs) = resp["errors"].as_array().filter(|a| !a.is_empty()) {
+        let msgs: Vec<&str> = errs.iter().filter_map(|e| e["message"].as_str()).collect();
+        anyhow::bail!(
+            "twitch gql error: {} (see src/twitch_hls.rs on updating the client-id / query hash)",
+            msgs.join("; ")
+        );
+    }
     let token = match target {
         Target::Live(_) => &resp["data"]["streamPlaybackAccessToken"],
         Target::Vod(_) => &resp["data"]["videoPlaybackAccessToken"],

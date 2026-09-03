@@ -66,6 +66,10 @@ pub struct TrackerConfig {
     /// constant "5.00" right after an early reset. Set to a bit under the
     /// fastest plausible completed run.
     pub min_final_ms: i64,
+    /// LiveSplit's pre-start offset as it reads once the sign is lost
+    /// ("-5.00" -> 5000). While a run is well past it, a reading of exactly
+    /// this value is the reset screen. 0 disables.
+    pub prestart_offset_ms: i64,
 }
 
 impl Default for TrackerConfig {
@@ -85,6 +89,7 @@ impl Default for TrackerConfig {
             desync_restart_max_ms: 90_000,
             smoothing_window: 5,
             min_final_ms: 60_000,
+            prestart_offset_ms: 5_000,
         }
     }
 }
@@ -160,6 +165,9 @@ struct Run {
     /// who are wrong (missed reset) and we re-sync.
     suspects: Vec<(i64, i64)>,
     smoother: Smoother,
+    /// The previous raw reading, accepted or not: the pre-start offset is
+    /// recognised by being frozen, a run at 0:05 by moving on to 0:06.
+    last_raw: i64,
 }
 
 impl Run {
@@ -175,6 +183,7 @@ impl Run {
             illegible: 0,
             suspects: Vec::new(),
             smoother,
+            last_raw: v,
         }
     }
 }
@@ -285,6 +294,8 @@ impl Tracker {
             Obs::Time(v) => v,
         };
         run.illegible = 0;
+        let last_raw = run.last_raw;
+        run.last_raw = v;
 
         // 1. Same value as last accepted reading: the timer is not advancing.
         //    Checked before the expected-window test, because a frozen timer
@@ -323,8 +334,14 @@ impl Tracker {
             return Phase::Running(run);
         }
 
-        // 3. Timer back at ~zero: the runner reset.
-        if v < cfg.reset_epsilon_ms {
+        // 3. Timer back at ~zero: the runner reset. LiveSplit's pre-start
+        //    offset ("-5.00", read as a bare 5.00) counts too when the run
+        //    was well past it: it is the reset screen, not a timer value.
+        let prestart = cfg.prestart_offset_ms > 0
+            && (v - cfg.prestart_offset_ms).abs() <= cfg.stall_tolerance_ms
+            && (v - last_raw).abs() <= cfg.stall_tolerance_ms
+            && run.last_good_ms > cfg.prestart_offset_ms + 5_000;
+        if v < cfg.reset_epsilon_ms || prestart {
             run.zeroish += 1;
             run.suspects.clear();
             if run.zeroish >= cfg.reset_confirmations {
@@ -354,7 +371,10 @@ impl Tracker {
         }
         if run.suspects.len() == cfg.desync_confirmations && consistent(&run.suspects, cfg) {
             let &(st, sv) = run.suspects.last().unwrap();
-            if sv < cfg.desync_restart_max_ms {
+            // A new run: small values, or a value well below where the run
+            // was (a timer never runs backwards by more than a rewind can
+            // explain — half the run is a restart during an unreadable gap).
+            if sv < cfg.desync_restart_max_ms || sv * 2 < run.last_good_ms {
                 // Small values: the runner really did reset and restart.
                 events.push(Event::Reset {
                     last_ms: run.last_good_ms,
@@ -748,6 +768,70 @@ mod tests {
                                                      // Under a minute is never a glyph confusion: 6:03 vs 0:03 is a restart.
         assert!(!glyph_confusion(363_000, 3_000));
         assert!(!glyph_confusion(483_000, 3_000)); // 8:03 vs 0:03
+    }
+
+    #[test]
+    fn restart_after_a_long_unreadable_gap_is_a_reset_not_a_resync() {
+        // Run at 7:00, feed dies for 2 minutes, runner resets and restarts;
+        // readings resume at 1:40 — under half the run, so a new run, even
+        // though 100 s is past desync_restart_max_ms.
+        let mut s = Sim::new(cfg());
+        s.start_run(420_000);
+        for _ in 0..120 {
+            assert_eq!(s.illegible(), vec![]);
+        }
+        assert_eq!(s.time(100_000), vec![]);
+        assert_eq!(s.time(101_000), vec![]);
+        let ev = s.time(102_000);
+        assert!(
+            matches!(
+                ev.first(),
+                Some(Event::Reset {
+                    reason: ResetReason::Desync,
+                    ..
+                })
+            ),
+            "{ev:?}"
+        );
+        assert!(
+            matches!(ev.get(1), Some(Event::Started { timer_ms: 102_000 })),
+            "{ev:?}"
+        );
+        // A rewind of a minute on a 7-minute run is still a clock slip.
+        let mut s = Sim::new(cfg());
+        s.start_run(420_000);
+        assert_eq!(s.time(360_000), vec![]);
+        assert_eq!(s.time(361_000), vec![]);
+        let ev = s.time(362_000);
+        assert!(matches!(ev.first(), Some(Event::Resynced { .. })), "{ev:?}");
+    }
+
+    #[test]
+    fn prestart_offset_reads_as_a_reset_mid_run() {
+        // LiveSplit shows -5.00 after a reset; OCR reads "5.00". Once it has
+        // been seen frozen (the first 5.00 could still be a run at 0:05),
+        // two such frames while the run was at 3:00 mean the runner reset.
+        let mut s = Sim::new(cfg());
+        s.start_run(180_000);
+        assert_eq!(s.time(5_000), vec![]);
+        assert_eq!(s.time(5_000), vec![]);
+        let ev = s.time(5_000);
+        assert!(
+            matches!(
+                ev.first(),
+                Some(Event::Reset {
+                    reason: ResetReason::Zeroed,
+                    last_ms: 180_000
+                })
+            ),
+            "{ev:?}"
+        );
+        // But 5.00 in the first seconds of a run is just the timer at 5s.
+        let mut s = Sim::new(cfg());
+        s.start_run(4_000);
+        assert_eq!(s.time(5_000), vec![]);
+        assert_eq!(s.time(6_000), vec![]);
+        assert_eq!(s.tr.phase_name(), "RUNNING");
     }
 
     #[test]
