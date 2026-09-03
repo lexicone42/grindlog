@@ -60,6 +60,20 @@ sqlite3 -bail "$LIVE" <<SQL
                                     WHERE m2.started_at_ms = ss.started_at_ms AND m2.source = ss.source)),
            sp.act_index, sp.act_name, sp.cumulative_ms, sp.segment_ms
     FROM s.splits sp JOIN s.runs sr ON sr.id = sp.run_id;
+  -- The final act's split IS the finish. Older per-VOD databases carry the
+  -- column's reading for that row (a misread comparison value), which made
+  -- an impossible gold; normalise every finished run's last row to its
+  -- finish time, and drop last-row splits on runs that never finished.
+  UPDATE splits SET
+    cumulative_ms = (SELECT r.final_time_ms FROM runs r WHERE r.id = splits.run_id),
+    segment_ms = (SELECT r.final_time_ms FROM runs r WHERE r.id = splits.run_id)
+               - COALESCE((SELECT p.cumulative_ms FROM splits p WHERE p.run_id = splits.run_id
+                           AND p.act_index = (SELECT MAX(act_index) FROM splits) - 1), 0)
+  WHERE act_index = (SELECT MAX(act_index) FROM splits)
+    AND run_id IN (SELECT id FROM runs WHERE outcome = 'finished' AND final_time_ms IS NOT NULL);
+  DELETE FROM splits WHERE id IN (
+    SELECT s.id FROM splits s JOIN runs r ON r.id = s.run_id
+    WHERE s.act_index = (SELECT MAX(act_index) FROM splits) AND r.outcome != 'finished');
   -- chronological attempt numbers across the whole db
   UPDATE runs SET attempt_number = (
     SELECT COUNT(*) FROM runs r2 WHERE r2.game = runs.game AND r2.category = runs.category
