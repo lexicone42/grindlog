@@ -633,28 +633,30 @@ pub struct Gold {
 /// with the date each gold was set.
 pub async fn golds(pool: &SqlitePool, game: &str, category: &str) -> Result<Vec<Gold>> {
     let rows = sqlx::query(
-        "SELECT act_index, act_name, segment_ms AS gold_ms, started_at_ms AS set_at_ms, cnt AS samples \
-         FROM ( \
-           SELECT s.act_index, s.act_name, s.segment_ms, r.started_at_ms, \
-                  ROW_NUMBER() OVER (PARTITION BY s.act_index \
-                                     ORDER BY s.segment_ms ASC, r.started_at_ms ASC) AS rn, \
+        /* A gold is the fastest segment that is plausible. Plausible means: not
+           more than 15% under the act's MEDIAN (a real personal gold sits a
+           few percent under it; a misread column is 20-90% under), and for
+           the final act, from a run that actually finished — its segment is
+           the finish, and on a reset run the column can only have supplied a
+           misread of the comparison row. The median, not the mean: one
+           absurd segment drags a mean far enough to let others through. */
+        "WITH seg AS ( \
+           SELECT s.act_index, s.act_name, s.segment_ms, r.started_at_ms, r.outcome, \
+                  ROW_NUMBER() OVER (PARTITION BY s.act_index ORDER BY s.segment_ms) AS rk, \
                   COUNT(*) OVER (PARTITION BY s.act_index) AS cnt \
-           FROM splits s \
-           JOIN runs r ON r.id = s.run_id \
-           /* per-act means in one pass; a correlated subquery here rescanned \
-              every split for every candidate row */ \
-           JOIN (SELECT s3.act_index AS act_index, AVG(s3.segment_ms) AS mean \
-                 FROM splits s3 JOIN runs r3 ON r3.id = s3.run_id \
-                 WHERE r3.game = ? AND r3.category = ? AND s3.segment_ms IS NOT NULL \
-                 GROUP BY s3.act_index) avg ON avg.act_index = s.act_index \
-           WHERE r.game = ? AND r.category = ? AND s.segment_ms IS NOT NULL \
-             /* a segment under 60% of the act's average is a misread column, \
-                not a gold (nobody runs an act 40% faster than their norm) */ \
-             AND s.segment_ms >= 0.6 * avg.mean \
-         ) WHERE rn = 1 ORDER BY act_index",
+           FROM splits s JOIN runs r ON r.id = s.run_id \
+           WHERE r.game = ? AND r.category = ? AND s.segment_ms IS NOT NULL), \
+         med AS (SELECT act_index, segment_ms AS m FROM seg WHERE rk = (cnt + 1) / 2), \
+         last AS (SELECT MAX(act_index) AS i FROM seg), \
+         ok AS ( \
+           SELECT seg.*, ROW_NUMBER() OVER (PARTITION BY seg.act_index \
+                                            ORDER BY seg.segment_ms, seg.started_at_ms) AS rn \
+           FROM seg JOIN med ON med.act_index = seg.act_index, last \
+           WHERE seg.segment_ms >= 0.85 * med.m \
+             AND (seg.act_index < last.i OR seg.outcome = 'finished')) \
+         SELECT act_index, act_name, segment_ms AS gold_ms, started_at_ms AS set_at_ms, cnt AS samples \
+         FROM ok WHERE rn = 1 ORDER BY act_index",
     )
-    .bind(game)
-    .bind(category)
     .bind(game)
     .bind(category)
     .fetch_all(pool)

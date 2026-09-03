@@ -2267,6 +2267,14 @@ pub async fn run(cfg: Config) -> Result<()> {
                     {
                         continue;
                     }
+                    // The final act's split IS the finish and is written by
+                    // the finish handler. The column can only offer a misread
+                    // of the comparison row for it — "11:35.0" for a PB of
+                    // 11:35.1, read twice — which then passes every bound and
+                    // becomes an impossible gold on a run that was reset.
+                    if idx + 1 == shared.acts.len() {
+                        continue;
+                    }
                     let act_name = shared
                         .acts
                         .get(idx)
