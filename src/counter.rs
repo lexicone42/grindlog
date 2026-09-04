@@ -7,6 +7,9 @@
 //! - within a session, attempts cannot arrive faster than one every few
 //!   seconds, so a value far ahead of the last one adopted is a misread (a 0
 //!   read as a 9 turns 95049 into 95949) and is refused outright;
+//! - a value above it, and not far ahead, is adopted after two consecutive
+//!   identical reads; the first value of a session needs three, since the
+//!   seed from the database may be days old and nothing vouches for it;
 //! - a value BELOW the one adopted is normally the previous attempt's number
 //!   still on screen, or a misread of the current one (a 9 read as a 1). Only
 //!   when TWO consecutive runs each settle on a lower value, the second above

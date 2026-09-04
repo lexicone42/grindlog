@@ -1,4 +1,38 @@
-//! The main run mode: capture -> preprocess -> OCR -> state machine -> DB/chat.
+//! The main run mode: capture -> preprocess -> timer read -> state machine
+//! -> DB/chat.
+//!
+//! ffmpeg delivers one union crop per frame: every layout's rectangles plus
+//! the drift margin (see `regions`). The timer is read from the brightest
+//! channel, by the glyph reader (`glyph.rs`) when `[timer] reader =
+//! "glyph"`, with tesseract taking the frames it declines; a read that does
+//! not parse is retried at each `[timer] retry_thresholds` value. A timer
+//! crop identical to the previous frame's reuses that reading instead of
+//! paying for OCR. `parse_timer_text` turns the text into an `Obs` for
+//! `state::Tracker`, whose events `handle_event` turns into rows and chat.
+//!
+//! Layouts: every `[[layouts]]` timer rectangle, and a grid of pixel offsets
+//! around each, is a `Candidate`. While unlocked they are probed (outside a
+//! run, a fully static union skips the probe, at most three frames in a
+//! row); the first to read consistently on five looks (ten to switch layouts
+//! once one has locked) becomes the lock. A lock is dropped when the timer
+//! is dark for `layout_search.dark_frames_search` frames, parses under 40%
+//! of 60 read frames, or reads with its digits against the crop edge ten
+//! times in a row. While locked, the digits' ink extent (`ink_extent`) is
+//! compared with where the calibrated crop puts them; eight seconds of
+//! agreeing shifts, spanning at least three different final digits,
+//! re-anchor the layout in place.
+//!
+//! At each lock of a layout with a splits rectangle, one pane pass
+//! (`measure_pane`) measures the split rows' pitch and the counter and Sum
+//! of Best rectangles (`pane_geometry`) and reads the pane's title and
+//! reference rows (`pane_readings`); those rows are read again every 60 s.
+//! A season best read there becomes the record to beat, and with
+//! `game.require_title_match` two consecutive readings of another game's
+//! title suspend recording until the tracked game's title is read again.
+//! The splits column is read every `splits.read_every_secs` during a run
+//! (`splits.rs`); the attempt counter every 2 s, while the timer is reading
+//! cleanly, until the run has a number (`counter.rs`). Capture health is
+//! flushed to the session row every minute.
 
 use anyhow::{Context, Result};
 use image::{GrayImage, Luma, RgbImage};
@@ -57,9 +91,12 @@ struct CurrentRun {
     splits: Vec<crate::splits::RecordedSplit>,
 }
 
-/// The ffmpeg-side crop and the sub-rectangles inside it. When splits OCR is
-/// enabled, ffmpeg delivers the union bounding box of both regions and we
-/// sub-crop in Rust; otherwise the union IS the timer crop.
+/// The ffmpeg-side crop and the sub-rectangles inside it. ffmpeg always
+/// delivers one union crop covering every layout's timer, splits, counter
+/// and Sum of Best rectangles, padded by `layout_search.drift_px + step_px`
+/// so offset probes and the fine drift stay inside it (see `regions`); the
+/// timer and the optional splits, counter and SoB rectangles are cut from
+/// it in Rust, relative to the union.
 #[derive(Debug, Clone)]
 pub struct Regions {
     pub union: (u32, u32, u32, u32), // x, y, w, h in canvas coords
@@ -179,9 +216,11 @@ fn to_bright(rgb: &RgbImage) -> GrayImage {
 /// nudges pixels by a few levels; a digit changing moves hundreds of pixels
 /// by a lot. Counts pixels that moved more than 30 levels and calls the
 /// region changed once they exceed 0.1% of its area (at least 20 pixels).
-/// Every tesseract call costs ~120ms of process startup before it reads a
-/// single glyph, so OCR-ing a crop that is pixel-for-pixel the same as the
-/// last one is the most expensive way to learn nothing.
+/// OCR is the expensive step of a frame: the tesseract CLI engine pays
+/// ~50-150ms of process startup per call, and even the in-process engine
+/// (`leptess-ocr`, what `ocr.engine = "auto"` picks when compiled in) costs
+/// far more than this pixel diff. OCR-ing a crop that is pixel-for-pixel
+/// the same as the last one is the most expensive way to learn nothing.
 fn region_changed(prev: &GrayImage, cur: &GrayImage, (x, y, w, h): R) -> bool {
     if prev.dimensions() != cur.dimensions() {
         return true;
@@ -261,18 +300,10 @@ fn drift_offsets(cfg: &crate::config::LayoutSearchCfg) -> Vec<(i32, i32)> {
     offs
 }
 
-/// Where the digits sit inside a processed (ink = black) timer crop: the
-/// ink's right edge and vertical centre, in un-upscaled crop pixels.
-/// LiveSplit right-aligns the timer, so both stay put while the window does;
-/// a consistent shift means the window moved.
-///
-/// A crop often reaches the pane's border to the right of the digits — ink
-/// spanning the full crop height, which tesseract folds into the word box
-/// too. Starting from where the text begins (`text_left`, from tesseract),
-/// the first full-height column is that border, and only columns left of it
-/// count.
-/// Extent of the digit ink inside a processed timer crop, in un-upscaled
-/// crop pixels (see `ink_extent`).
+/// Extent of the digit ink inside a processed (ink = black) timer crop, in
+/// un-upscaled crop pixels (see `ink_extent`). LiveSplit right-aligns the
+/// timer, so the ink's right edge and vertical centre (`cy`) stay put while
+/// the window does; a consistent shift of them means the window moved.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Ink {
     left: i32,
@@ -302,10 +333,18 @@ fn ink_anchor(proc: &GrayImage, bbox: Option<R>, upscale: u32) -> Option<(i32, i
     ink_extent(proc, bbox.map(|b| b.0), upscale).map(|e| (e.right, e.cy()))
 }
 
-/// Border-aware ink extent: columns right of the first full-height column
-/// (the pane border) are ignored, and the vertical extent is taken over the
-/// remaining digit columns only. Tesseract's own word box is NOT used for
-/// this — it folds the border in and then spans the whole crop height.
+/// Border-aware ink extent. Columns from the first full-height column on
+/// (the pane border) are ignored, and the border's anti-aliased inner edge
+/// is walked over, since counting it as digits moved the right edge from
+/// frame to frame. The vertical extent is the digit band: the run of
+/// consecutive inked rows (bridging at most one source pixel) with the most
+/// ink, bands too thin to be digits (separator lines) dropped unless nothing
+/// else remains, so a line or the row of text under the timer cannot stretch
+/// the extent to the crop edge. The horizontal extent comes from that band's
+/// columns alone. `text_left` is where the reader found the text (the left
+/// edge of tesseract's word box or of the glyph reader's leftmost glyph) and
+/// only starts the search; the reader's box is NOT used as the extent, since
+/// tesseract's folds the border in and spans the whole crop height.
 fn ink_extent(proc: &GrayImage, text_left: Option<u32>, upscale: u32) -> Option<Ink> {
     let up = upscale.max(1);
     let (w, h) = proc.dimensions();
@@ -523,8 +562,10 @@ impl RefKind {
 /// A rectangle relative to the timer's top-left: (dx, dy, w, h).
 type RelRect = (i32, i32, u32, u32);
 
-/// What the pane says about itself, read at lock time: the game it is timing
-/// and the reference times printed under the timer.
+/// What the pane says about itself: the game it is timing and the reference
+/// times printed under the timer. Read at every layout lock and again every
+/// 60 s while locked, so a misread title or a beaten reference is picked up
+/// without waiting for a relock.
 #[derive(Debug, Clone, Default)]
 struct PaneReadings {
     /// Title row text ("Ninja Gaiden (NES)") and the category under it.
@@ -712,8 +753,11 @@ fn game_matches(detected: &str, configured: &str) -> bool {
 
 /// Derive the pane geometry from the split rows visible above the timer:
 /// time-shaped words grouped into rows, rightmost word per row (LiveSplit's
-/// cumulative column), median row pitch; the column block is anchored at the
-/// lowest row and spans `acts` rows. A bare integer above the block is the
+/// cumulative column), median row pitch. The column block spans `acts` rows
+/// up from the last act's row: the lowest row read, unless that sits more
+/// than a row and a half above the timer, in which case the anchor moves
+/// down by whole rows (the rows beneath went unread). The column gets two
+/// digits of headroom on the left. A bare integer above the block is the
 /// attempt counter. Below the timer, a time whose row label (from the
 /// `letters` pass) says "Sum of Best" is the SoB row. None when fewer than
 /// two rows read or the pitch is implausible.
@@ -897,8 +941,12 @@ fn pane_geometry(
     })
 }
 
-/// Measure the pane geometry from the current union crop (see
-/// `pane_geometry`): one sparse-text OCR pass at 2x.
+/// Measure the pane from the current union crop: two sparse-text OCR passes
+/// over the same 2x image, one with a digits whitelist (the split rows, the
+/// counter, the times under the timer) and one unrestricted and best-effort
+/// (the row labels and the title). Returns the geometry (`pane_geometry`,
+/// None when it cannot be derived) and the pane's own readings
+/// (`pane_readings`).
 async fn measure_pane(
     ocr_engine: &mut OcrEngine,
     union_img: &GrayImage,
@@ -953,7 +1001,9 @@ async fn measure_pane(
 }
 
 /// Reference times the pane advertises, tracked until they are stable enough
-/// to persist. LiveSplit prints them as static text, so a value seen twice is
+/// to persist: two consecutive sightings for a new value, three to replace an
+/// established one. Callers run `sane_reference` first, since these rows are
+/// static text and a misread repeats identically. Once confirmed, a value is
 /// the streamer's own record-keeping — better than anything in our config.
 #[derive(Default)]
 struct RefTracker {
@@ -1132,10 +1182,11 @@ async fn record_reference(
 }
 
 /// OCR the splits column as `rows` equal-height rows: one parsed time (or
-/// None) per act row. One tesseract call for the whole column (sparse-text
-/// mode with word boxes); each word lands in the row its centre falls in,
-/// and the rightmost time-shaped word of a row is that row's value. Falls
-/// back to one call per row if the column pass produced no words at all.
+/// None) per act row. One tesseract call for the whole column (psm 6, a
+/// single uniform block, with word boxes); each word lands in the row its
+/// centre falls in, and a row's words joined in x order are its value, since
+/// sparse mode splits "2:41.0" at the colon and "41.0" parses on its own.
+/// Falls back to one call per row when no row of the column pass parsed.
 async fn read_splits_rows(
     ocr_engine: &mut OcrEngine,
     union_img: &GrayImage,

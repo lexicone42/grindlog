@@ -2,10 +2,22 @@
 # Build the records site from the live database and push it to
 # https://ng.lexicone.com (S3 + CloudFront, stack: infra/site-stack.yml).
 #
-#   ./scripts/deploy-site.sh              # build + upload + invalidate
-#   ./scripts/deploy-site.sh --infra      # also create/update the CFN stack
+#   ./scripts/deploy-site.sh              # fill run numbers + build + upload + invalidate
+#   ./scripts/deploy-site.sh --infra      # also update the existing CFN stack
 #
-# The post-stream ritual is just: ./scripts/deploy-site.sh
+# --infra passes no parameters, so it can only update a stack that already
+# exists (CloudFormation reuses the previous values). Create it once by hand
+# with your Route53 zone id, which the template does not default:
+#   aws cloudformation deploy --region us-east-1 --stack-name grindlog-site \
+#     --template-file infra/site-stack.yml --parameter-overrides HostedZoneId=Z...
+#
+# It writes to the live database first: fill-run-numbers.sh fills in
+# ls_attempt numbers inferred from neighbouring runs. Normally cron runs this
+# for you: deploy-if-live.sh (every 10 minutes, only while a live session is
+# open) execs it, and a nightly entry runs it directly; the schedule lives in
+# the crontab, not in the repo. import-when-done.sh and import-vod.sh
+# --deploy call it too. Run it by hand to publish right away, after an import
+# or a hand edit of the database.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

@@ -3,7 +3,8 @@
 
 use serde::Serialize;
 
-/// The minimal slice of a run row the stats need, in insertion order.
+/// The minimal slice of a run row the stats need, in chronological order
+/// (as `db::runs_brief` returns them).
 #[derive(Debug, Clone)]
 pub struct RunBrief {
     pub started_at_ms: i64,

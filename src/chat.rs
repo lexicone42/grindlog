@@ -1,10 +1,14 @@
 //! Twitch chat integration: announces finished runs and answers commands.
 //!
-//! Viewer commands (10s shared cooldown each, so anyone can poke the bot
-//! during live testing without mod rights):
-//!   !pb !lastrun !today !attempts !status (aliases !timer, !ngtimer)
+//! Viewer commands (each on its own `chat.command_cooldown_secs` cooldown,
+//! 10s by default, so anyone can poke the bot during live testing without
+//! mod rights):
+//!   !pb  !lastrun (!last)  !today  !attempts  !deaths (!resets)  !pace
+//!   !golds (!gold)  !splits  !status (!timer, !ngtimer)
 //! Mod commands (broadcaster, badge mods, or logins in chat.mods):
 //!   !setgame <game...> <category>   !correct <time>   !void
+//! With `chat.command_prefix` set, every command is namespaced under it (see
+//! `parse_prefixed`) and the bare form is left to other bots.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;

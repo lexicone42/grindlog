@@ -2,16 +2,40 @@
 //! emits run lifecycle events.
 //!
 //! ```text
-//! IDLE    -> RUNNING   timer left ~0:00 and advanced consistently for N readings
-//! RUNNING -> IDLE      via Finished (timer legible but frozen for N readings)
+//! IDLE    -> RUNNING   timer above start_epsilon_ms and advancing with the
+//!                      wall clock for start_confirmations readings (also
+//!                      when joining a run already in progress)
+//! RUNNING -> IDLE      via Finished  timer legible but frozen for
+//!                                    stall_confirmations readings, at or
+//!                                    above min_final_ms
 //!                      via Reset:
-//!                        Zeroed      timer back at ~0:00
-//!                        Disappeared OCR failed for a long stretch while frames
-//!                                    kept arriving (timer removed / runner quit)
-//!                        Desync      readings stopped matching the running clock
-//!                                    but are self-consistent -> we missed a reset;
-//!                                    re-sync onto the new run immediately
+//!                        TooShort    frozen like a finish, but below
+//!                                    min_final_ms (a stall, a pause, the
+//!                                    pre-start "-5.00" read as 5.00)
+//!                        Zeroed      reset_confirmations readings under
+//!                                    reset_epsilon_ms, or frozen at the
+//!                                    pre-start offset while the run was
+//!                                    well past it
+//!                        Disappeared OCR failed for illegible_reset_count
+//!                                    frames while frames kept arriving
+//!                                    (timer removed / runner quit)
+//!                        Desync      desync_confirmations rejected readings
+//!                                    in a row agree with each other: we
+//!                                    missed a reset; the old run is closed
+//!                                    and a new one Started on the new
+//!                                    timeline
+//! RUNNING -> RUNNING   Resynced: the same self-consistent evidence, but on
+//!                      mid-run values (at or above desync_restart_max_ms
+//!                      and not under half the run's last good time): the
+//!                      stream clock slipped; same run, new anchor
 //! ```
+//!
+//! Two kinds of rejected reading never count as desync evidence: one
+//! confusable glyph away from the expected value (`glyph_confusion`), and
+//! the expected value with its leading digits dropped (`truncated_read`),
+//! set aside for at most two consecutive frames and only when no reading
+//! under six seconds has been seen in the last fifteen seconds; a real
+//! restart always shows one.
 //!
 //! All timestamps are milliseconds on a monotonic clock supplied by the
 //! caller, which keeps the machine fully deterministic for tests. Validation
@@ -45,8 +69,9 @@ pub struct TrackerConfig {
     /// Consecutive near-zero readings required to declare a reset.
     pub reset_confirmations: usize,
     /// Consecutive illegible frames (stream still live!) to declare the timer
-    /// gone and the run dead. At 1 fps this is seconds. Keep it generous:
-    /// mid-roll ads can blank the feed for a couple of minutes.
+    /// gone and the run dead. Frames, not seconds: 180 is three minutes at
+    /// 1 fps and 90 s at the live config's 2 fps. Keep it generous: mid-roll
+    /// ads can blank the feed for a couple of minutes.
     pub illegible_reset_count: usize,
     /// Readings deviating from the expected value by more than this are
     /// misreads (unless near zero) and are skipped.
@@ -54,10 +79,11 @@ pub struct TrackerConfig {
     /// This many consecutive skipped-but-self-consistent readings trigger a
     /// desync re-sync (missed reset, timer edited, etc.).
     pub desync_confirmations: usize,
-    /// A desync that re-syncs onto a timer BELOW this is a real
-    /// reset-and-restart (Reset+Started). At or above it, the readings are
-    /// mid-run values — stream time slipped (CDN rewind, dropout) — so the
-    /// tracker re-anchors silently and the same run continues.
+    /// A desync that re-syncs onto a timer BELOW this, or below half the
+    /// run's last good time (a restart during an unreadable gap), is a real
+    /// reset-and-restart (Reset+Started). Otherwise the readings are mid-run
+    /// values — stream time slipped (CDN rewind, dropout) — so the tracker
+    /// re-anchors silently and the same run continues.
     pub desync_restart_max_ms: i64,
     /// Readings kept for the smoothed "current time" estimate.
     pub smoothing_window: usize,
@@ -67,8 +93,10 @@ pub struct TrackerConfig {
     /// fastest plausible completed run.
     pub min_final_ms: i64,
     /// LiveSplit's pre-start offset as it reads once the sign is lost
-    /// ("-5.00" -> 5000). While a run is well past it, a reading of exactly
-    /// this value is the reset screen. 0 disables.
+    /// ("-5.00" -> 5000). While a run is well past it, a reading at this
+    /// value that is also frozen (unchanged from the previous frame, both
+    /// within stall_tolerance_ms) is the reset screen, not a timer value.
+    /// 0 disables.
     pub prestart_offset_ms: i64,
 }
 

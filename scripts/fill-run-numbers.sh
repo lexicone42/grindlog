@@ -7,6 +7,13 @@
 # in the gap gets an unambiguous number. Gaps that don't add up (his counter
 # saw double-tap resets we never logged) are left alone.
 #
+# Before inferring, an existing number whose nearest known neighbours (in
+# start order) are in increasing order, yet which lies outside their range,
+# is cleared as a misread (a 94688 read as 94888); the inference then refills
+# it when the gap adds up, otherwise it stays empty. Prints outliers_cleared,
+# filled and coverage counts. Run automatically by import-vod.sh,
+# merge-backfill.sh and deploy-site.sh.
+#
 #   ./scripts/fill-run-numbers.sh [db]      # default ninja-gaiden.db
 set -euo pipefail
 cd "$(dirname "$0")/.."

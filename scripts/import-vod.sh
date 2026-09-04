@@ -6,8 +6,20 @@
 #
 #   ./scripts/import-vod.sh <vod_id> [--deploy]
 #
-# Use this to get a single day onto the site quickly; merge-backfill.sh is
-# the full chronological rebuild.
+# This is the path the backfill lands through: import-when-done.sh calls it
+# per VOD as each chain finishes. merge-backfill.sh is the full chronological
+# rebuild into a fresh database; it copies splits verbatim and does not apply
+# the final-act normalisation below, so a rebuild from per-VOD databases
+# written by an older binary brings back the misread final-act gold this
+# script removes.
+#
+# Not everything it touches is confined to those days: every finished run's
+# final-act split is set to its finish time and last-row splits on runs that
+# never finished are dropped; attempt_number is renumbered chronologically
+# across the whole database; then fill-run-numbers.sh runs on it. Days are
+# the machine's local dates, so a VOD that crosses midnight replaces both.
+# LIVE=<path> targets another database (a copy, for a dry run). Exits 1 when
+# the per-VOD database is missing, 2 while its session is still open.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 LIVE="${LIVE:-ninja-gaiden.db}"   # override for a dry run on a copy

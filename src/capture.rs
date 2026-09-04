@@ -1,6 +1,10 @@
-//! Video capture: turns a live Twitch stream into a steady sequence of raw
-//! frames on a channel, restarting with backoff when the stream drops and
-//! going dormant (slow polling) when the channel is offline.
+//! Video capture: turns a live Twitch stream, a Twitch VOD or a local file
+//! (the recorded sources optionally seeking to a start offset first) into a
+//! steady sequence of raw frames on a channel. A live source restarts with
+//! backoff when the stream drops and goes dormant (slow polling) when the
+//! channel is offline. A recorded source runs to its end and then stops; a
+//! stall or an ffmpeg death mid-file is a capture error, never "finished",
+//! so an import cannot take a fragment for a whole day.
 //!
 //! Frames come out of ffmpeg as fixed-size rawvideo buffers (the filter chain
 //! does fps limiting, canvas scaling and cropping), so framing the byte
@@ -94,7 +98,11 @@ enum Session {
     Ended { frames: u64 },
 }
 
-/// Runs forever (until the frame receiver is dropped), producing frames.
+/// Produces frames until the receiver is dropped (Ok). A live source polls
+/// while offline and restarts on any error, so it never returns otherwise. A
+/// recorded source also returns Ok once its input has run to its end, and
+/// Err if the VOD cannot be resolved; a stall or ffmpeg failure mid-file is
+/// logged and the session retried after `restart_delay_secs`.
 pub async fn capture_loop(cfg: CaptureCfg, tx: mpsc::Sender<CaptureEvent>) -> Result<()> {
     let http = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (X11; Linux x86_64) ngtwitchtimer/0.1")

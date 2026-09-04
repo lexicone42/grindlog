@@ -11,12 +11,18 @@
 #   attempt starts in), % of readings the tracker accepted (agreement with its
 #   own clock, i.e. OCR accuracy), runs started in the window, how many carry
 #   his run number and the span of those numbers (= attempts he really made),
-#   lock events / poor-lock re-probes / crop growths.
+#   lock events / poor-lock re-probes (the trailing "grown" column counted
+#   crop auto-grow events, a feature since removed; it is always 0 now).
 #
 # Work files land in replays/<label>/ (config, db, obs log, bot log), ignored
-# by git. The config's own db/obs paths are overridden; everything else — the
-# layouts, thresholds, fps — is what gets tested, so hand it the live config
-# (or a variant of it) rather than a backfill one.
+# by git; a rerun with the same label replaces the last capture. The config's
+# own db/obs paths are overridden and chat is forced off whatever it says, so
+# hand it the live config (or a variant of it) rather than a backfill one:
+# everything else — the layouts, thresholds, fps — is what gets tested. The
+# bot runs 12 more minutes of video past the window (so a run that starts in
+# it and ends after it is still written) and is then killed. Bounded: no
+# frame within two minutes, or the window not done within its length plus 15
+# minutes, exits 1 with the reason on stderr.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cfg=$1; vod=$2; start=$3; dur=$4; bin=${5:-./target/release/ngtwitchtimer}; label=${6:-$(basename "$bin")-$vod-$start}

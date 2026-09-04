@@ -1,8 +1,12 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Grind Log records site: private S3 bucket behind CloudFront (OAC),
-  DNS-validated cert, Route53 alias on lexicone.com. Deploy in us-east-1
-  (CloudFront certs must live there).
+  Grind Log records site (ng.lexicone.com): private S3 bucket behind
+  CloudFront (OAC), DNS-validated cert, Route53 alias in the lexicone.com
+  zone. Deploy in us-east-1 (CloudFront certs must live there) as stack
+  "grindlog-site"; scripts/deploy-site.sh looks the distribution up by
+  that name. Create the stack by hand once, passing HostedZoneId (no
+  default); afterwards `deploy-site.sh --infra` updates it and reuses the
+  stored parameter values.
 
 Parameters:
   DomainName:
