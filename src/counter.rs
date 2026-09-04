@@ -100,6 +100,14 @@ impl CounterTracker {
                 if v == p {
                     return CounterEvent::Ignore; // the current number, still on screen
                 }
+                // The number with one digit lost — a crop clipping the last
+                // digit reads 96410 through 96419 as 9641, run after run,
+                // a rising sequence a fraction of the adopted value: exactly
+                // what a counter reset looks like. It is a misread and no
+                // evidence of anything.
+                if digit_dropped(v, p) {
+                    return CounterEvent::Ignore;
+                }
                 self.lower = match self.lower {
                     Some((pv, n)) if pv == v => Some((v, n + 1)),
                     _ => Some((v, 1)),
@@ -159,9 +167,56 @@ impl CounterTracker {
     }
 }
 
+/// Is `v` the adopted value `p`, or one of the next few numbers after it,
+/// with one digit dropped?
+fn digit_dropped(v: i64, p: i64) -> bool {
+    let v = v.to_string();
+    (p..=p + 30).any(|n| {
+        let s = n.to_string();
+        s.len() == v.len() + 1
+            && (0..s.len()).any(|i| {
+                let mut t = s.clone();
+                t.remove(i);
+                t == v
+            })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_value_with_a_digit_dropped_is_neither_a_reset_nor_a_revert() {
+        let mut c = CounterTracker::new(None);
+        adopt(&mut c, 96_403, 0);
+        adopt(&mut c, 96_404, 60_000);
+        // The crop clips the last digit: 96410..96419 all read 9641, then
+        // 96420.. read 9642 — a rising sequence far below the adopted
+        // value, which used to pass for the streamer resetting his counter.
+        for run in 0..3 {
+            c.reset_run();
+            for k in 0..3 {
+                let t = 120_000 + run * 60_000 + k * 2_000;
+                assert_eq!(c.observe(9_641, t), CounterEvent::Ignore);
+            }
+        }
+        for run in 0..3 {
+            c.reset_run();
+            for k in 0..3 {
+                let t = 400_000 + run * 60_000 + k * 2_000;
+                assert_eq!(c.observe(9_642, t), CounterEvent::Ignore);
+            }
+        }
+        assert_eq!(c.last(), Some(96_404));
+        // A genuine restart of the counter still rebases.
+        c.reset_run();
+        c.observe(1, 800_000);
+        assert_eq!(c.observe(1, 802_000), CounterEvent::Ignore);
+        c.reset_run();
+        c.observe(2, 860_000);
+        assert_eq!(c.observe(2, 862_000), CounterEvent::Rebase(2));
+    }
 
     fn adopt(c: &mut CounterTracker, v: i64, t: i64) {
         c.reset_run();
