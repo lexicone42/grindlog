@@ -243,6 +243,51 @@ fn region_changed(prev: &GrayImage, cur: &GrayImage, (x, y, w, h): R) -> bool {
 }
 
 /// One rectangle moved by a pixel offset, or None if it would leave the union.
+/// A processed crop (ink black on white) cut short of the pane's right
+/// border: the counter and the reference rows sit against the pane's edge,
+/// and a crop wide enough to keep their last digit through a few pixels of
+/// window drift reaches the border line and the game beyond it, which
+/// tesseract reads as a trailing "1". Columns inked over most of the crop's
+/// height, contiguous from the right edge inwards, are that border (and its
+/// anti-aliased shadow); the crop ends where they begin. A crop that is all
+/// border, or has none, is returned as it is.
+fn trim_at_border(proc: &GrayImage) -> GrayImage {
+    let (w, h) = proc.dimensions();
+    if w < 4 || h == 0 {
+        return proc.clone();
+    }
+    let ink = |x: u32| (0..h).filter(|&y| proc.get_pixel(x, y).0[0] == 0).count() as u32;
+    let mut end = w;
+    // Bright game pixels past the border threshold to ink too, so the run
+    // may start at the very edge; a real digit column is never inked over
+    // more than ~70% of a crop that has margins above and below it.
+    while end > 0 && ink(end - 1) * 100 > h * 80 {
+        end -= 1;
+    }
+    if end == w {
+        return proc.clone();
+    }
+    // The border's anti-aliased inner edge, then a pixel of white margin so
+    // the last digit does not touch the crop edge.
+    while end > 0 && ink(end - 1) * 100 > h * 55 {
+        end -= 1;
+    }
+    let end = end.saturating_sub(1).max(1);
+    if end * 4 < w {
+        return proc.clone(); // hardly anything left: not a border after all
+    }
+    image::imageops::crop_imm(proc, 0, 0, end, h).to_image()
+}
+
+/// The component-wise median of a few points (at least one).
+fn median_point(pts: &[(i32, i32)]) -> (i32, i32) {
+    let mut xs: Vec<i32> = pts.iter().map(|p| p.0).collect();
+    let mut ys: Vec<i32> = pts.iter().map(|p| p.1).collect();
+    xs.sort_unstable();
+    ys.sort_unstable();
+    (xs[xs.len() / 2], ys[ys.len() / 2])
+}
+
 fn move_rect(r: R, dx: i32, dy: i32, uw: u32, uh: u32) -> Option<R> {
     let x = r.0 as i64 + dx as i64;
     let y = r.1 as i64 + dy as i64;
@@ -860,11 +905,16 @@ fn pane_geometry(
         .max_by_key(|r| r.1)
         .map(|r| {
             // Right-aligned number: generous headroom on the left so a
-            // leading digit never sits on the crop edge (96621 -> 6621).
+            // leading digit never sits on the crop edge (96621 -> 6621),
+            // and as much on the right so a few pixels of window drift
+            // under the re-anchor threshold cannot cut the last digit
+            // (96410 -> 9641, for a whole afternoon). The pane's border,
+            // which that headroom reaches, is trimmed off before OCR
+            // (`trim_at_border`).
             (
                 r.0 as i64 - 30 - timer.0 as i64,
                 r.1 as i64 - 6 - timer.1 as i64,
-                r.2 as i64 + 42,
+                r.2 as i64 + 60,
                 r.3 as i64 + 12,
             )
         })
@@ -1506,6 +1556,10 @@ pub async fn run(cfg: Config) -> Result<()> {
     // by the digits' real displacement, never by our crop correction.
     let mut geom_abs: Option<(Option<R>, Option<R>, Option<R>)> = None;
     let mut geom_ink_abs: Option<(i32, i32)> = None;
+    // The frames that establish `geom_ink_abs`: the ink's right edge sits a
+    // few pixels left or right depending on the final digit, so one frame
+    // is a poor reference and the median of several is taken instead.
+    let mut geom_ink_samples: Vec<(i32, i32)> = Vec::new();
     // Capture health for the open session, flushed to its row every minute.
     let mut health = db::SessionHealth::default();
     let mut last_health_flush_t: i64 = i64::MIN / 2;
@@ -2143,6 +2197,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 pane_geom = Some(g);
                                 geom_abs = Some((new_regs.splits, new_regs.counter, new_regs.sob));
                                 geom_ink_abs = None;
+                                geom_ink_samples.clear();
                                 health.event(
                                     time_base.map(|b| b + t).unwrap_or_else(util::unix_ms),
                                     "geometry",
@@ -2155,6 +2210,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 pane_geom = None;
                                 geom_abs = None;
                                 geom_ink_abs = None;
+                                geom_ink_samples.clear();
                             }
                         }
                         Err(e) => warn!("pane geometry pass failed: {e:#}"),
@@ -2280,10 +2336,14 @@ pub async fn run(cfg: Config) -> Result<()> {
         // splits/counter crops, so re-anchor on a consistent shift of the ink.
         if let (true, Some(m)) = (layout_locked, ink) {
             if geom_ink_abs.is_none() {
-                geom_ink_abs = Some((
+                geom_ink_samples.push((
                     active_regs.timer.0 as i32 + m.0,
                     active_regs.timer.1 as i32 + m.1,
                 ));
+                if geom_ink_samples.len() >= 8 {
+                    geom_ink_abs = Some(median_point(&geom_ink_samples));
+                    geom_ink_samples.clear();
+                }
             }
             match anchors[active_layout] {
                 None => {}
@@ -2342,16 +2402,27 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 // by how far the digits have ACTUALLY moved
                                 // since that measurement — not by the
                                 // correction to our own crop placement, which
-                                // says nothing about the window.
+                                // says nothing about the window. Both ends
+                                // of that comparison are medians: the drift
+                                // hits' here, several frames' at the
+                                // reference. One frame each was off by the
+                                // final digit's width, and a 6 px error moved
+                                // the counter crop off its last digit for the
+                                // rest of a day.
                                 if let Some((gs, gc, gb)) = geom_abs {
                                     let now_abs = (
-                                        active_regs.timer.0 as i32 + m.0,
-                                        active_regs.timer.1 as i32 + m.1,
+                                        active_regs.timer.0 as i32 + a.0 + d.0,
+                                        active_regs.timer.1 as i32 + a.1 + d.1,
                                     );
+                                    // No reference yet (the lock was moments
+                                    // ago): this correction is our own crop
+                                    // placement, and the rectangles measured
+                                    // on the frame are right where they are.
                                     let (mx, my) = match geom_ink_abs {
                                         Some(r) => (now_abs.0 - r.0, now_abs.1 - r.1),
                                         None => (0, 0),
                                     };
+                                    geom_ink_samples.clear();
                                     let (uw2, uh2) = (nr.union.2, nr.union.3);
                                     if let Some(s) = gs.and_then(|r| move_rect(r, mx, my, uw2, uh2))
                                     {
@@ -2367,8 +2438,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                                     }
                                     if mx != 0 || my != 0 {
                                         geom_abs = Some((nr.splits, nr.counter, nr.sob));
-                                        geom_ink_abs = Some(now_abs);
                                     }
+                                    geom_ink_abs = Some(now_abs);
                                 } else if let Some(g) = pane_geom {
                                     g.apply(&mut nr);
                                 }
@@ -2625,7 +2696,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             if cr.ls_attempt.is_none() && timer_fresh && t - last_counter_read_t >= 2000 {
                 last_counter_read_t = t;
                 let cimg = image::imageops::crop_imm(&union_bright, cx, cy, cw2, ch2).to_image();
-                let cp = ocr::preprocess(&cimg, &pre_counter);
+                let cp = trim_at_border(&ocr::preprocess(&cimg, &pre_counter));
                 if std::env::var_os("NG_DUMP_PANE").is_some() {
                     let _ = cp.save("calibration/counter.png");
                 }
@@ -2731,7 +2802,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         if let Some((bx, by, bw2, bh2)) = reg.sob {
                             let bimg = image::imageops::crop_imm(&union_bright, bx, by, bw2, bh2)
                                 .to_image();
-                            let bp = ocr::preprocess(&bimg, &pre_counter);
+                            let bp = trim_at_border(&ocr::preprocess(&bimg, &pre_counter));
                             if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&bp)?).await {
                                 if let Some(v) = parse_time(txt.trim())
                                     .filter(|&v| sane_reference(RefKind::SumOfBest, v, &refs, &cfg))
@@ -3392,6 +3463,39 @@ mod tests {
     }
 
     #[test]
+    fn the_pane_border_is_trimmed_off_a_counter_crop() {
+        // Ink black on white: five digit-ish columns of ink in the middle,
+        // the pane's border (full height, anti-aliased inner edge) and the
+        // game beyond it filling the right quarter.
+        let (w, h) = (120u32, 30u32);
+        let mut img = GrayImage::from_pixel(w, h, image::Luma([255]));
+        for x in 40..80 {
+            for y in 8..22 {
+                if (x / 8) % 2 == 0 {
+                    img.put_pixel(x, y, image::Luma([0]));
+                }
+            }
+        }
+        for y in 0..h {
+            for x in 96..w {
+                img.put_pixel(x, y, image::Luma([0]));
+            }
+            if y >= 3 && y < h - 3 {
+                img.put_pixel(94, y, image::Luma([0]));
+                img.put_pixel(95, y, image::Luma([0]));
+            }
+        }
+        let t = trim_at_border(&img);
+        assert!(t.width() >= 88 && t.width() <= 93, "width {}", t.width());
+        assert_eq!(t.height(), h);
+        // No border: untouched. All border: untouched too.
+        let plain = GrayImage::from_pixel(w, h, image::Luma([255]));
+        assert_eq!(trim_at_border(&plain).width(), w);
+        let dark = GrayImage::from_pixel(w, h, image::Luma([0]));
+        assert_eq!(trim_at_border(&dark).width(), w);
+    }
+
+    #[test]
     fn pane_geometry_from_split_rows() {
         // Union-relative, scale 1. Timer at (60, 400, 300, 90); six rows of
         // 45px above it with delta + cumulative columns, counter on top.
@@ -3435,7 +3539,7 @@ mod tests {
         let c = g.counter.expect("counter");
         assert_eq!(
             (c.0, c.1, c.2, c.3),
-            (330 - 30 - 60, 60 - 6 - 400, 60 + 42, 32)
+            (330 - 30 - 60, 60 - 6 - 400, 60 + 60, 32)
         );
         // One row is not enough; an absurd pitch is rejected.
         assert!(pane_geometry(&words[..2], &[], 1, timer, 6).is_none());
