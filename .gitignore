@@ -37,3 +37,6 @@ nohup.out
 
 # Replay-window work files (configs, dbs, obs logs per replay)
 /replays/
+
+# Database backups (scripts/backup-db.sh) and retired copies
+/backups/
