@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Regenerate the records site from the database:
 #   ./scripts/build-site.sh [config.toml]
-# Produces site/index.html — a self-contained page (deployable anywhere
-# static, e.g. lexicone.com; just copy the one file).
+# Produces site/index.html, a self-contained page (copy the one file to any
+# static host; ng.lexicone.com is the reference deployment, see
+# deploy-site.sh), and site/data.json, the report JSON it was built from
+# (kept for inspection; not uploaded). First fetches the WR and lifetime-PB
+# reference times from speedrun.com (see below for what they can override),
+# then checks that the JSON parses with jq. Holds .build-site.lock so the
+# live cron and a finishing import cannot build at once. Needs the release
+# binary, the config's database, curl, jq and flock.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cfg="${1:-live.toml}"
@@ -16,8 +22,12 @@ tmp=$(mktemp site/data.json.XXXXXX)
 trap 'rm -f "$tmp" "$tmp.tmp"' EXIT
 ./target/release/ngtwitchtimer --config "$cfg" report --json > "$tmp"
 
-# Refresh reference times from speedrun.com (Ninja Gaiden NES, Any%) so the
-# WR / lifetime-PB lines self-update. Falls back to the config values.
+# Fetch reference times from speedrun.com (Ninja Gaiden NES, Any%). They only
+# fill a label the report does not already carry: the report's own entries
+# (live.toml [game] references, replaced by values read off the streamer's
+# layout once it has shown them) come first and win the merge below. With WR
+# and Lifetime PB both set in live.toml, speedrun.com's values are never used;
+# drop a label from the config to let speedrun.com supply it.
 SRC_GAME=lde39l63
 SRC_CAT=ndx8vvkq
 SRC_USER=zx7oyvj7
@@ -37,9 +47,7 @@ else
   echo "speedrun.com unavailable; keeping the layout/config reference times"
 fi
 [ -s "$tmp" ] || { echo "report produced no JSON; not building" >&2; exit 1; }
-python3 - "$tmp" >/dev/null <<'PY' || { echo "report JSON is not valid; not building" >&2; exit 1; }
-import json,sys; json.load(open(sys.argv[1]))
-PY
+jq -e . "$tmp" >/dev/null || { echo "report JSON is not valid; not building" >&2; exit 1; }
 # The JSON is spliced into a <script> element, where the parser ends the
 # script at the first "</" regardless of JSON quoting.
 sed -i 's|</|<\\/|g' "$tmp"

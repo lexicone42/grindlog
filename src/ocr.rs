@@ -1,10 +1,18 @@
-//! Frame preprocessing and OCR backends.
+//! Frame preprocessing and the tesseract backends. When `[timer] reader =
+//! "glyph"` the timer's digits go first to the glyph reader (`glyph.rs`);
+//! tesseract reads the frames it declines, and the splits, counter and pane
+//! crops.
 //!
-//! Two interchangeable engines:
-//! - `cli`: invokes the `tesseract` binary per frame via stdin/stdout. No
-//!   build-time dependencies; ~50-150ms per call, fine at 1 fps.
+//! Engines, chosen by `ocr.engine`:
+//! - `cli`: invokes the `tesseract` binary per call via stdin/stdout. No
+//!   build-time dependencies; ~50-150ms per call, most of it process
+//!   startup.
 //! - `leptess` (cargo feature `leptess-ocr`): in-process libtesseract, run on
 //!   a dedicated OS thread so the FFI handle never has to cross await points.
+//!   Faster overall (the startup cost is paid once) and what the production
+//!   build uses.
+//! - `auto` (the default): `leptess` when compiled in and its language data
+//!   loads, else `cli` with a warning.
 
 use anyhow::{bail, Context, Result};
 use image::{imageops, GrayImage};
@@ -209,8 +217,9 @@ impl OcrEngine {
         }
     }
 
-    /// Sparse-text pass with word boxes (CLI engine only; other engines
-    /// report no words).
+    /// Word boxes for a whole image in page segmentation mode `psm` (see
+    /// `CliOcr::recognize_words`). Both engines report them; the in-process
+    /// engine through its TSV output.
     pub async fn recognize_words(
         &mut self,
         png: &[u8],
@@ -314,9 +323,11 @@ impl CliOcr {
         Ok(words_to_line(&parse_tsv(&tsv)))
     }
 
-    /// Sparse-text pass over a whole image (`--psm 11`, TSV output): every
-    /// word tesseract finds, with its bounding box in image pixels. Used by
-    /// `locate` to find the LiveSplit pane; `whitelist` restricts glyphs.
+    /// Word-box pass over a whole image (TSV output) in page segmentation
+    /// mode `psm`: 11 (sparse text anywhere) for `locate` and `measure_pane`,
+    /// 6 (one uniform block of lines) for the splits column. Every word
+    /// tesseract finds, with its bounding box in image pixels; `whitelist`
+    /// restricts glyphs.
     pub async fn recognize_words(
         &self,
         png: &[u8],

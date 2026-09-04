@@ -291,20 +291,20 @@
 
   <section class="card" style="margin-top:14px" id="hours-card">
     <h2>When the grind happens</h2>
-    <p class="subnote" id="hours-sub">Attempts by hour of day across every tracked broadcast; finishes highlighted.</p>
+    <p class="subnote" id="hours-sub">Attempts by half-hour of the day, on the streamer's clock, across every tracked broadcast; finishes highlighted.</p>
     <div class="legend">
       <span><span class="key" style="background:var(--series)"></span>Finished</span>
       <span><span class="key" style="background:var(--deemph);opacity:.55"></span>Reset</span>
     </div>
-    <svg id="hours" width="100%" height="120" role="img" aria-label="Attempts by hour of day"></svg>
+    <svg id="hours" width="100%" height="120" role="img" aria-label="Attempts by half-hour of the day, streamer's local time"></svg>
   </section>
 
   <section class="card" style="margin-top:14px">
     <h2>Every finish</h2>
-    <p class="subnote">Finished runs by attempt number — faster is higher. The gold line tracks the best tracked run as it falls.
+    <p class="subnote">Every finished run in order, oldest first — faster is higher. Hover a dot for its date and, where known, its run number. The gold line tracks the best tracked run as it falls.
       <span id="scatter-sub" style="display:block"></span></p>
     <div class="chartbox">
-      <svg id="scatter" width="100%" height="240" role="img" aria-label="Finish times by attempt number"></svg>
+      <svg id="scatter" width="100%" height="240" role="img" aria-label="Finish times, oldest first"></svg>
       <div class="tooltip" id="tip"></div>
     </div>
   </section>
@@ -312,13 +312,13 @@
   <div class="grid2">
     <section class="card">
       <h2>Gold splits</h2>
-      <p class="subnote">Best segment ever recorded for each act.</p>
+      <p class="subnote">Fastest tracked segment per act. Segments far under the act's usual time are treated as misread splits and skipped; the final act's gold comes only from finished runs.</p>
       <table id="golds-table"></table>
     </section>
 
     <section class="card">
       <h2>Sessions</h2>
-      <p class="subnote">Every tracked broadcast.</p>
+      <p class="subnote">The 14 most recent broadcasts; sessions that ended with no attempts are hidden.</p>
       <table id="sessions-table"></table>
     </section>
   </div>
@@ -326,7 +326,7 @@
   <footer>
     <span class="px">NGTWITCHTIMER</span>
     <span id="foot-gen"></span>
-    <span>Times read from the on-screen LiveSplit timer at 1 fps · all times are the runner's own</span>
+    <span>Times read off the on-screen LiveSplit timer, frame by frame · all times are the runner's own</span>
   </footer>
 </div>
 

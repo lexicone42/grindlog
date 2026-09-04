@@ -11,6 +11,8 @@
 #  102-109s  back to zero                    (run 2 resets)
 #
 # Expected detection: Started, Finished(50.0s), Started, Reset(zeroed).
+# The 50s finish needs [detection] min_final_ms below 50000, as in the config
+# below; at the default 60000 run 1 ends as Reset(tooshort) instead.
 #
 # Test config for this video:
 #   [stream]
@@ -24,6 +26,12 @@
 #   crop_y = 30
 #   crop_w = 460
 #   crop_h = 100
+#   [detection]
+#   min_final_ms = 40000
+#   [database]
+#   path = "test-run.db"        # default is ngtimer.db; keep the test out of a real one
+#   [debug]
+#   obs_log = "test-run.jsonl"  # one JSON line per frame; grep '"events":\[' for decisions
 set -euo pipefail
 
 out="${1:-test-run.mp4}"

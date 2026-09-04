@@ -50,9 +50,10 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Find the LiveSplit pane in a frame: prints crop rectangles as a
-    /// ready-to-paste [[layouts]] entry and how far it sits from each
-    /// configured layout; saves calibration/locate.png with the boxes drawn
+    /// Find the LiveSplit pane in a frame (needs the tesseract CLI): prints
+    /// crop rectangles as a ready-to-paste [[layouts]] entry and how far it
+    /// sits from each configured layout; saves calibration/locate.png with
+    /// the boxes drawn
     Locate {
         /// Analyze this PNG/JPEG instead of grabbing a frame from the source
         #[arg(long)]
@@ -62,7 +63,9 @@ enum Command {
         frames: u32,
     },
     /// The purpose-built timer digit reader: harvest templates from replay
-    /// corpora (NG_DUMP_TIMER=all) and score them
+    /// corpora (NG_DUMP_TIMER=all) and score them. Crops are segmented at
+    /// the --config's [timer] threshold, so pass the config the corpus was
+    /// dumped with
     Glyphs {
         #[command(subcommand)]
         action: GlyphsAction,
@@ -85,23 +88,30 @@ enum GlyphsAction {
     },
     /// Show how crops segment and how each glyph scores
     Boxes {
+        /// Timer crops (PNG) to segment and score
         #[arg(required = true)]
         files: Vec<std::path::PathBuf>,
+        /// Template file
         #[arg(long, default_value = "assets/glyphs.json")]
         templates: std::path::PathBuf,
     },
     /// Read every confirmed frame of the corpora and compare with its label
     Test {
+        /// Corpus directories, as for `train`
         #[arg(required = true)]
         corpus: Vec<std::path::PathBuf>,
+        /// Template file
         #[arg(long, default_value = "assets/glyphs.json")]
         templates: std::path::PathBuf,
         /// Save the crops the reader got wrong here, named by label and reading
         #[arg(long)]
         dump_wrong: Option<std::path::PathBuf>,
-        /// Try other decision floors than the reader's own
+        /// Try other decision floors than the reader's own (0.55 score,
+        /// 0.12 margin); only takes effect together with --min-margin
         #[arg(long)]
         min_score: Option<f32>,
+        /// Lowest margin over the runner-up class; only takes effect together
+        /// with --min-score
         #[arg(long)]
         min_margin: Option<f32>,
     },

@@ -9,6 +9,14 @@
 #
 # Attempt numbers are renumbered in chronological order. Settings (game,
 # category, ls_sob_ms, ...) are copied from the live db.
+#
+# Day to day the backfill lands through import-vod.sh / import-when-done.sh;
+# this is the full rebuild. Unlike import-vod.sh it does not set each finished
+# run's final-act split to its finish time (or drop the final-act row on
+# unfinished runs), so a rebuild that includes per-VOD databases written by
+# an older binary can reintroduce impossible golds and a wrong Sum of Best.
+# Re-run those VODs, or apply import-vod.sh's UPDATE/DELETE to the merged db
+# before --swap.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 LIVE=ninja-gaiden.db

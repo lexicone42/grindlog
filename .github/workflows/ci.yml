@@ -24,8 +24,13 @@ jobs:
         run: cargo clippy --release --all-targets -- -D warnings
       - name: build
         run: cargo build --release
-      # Unit tests exercise parsing, the state machine, geometry and the
-      # splits tracker; none of them need tesseract or ffmpeg.
+      # Unit tests exercise parsing, the state machine, pane geometry, the
+      # splits and attempt-counter trackers, the glyph reader against the
+      # real crops in tests/fixtures/glyph (with assets/glyphs.json), the
+      # SQLite queries and both checked-in configs; none of them need
+      # tesseract or ffmpeg. The in-process OCR engine (--features
+      # leptess-ocr, which scripts/build-release.sh ships) needs
+      # libtesseract/libleptonica and is not compiled here.
       - name: test
         run: cargo test --release
       - name: scripts parse

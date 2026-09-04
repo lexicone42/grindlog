@@ -1,8 +1,15 @@
 # Live shadow-mode config: watches twitch.tv/arcus, logs into the shared
-# ninja-gaiden.db. Polls every 2 minutes while he's offline and starts
-# capturing automatically when he goes live.
+# ninja-gaiden.db. Polls while he's offline (cadence under [stream]) and
+# starts capturing automatically when he goes live with "ninja gaiden" in
+# the title.
 #
 #   RUST_LOG=info ./target/release/ngtwitchtimer --config live.toml run
+#
+# That is a one-off run. The deployment runs the same command under
+# scripts/run-live.sh (restart on exit, log rotation, one OpenMP thread),
+# detached in tmux; only one bot should run against ninja-gaiden.db:
+#   tmux new-session -d -s ngtimer ./scripts/run-live.sh
+# New builds go out with scripts/rollout.sh, which expects that supervisor.
 #
 # Watch it work:   tail -f obs-live.jsonl
 # Check the data:  ./target/release/ngtwitchtimer --config live.toml report
@@ -20,8 +27,10 @@ fps = 2
 # Only capture his Ninja Gaiden days — Arcathlon and other streams are
 # skipped (the bot keeps polling in case he switches mid-day).
 title_filter = "ninja gaiden"
-# He goes live ~09:59 local. Poll every minute from 09:40 until 20:30;
-# outside that window check only every 30 minutes (graceful on Twitch).
+# He goes live ~09:59 local. Poll every minute from 09:40 (the bot starts
+# frequent polling ten minutes before the window start) until 20:30; outside
+# that window check only every 30 minutes, cut short so a quiet sleep never
+# runs past 09:40 (graceful on Twitch).
 active_hours = ["09:50", "20:30"]
 offline_poll_secs = 60
 quiet_poll_secs = 1800
@@ -60,6 +69,13 @@ crop_h = 288
 # Nobody finishes NG Any% under 11:00 (WR 11:32): a "finish" below that is a
 # frozen timer (stream stall, pause), not a run.
 min_final_ms = 660000
+# The counters below are frames, and this config analyses 2 fps: the default
+# 180 unreadable frames before a run is written off as "disappeared" would be
+# 90 s, and a mid-roll ad break runs longer than that. 360 keeps the three
+# minutes the default was designed for. The confirmation counts are left at
+# their defaults (they are met in half the wall time, which is fine: a
+# frozen or advancing timer is just as certain after 2.5 s of frames).
+illegible_reset_count = 360
 
 [game]
 name = "Ninja Gaiden (NES)"
@@ -67,12 +83,20 @@ category = "Any%"
 # The tracked best only spans what the bot has seen; his LiveSplit comparison
 # is seasonal, so call it what it is.
 record_label = "season best"
-# His actual season best predates tracking — read off the LiveSplit
-# comparison column (his comparison IS seasonal bests; he resets his splits
-# file every season, roughly 3-4 months). UPDATE THIS when a new season
-# starts. NEW-record announcements must beat this.
+# His season best when tracking started, read off the LiveSplit comparison
+# column (his comparison IS seasonal bests; he resets his splits file every
+# season, roughly 3-4 months). Only a fallback: once the bot has read the
+# season-best row off his layout it stores that value (settings key
+# ls_season_best_ms), adopts it again at every start and follows the row
+# when it changes, so a season rollover needs no edit here. NEW-record
+# announcements must beat the current season best: the layout's once read,
+# this value until then.
 baseline_best = "11:35.1"
-# Reference times shown on the records site / finish chart.
+# Reference times for the records site / finish chart. A row the bot has
+# read off his layout (settings ls_pb_ms / ls_wr_ms) replaces the entry with
+# the same label, and build-site.sh's speedrun.com lookup only fills labels
+# missing from this list, so the WR below is what the site shows until it is
+# edited here or his layout shows a WR row.
 references = [
   { label = "WR", time = "11:32.183" },
   # From speedrun.com (user Arcus, run date 2025-11-13, world rank 2)
@@ -117,7 +141,13 @@ crop_w = 120
 crop_h = 34
 
 [lifetime_sob]
-# LiveSplit "Sum of Best Segments" row (seasonal — his splits reset each season).
+# LiveSplit "Sum of Best Segments" row (seasonal: his splits reset each
+# season). This rectangle also sets how far below the timer the pane is
+# decoded: the bot OCRs the union of the configured rectangles plus a 48px
+# drift margin and reads every labelled time it finds under the timer there
+# (Sum of Best, the year-labelled season best, PB, WR) at each layout lock.
+# The season best and PB have been read this way; no WR row ever has. If his
+# layout shows one below this row, extend crop_h to take it in.
 enabled = true
 crop_x = 540
 crop_y = 912

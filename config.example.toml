@@ -1,6 +1,9 @@
 # ngtwitchtimer configuration. Copy to config.toml and edit.
-# Every field except stream.channel has a sensible default; the commented
-# values below show the defaults.
+# Every field except stream.channel has a default; the commented values
+# below are those defaults. Unknown keys are rejected, so a misspelled key
+# fails at startup instead of silently falling back to the default. Crop
+# rectangles, stream.fps, ocr.engine and the [game] times are checked when
+# the file loads.
 
 [stream]
 channel = "somestreamer"        # twitch.tv/<channel>  (REQUIRED)
@@ -17,7 +20,13 @@ channel = "somestreamer"        # twitch.tv/<channel>  (REQUIRED)
 # session_tag = ""              # tag every session/run, e.g. "arcathlon"
 # title_filter = ""             # only capture when the live title contains this
                                 #   (case-insensitive), e.g. "ninja gaiden"
-# fps = 1                       # frames per second fed to OCR
+# fps = 1                       # frames analyzed per second. The reference
+                                #   deployment runs 2, so attempts that die within
+                                #   a few seconds still reach start_confirmations.
+                                #   [detection] counts and dark_frames_search are
+                                #   per frame, so at 2 fps they span half as many
+                                #   seconds; only the drift re-anchor scales with
+                                #   fps on its own
 # canvas_w = 1920               # stream is scaled to this canvas before
 # canvas_h = 1080               #   cropping, so crop coords are stable
 # offline_poll_secs = 120       # re-check cadence while the channel is offline
@@ -25,32 +34,70 @@ channel = "somestreamer"        # twitch.tv/<channel>  (REQUIRED)
 # quiet_poll_secs = 1800        #   inside the window, at quiet_poll_secs outside
 # restart_delay_secs = 5        # backoff after a mid-stream pipeline death
 # frame_timeout_secs = 30       # no frame for this long -> restart pipeline
-# streamlink_extra_args = []    # passed through when source = "streamlink"
+# streamlink_extra_args = ["--twitch-disable-ads"]  # extra options for the
+                                #   streamlink source, inserted before the
+                                #   twitch.tv URL; [] passes none
 
 [timer]
-# Crop rectangle around the LiveSplit timer, in canvas coordinates.
-# Workflow: `ngtwitchtimer calibrate --full-frame` saves calibration/full.png;
-# find x/y/w/h there, set them here, then `ngtwitchtimer calibrate` and tune
+# Crop rectangle around the LiveSplit timer, in canvas coordinates (defaults
+# 0, 0, 320x120; width and height must be nonzero and the rectangle must fit
+# the canvas). `ngtwitchtimer locate` finds the pane in a frame (or in
+# `--image frame.png`) and prints the rectangles as a [[layouts]] entry; copy
+# its timer values here (calibration/locate.png shows the boxes). By hand:
+# `ngtwitchtimer calibrate --full-frame` saves calibration/full.png; find
+# x/y/w/h there, set them here, then `ngtwitchtimer calibrate` and tune
 # threshold/invert until the printed OCR readings parse cleanly.
 crop_x = 1550
 crop_y = 40
 crop_w = 330
 crop_h = 90
-# upscale = 4                   # 3-4x upscaling helps tesseract a lot
-# threshold = 140               # gray cutoff 0-255 for black/white
+# upscale = 4                   # 1-8; 3-4x helps tesseract a lot. Also used for
+                                #   the splits/counter crops; the glyph reader
+                                #   works on the raw crop and ignores it
+# threshold = 140               # gray cutoff 0-255 for black/white. The glyph
+                                #   reader segments digits at this level too, so
+                                #   keep it where its templates were trained (the
+                                #   bot warns at startup when the template file
+                                #   records a different one; assets/glyphs.json
+                                #   was trained at 60)
 # auto_threshold = false        # pick the cutoff per frame from the crop's own
-                                #   histogram (Otsu) — measured worse here
-# retry_thresholds = []         # e.g. [75, 45]: when a read fails to parse,
-                                #   re-read the same crop at these cutoffs
-# reader = "tesseract"          # or "glyph": match each digit against templates
-                                #   harvested from the streamer's own footage
-                                #   (`ngtwitchtimer glyphs train <corpus>...`);
-                                #   tesseract remains the fallback
-# glyph_templates = "assets/glyphs.json"
-# invert = true                 # true for light digits on dark background
+                                #   histogram (Otsu, clamped to 30-200; falls back
+                                #   to `threshold` on a flat crop). Tesseract's
+                                #   timer reads only: not the glyph reader, the
+                                #   retry_thresholds passes or the splits/counter
+                                #   crops. Measured worse here than a fixed cutoff
+# retry_thresholds = []         # e.g. [75, 45]: when a timer read fails to parse,
+                                #   re-threshold the same crop at each cutoff in
+                                #   turn and read it with tesseract (also after the
+                                #   glyph reader declines); first parse wins. Extra
+                                #   OCR only on frames that failed; useful when the
+                                #   streamer's themes want different cutoffs
+# reader = "tesseract"          # or "glyph": a purpose-built reader that matches
+                                #   each digit against templates harvested from
+                                #   the streamer's own footage; frames it declines
+                                #   go to tesseract, which also always reads the
+                                #   splits/counter crops. Light digits on a dark
+                                #   background only: on a dark-on-light timer it
+                                #   declines every frame. Retraining: README,
+                                #   "Reading the timer with templates"
+# glyph_templates = "assets/glyphs.json"  # templates for the glyph reader (from
+                                #   `glyphs train`; the shipped file is trained on
+                                #   the reference channel's two themes). A relative
+                                #   path resolves against the working directory,
+                                #   not this file, and with the glyph reader the
+                                #   bot refuses to start without it
+# invert = true                 # true for light digits on dark background.
+                                #   Tesseract path only; the glyph reader always
+                                #   takes bright pixels as ink (see reader)
 
 [ocr]
-# engine = "auto"               # "auto" | "cli" | "leptess"
+# engine = "auto"               # "auto": the in-process engine if the binary was
+                                #   built with it (cargo feature leptess-ocr, as
+                                #   scripts/build-release.sh does), falling back
+                                #   to the tesseract CLI with a warning if it
+                                #   fails to start; otherwise the CLI. "cli" or
+                                #   "leptess" forces one ("leptess" errors when
+                                #   not compiled in)
 # lang = "eng"
 # tesseract_cmd = "tesseract"   # binary used by the cli engine
 # tessdata_path = ""            # leptess only; empty = system default
@@ -59,7 +106,8 @@ crop_h = 90
 # start_epsilon_ms = 500        # timer must exceed this to count as started
 # start_confirmations = 3       # advancing readings to declare RUNNING
 # min_advance_ms = 100          # a reading must move at least this much to
-# advance_slack_ms = 2000       #   count as advancing; and at most elapsed+slack
+# advance_slack_ms = 2000       #   count as advancing, and by the wall-clock
+                                #   elapsed time give or take this slack
 # stall_confirmations = 5       # frozen readings to declare FINISHED
 # stall_tolerance_ms = 150
 # reset_epsilon_ms = 1500       # readings below this count as "at zero"
@@ -69,38 +117,76 @@ crop_h = 90
 # max_jump_ms = 5000            # larger deviations are misreads, skipped
 # min_final_ms = 60000          # a frozen timer below this is a stall, not a
                                 #   finish; set near the category's fastest
-                                #   plausible time (e.g. just under the WR)
+                                #   plausible time (e.g. just under the WR). Also
+                                #   bounds the reference times believed off the
+                                #   layout: between this and three times it (a
+                                #   Sum of Best down to half of it)
 # prestart_offset_ms = 5000     # LiveSplit's pre-start offset as OCR reads it
-                                #   ("-5.00" -> 5000): mid-run it means "reset"
+                                #   ("-5.00" -> 5000): once a run is 5 s past it,
+                                #   a frozen reading at this value is the reset
+                                #   screen and counts towards reset_confirmations.
+                                #   0 disables
 # desync_confirmations = 3      # consistent "misreads" before re-syncing
-# desync_restart_max_ms = 90000 # a desync onto a value below this is a missed
-                                #   reset (new run); above it, the same run on
-                                #   a slipped clock (stream rewind)
+# desync_restart_max_ms = 90000 # a desync onto a value below this, or below half
+                                #   of where the run was, is a missed reset: the
+                                #   old run closes and a new one starts. Otherwise
+                                #   it is the same run on a slipped clock (stream
+                                #   rewind, dropout), re-anchored silently
 # smoothing_window = 5          # readings in the smoothed current time
 
-[splits]                        # optional: OCR LiveSplit's cumulative-time column
+[splits]                        # optional: OCR LiveSplit's cumulative-time column.
+                                # Requires [game] acts, one per panel row (the
+                                # column is sliced into that many equal rows). A
+                                # split is believed only while the timer was read
+                                # in the last 5 s, and the final act's split is
+                                # always the finish time, never the column
 # enabled = false
-# crop_x = 0                    # canvas coords, like [timer]
+# crop_x = 0                    # canvas coords, like [timer]; upscale is [timer]'s
 # crop_y = 0
-# crop_w = 0
-# crop_h = 0
+# crop_w = 135
+# crop_h = 288
 # threshold = 150               # its own threshold: the current row is highlighted
 # invert = true
 # read_every_secs = 5
 # tolerance_ms = 50             # change vs the comparison column that counts as a split
 # confirmations = 2
 
-[attempts_counter]              # optional: LiveSplit's attempt counter (the run number)
+[attempts_counter]              # optional: LiveSplit's attempt counter (the run
+                                # number, stored on the run as its identity). Read
+                                # every 2 s while the current run has no number yet
+                                # and the timer is being read cleanly; src/counter.rs
+                                # decides which value to believe (a jump far ahead
+                                # is refused, two runs in a row reading lower revert
+                                # a misread and clear it from the DB, a counter
+                                # restart is followed)
 # enabled = false
-# crop_x = 0 ... crop_h = 0     # canvas coords; threshold / invert as for [splits]
+# crop_x = 0                    # canvas coords, like [timer]
+# crop_y = 0
+# crop_w = 120
+# crop_h = 34
+# threshold = 150               # threshold / invert as for [splits]
+# invert = true
 
-[lifetime_sob]                  # optional: LiveSplit's sum-of-best row
+[lifetime_sob]                  # optional: LiveSplit's "Sum of Best Segments" row
 # enabled = false
-# crop_x = 0 ... crop_h = 0     # canvas coords; threshold / invert as for [splits]
+# crop_x = 0                    # canvas coords, like [timer]
+# crop_y = 0
+# crop_w = 120
+# crop_h = 34
+# threshold = 150               # accepted but unused: the fallback read of this
+# invert = true                 #   rectangle uses [attempts_counter]'s
 # Set this to the rows UNDER the timer even if you only care about one of
 # them: only what the configured rectangles span is decoded, and the bot
 # reads every labelled reference time it finds there (Sum of Best, the
-# season best the streamer labels with a year, PB, WR) at each layout lock.
+# season best the streamer labels with a year, PB, WR) at each layout lock
+# when [splits] is enabled, and once a minute while locked either way. A
+# value is kept once it has been read twice (three times to replace one
+# already stored) and fits the order WR <= PB <= season best, with the Sum
+# of Best below them; it is stored in the database (settings ls_sob_ms,
+# ls_season_best_ms, ls_pb_ms, ls_wr_ms). The season best replaces
+# game.baseline_best as the record to beat and is re-adopted on restart.
+# This rectangle is read on its own only when none of those rows could be
+# labelled.
 
 # With [splits] enabled, the bot also measures the pane at every layout lock
 # (row pitch, cumulative column, counter, Sum of Best row) and uses those
@@ -108,9 +194,14 @@ crop_h = 90
 # has to be close.
 
 # Alternate OBS scenes: each [[layouts]] entry gives the same rectangles at
-# their positions in that scene (omitted ones inherit the base sections
-# above). The bot probes every layout's timer until one parses consistently,
-# locks to it, and probes again if the timer goes dark.
+# their positions in that scene. `timer` is required; omitted regions inherit
+# the base sections above, and a region left disabled there stays off in
+# every layout even if the entry gives it a rectangle. `ngtwitchtimer locate`
+# prints an entry ready to paste. The bot probes every layout's timer (the
+# base sections are layout "default" in the log) until one parses
+# consistently, locks to it, and probes again when the timer goes dark for
+# dark_frames_search frames or the lock reads poorly (under 40% of 60 frames
+# parsed, or ten reads in a row with digits against the crop edge).
 # [[layouts]]
 # name = "alt-scene"
 # timer = { crop_x = 265, crop_y = 765, crop_w = 360, crop_h = 100 }
@@ -119,17 +210,43 @@ crop_h = 90
 # lifetime_sob = { crop_x = 505, crop_y = 897, crop_w = 110, crop_h = 34 }
 
 [layout_search]                 # tolerance for the streamer nudging LiveSplit
-# drift_px = 36                 # search this far around each layout (0 = off)
+# drift_px = 36                 # probe offsets up to this far around each layout
+                                #   (0 = off). Also the re-anchor: while locked,
+                                #   digits sitting off their expected place for
+                                #   eight seconds of agreeing reads move every crop
+                                #   by that much; a move beyond drift_px is logged
+                                #   once and the crops stay put. 0 turns that off too
 # step_px = 12                  # offset grid step
 # dark_frames_search = 30       # unreadable frames before probing resumes
+                                #   (frames, not seconds: 15 s at fps = 2)
 
 [game]
 name = "Super Mario Bros."     # overridden by !setgame (persisted in the DB)
 category = "Any%"
-# acts = [ { name = "1-1", end_ms = 40000 }, { name = "8-4" } ]  # split points
+# acts = [ { name = "1-1", end_ms = 40000 }, { name = "8-4" } ]
+                                # acts with CUMULATIVE end times (ms): they bucket
+                                # resets by act (!deaths, death chart), name one
+                                # [splits] panel row each (required when splits
+                                # are enabled) and key per-act golds and !pace.
+                                # Pad end_ms a little above typical split times;
+                                # the final act has no end_ms
 # record_label = "PB"           # what the tracked best is called
-# baseline_best = "4:55.6"      # best from before tracking (a record must beat it)
+# baseline_best = "4:55.6"      # best from before tracking (a record must beat
+                                #   it). Only a starting value: once the layout
+                                #   shows a season best (a row labelled with the
+                                #   year, e.g. "2026: 11:35.1") the bot adopts
+                                #   that, stores it (setting ls_season_best_ms)
+                                #   and keeps it across restarts; see [lifetime_sob]
 # references = [ { label = "WR", time = "4:54.6" } ]
+# require_title_match = false   # only record runs while the layout's own title
+                                #   row names `name` (fuzzy match; two reads in a
+                                #   row naming another game suspend recording, one
+                                #   matching read resumes it; an unreadable title
+                                #   changes nothing). Lets a marathon broadcast be
+                                #   captured with just this game's segments.
+                                #   Compares against `name` as written here, not a
+                                #   !setgame override. Off by default: a misread
+                                #   title would otherwise stop recording
 
 [database]
 # path = "ngtimer.db"
@@ -147,6 +264,11 @@ category = "Any%"
 # mods = []                     # extra logins allowed to use mod commands
 
 [debug]
-# obs_log = "observations.jsonl"  # one JSON line per analyzed frame:
-                                  # ocr text, parsed ms, phase, events.
-                                  # Great with source = "vod"/"file".
+# obs_log = "observations.jsonl"  # appended, not truncated: one JSON line per
+                                  # analyzed frame with ocr text, parsed ms, phase,
+                                  # events, locked layout and offset, which reader
+                                  # read it (glyph/tess), the retry threshold if
+                                  # any, and split values when read. Great with
+                                  # source = "vod"/"file". With NG_DUMP_TIMER set,
+                                  # timer crops go to calibration/ beside this file
+                                  # (the corpus for `glyphs train`; see README)

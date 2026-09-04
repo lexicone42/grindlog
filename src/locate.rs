@@ -1,6 +1,7 @@
 //! `locate`: find the LiveSplit pane in a frame instead of measuring crops by
-//! hand. The whole canvas-scaled frame goes through tesseract in sparse-text
-//! mode (word boxes); the time-shaped words are the pane — the biggest one is
+//! hand. The whole canvas-scaled frame goes through the tesseract CLI
+//! (`ocr.tesseract_cmd`, whatever `ocr.engine` says) in sparse-text mode
+//! (word boxes); the time-shaped words are the pane — the biggest one is
 //! the timer, the small ones above it are the split rows, a bare integer above
 //! those is the attempt counter, and labelled rows below the timer hold the
 //! sum of best. Prints the rectangles as a `[[layouts]]` entry, how far the

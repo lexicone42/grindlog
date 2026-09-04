@@ -6,9 +6,12 @@
 /// format produces systematically: the hundredths are drawn in a smaller
 /// font, and at stream resolution their decimal point is a couple of pixels
 /// that thresholding erases. "4.76" then reads as "476", "45.71" as "4571",
-/// "0.45" as "45", and "3:06.12" as "3:06 12". Every run starts in that
-/// sub-ten-second range, so without this repair the first seconds of every
-/// attempt are illegible and a quick reset is never seen at all.
+/// and "3:06.12" as "3:06 12". Every run starts in that sub-ten-second
+/// range, so without this repair the first seconds of every attempt are
+/// illegible and a quick reset is never seen at all. Two bare digits are NOT
+/// repaired: they are the hundredths alone, which is also what a mid-run
+/// "1:45.xx" degrades to when its big digits are lost, and reading them as
+/// 0.45 twice in a row would reset a running run.
 ///
 /// Only the timer uses this; split rows and reference times stay strict. The
 /// tracker's own consistency checks (a reading must advance with the wall

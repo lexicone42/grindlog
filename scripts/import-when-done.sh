@@ -7,7 +7,14 @@
 #   nohup ./scripts/import-when-done.sh <vod_id>... > logs/import-when-done.log 2>&1 &
 #
 # Imported ids are remembered in backfill-db/imported.txt, so it can be
-# restarted freely.
+# restarted freely. But "complete" means any per-VOD database with a closed
+# session and no open one, whatever its age, and backfill-vods.sh only
+# deletes a VOD's old database when its chain reaches that VOD. So before
+# re-running VODs already imported, strip their ids from imported.txt AND
+# delete their backfill-db/vod-<id>.db*; otherwise the stale pass is imported
+# and marked before the new chain gets there. A VOD whose analysis failed or
+# was killed leaves its session open, never counts as complete, and keeps
+# this loop waiting until it is re-run or the script is stopped.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ids=("$@")

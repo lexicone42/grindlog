@@ -1,6 +1,10 @@
 //! Offline review of collected data: PBs, today's stats, recent runs.
-//! `--json` emits a machine-readable document (handy for publishing the
-//! records to a website later).
+//! `--json` emits the document the records site is built from
+//! (scripts/build-site.sh): every run and split, per-day stats, sessions
+//! with capture health, finishes, golds, and the reference times. Values
+//! read off the layout win over configured ones: its WR and lifetime PB
+//! replace the references of the same label, and its season best replaces
+//! `baseline_best_ms`.
 
 use anyhow::Result;
 

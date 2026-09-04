@@ -226,7 +226,8 @@ pub struct SessionHealth {
 }
 
 impl SessionHealth {
-    /// Record a layout event (lock, switch, drift, geometry); capped so a
+    /// Record a session event (layout lock/switch/relock/drift/geometry,
+    /// title, suspended/resumed, reference, counter); capped so a
     /// pathological day can't grow the row without bound.
     pub fn event(&mut self, at_ms: i64, kind: &str, detail: impl Into<String>) {
         if self.events.len() < 400 {
@@ -629,8 +630,13 @@ pub struct Gold {
     pub set_at_ms: i64,
 }
 
-/// Best (gold) segment per act across all recorded runs of a game/category,
-/// with the date each gold was set.
+/// Best plausible (gold) segment per act across all recorded runs of a
+/// game/category, with the date each gold was set. A segment counts only if
+/// it is at least 85% of the act's median segment (a real gold sits a few
+/// percent under the median; a misread column is 20-90% under), and the
+/// final act's gold comes only from runs that finished, since on a reset run
+/// that column can only hold a misread of the comparison row. `samples` is
+/// the number of recorded segments for the act, before this filter.
 pub async fn golds(pool: &SqlitePool, game: &str, category: &str) -> Result<Vec<Gold>> {
     let rows = sqlx::query(
         /* A gold is the fastest segment that is plausible. Plausible means: not
@@ -673,7 +679,10 @@ pub async fn golds(pool: &SqlitePool, game: &str, category: &str) -> Result<Vec<
         .collect())
 }
 
-/// All runs for a game/category in insertion order, trimmed for stats.
+/// All runs for a game/category in chronological order (started_at_ms, then
+/// id), trimmed for stats. Not insertion order: imports and backfills add
+/// older days after newer ones, and PB progression, streaks and survival
+/// only make sense in time order.
 pub async fn runs_brief(
     pool: &SqlitePool,
     game: &str,

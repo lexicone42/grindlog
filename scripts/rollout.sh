@@ -3,13 +3,21 @@
 #   1. refuse unless on main with a clean tree (or --allow-dirty),
 #   2. build the release binary (in-process OCR when available) and run the
 #      test suite,
-#   3. smoke-replay one minute of a recent VOD and refuse if the timer does
-#      not read at least 90%,
+#   3. smoke-replay two minutes of a recent VOD (from 40 minutes in) and
+#      refuse if the timer does not read at least 80% of frames (the gate
+#      asks only whether the binary reads the timer at all),
 #   4. wait until the live bot is idle (no run in progress) or offline,
 #   5. stop it — the run-live.sh supervisor restarts it on the new binary —
 #      and confirm the new process comes up tracking.
 #
 #   scripts/rollout.sh [--allow-dirty] [--smoke-vod <id>]
+#
+# --smoke-vod defaults to the most recent VOD session in ninja-gaiden.db; with
+# none the smoke is skipped. Without a running bot the script stops after the
+# build and tests (exit 0); a bot not started by run-live.sh is refused
+# (exit 1), since nothing would restart it. Idle or offline is judged from
+# obs-live.jsonl (offline = no new frame for a minute) and waited for up to an
+# hour; the restart is confirmed from logs/live.log.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 allow_dirty=0; smoke_vod=""

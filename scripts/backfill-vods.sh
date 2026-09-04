@@ -5,12 +5,25 @@
 #
 #   ./scripts/backfill-vods.sh <vod_id> [vod_id...]
 #
-# Afterwards: import-when-done.sh / import-vod.sh land each day in the live
-# database, or merge-backfill.sh rebuilds everything chronologically.
-# Broadcast start times are fetched from Twitch automatically, so runs land
-# on the original timeline. Workers run under `nice` so the live bot keeps
-# priority. With the glyph reader the timer costs ~2 ms a frame; the splits
-# and counter crops still go through tesseract.
+# Afterwards: import-when-done.sh (detached; imports each VOD as its chain
+# finishes and redeploys the site) or import-vod.sh (one VOD) land each day
+# in the live database. merge-backfill.sh still rebuilds everything
+# chronologically, but it does not apply import-vod.sh's final-act split
+# normalisation, so only feed it per-VOD databases written by a current
+# binary. Broadcast start times are fetched from Twitch automatically, so
+# runs land on the original timeline. Workers run under `nice` so the live
+# bot keeps priority. With the glyph reader the timer costs ~2 ms a frame;
+# tesseract still reads the frames it declines, the splits and counter
+# crops, and the pane's title and reference rows at each lock and every 60 s.
+#
+# Assumes the release binary at target/release/ngtwitchtimer
+# (scripts/build-release.sh), the AppImage tessdata under
+# ~/.local/opt/tesseract-appimage and the templates in assets/glyphs.json;
+# edit the generated config below for a different install. Per VOD it writes
+# backfill-db/vod-<id>.db and backfill-logs/obs-<id>.jsonl, replacing an
+# earlier pass over the same VOD. A VOD whose analysis fails is reported and
+# the chain moves on; its session is left open, so import-vod.sh and
+# import-when-done.sh skip it until it is re-run.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p backfill-logs backfill-db
@@ -29,7 +42,10 @@ vod_id = "$id"
 # against 1080p on the same footage) at ~10x less decode work than 1080p60.
 quality = "480p30"
 # Two reads a second: catches attempts that die within three seconds and the
-# run number on far more short ones; halves backfill speed (still ~6x realtime).
+# run number on far more short ones; halves backfill speed. A chain still runs
+# at roughly 5-10x realtime with the glyph reader (about 15x while locked on
+# the timer; slower over stretches with no timer on screen, or with other
+# chains and the live bot sharing the box).
 fps = 2
 
 [ocr]

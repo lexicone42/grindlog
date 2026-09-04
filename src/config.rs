@@ -34,21 +34,34 @@ pub struct Config {
     pub splits: SplitsCfg,
     #[serde(default)]
     pub attempts_counter: CounterCfg,
-    /// LiveSplit's "Sum of Best Segments" row (seasonal, given his splits-file practice).
+    /// The reference rows under the timer. Set the rectangle to span them
+    /// all, even if only one matters: only what the configured rectangles
+    /// cover is decoded, and the pane pass (once a minute while a layout is
+    /// locked) reads every labelled reference time it finds there (Sum of
+    /// Best, the season best labelled with a year, PB, WR). Only when it
+    /// labels nothing is this crop OCR'd on its own as LiveSplit's "Sum of
+    /// Best Segments" row (seasonal, given his splits-file practice).
     #[serde(default)]
     pub lifetime_sob: CounterCfg,
     /// Alternate on-screen layouts (other OBS scenes). The base sections above
     /// are layout 0; the bot probes every layout's timer until one parses
-    /// consistently, locks to it, and re-probes if the timer goes dark.
+    /// consistently, locks to it, and re-probes if the timer goes dark, parses
+    /// on fewer than 40% of 60 read frames, or reads clipped by the crop edge
+    /// ten frames in a row.
     #[serde(default)]
     pub layouts: Vec<LayoutCfg>,
     #[serde(default)]
     pub layout_search: LayoutSearchCfg,
 }
 
-/// Tolerance for the streamer nudging the LiveSplit window a few pixels:
-/// when the locked timer goes dark, nearby pixel offsets are probed and, if
+/// Tolerance for the streamer nudging the LiveSplit window a few pixels.
+/// When the locked timer goes dark, nearby pixel offsets are probed and, if
 /// one parses consistently, the whole layout is re-anchored at that offset.
+/// While locked, a consistent shift of the digits' ink over eight seconds
+/// (hits spanning at least three different final digits) re-anchors the
+/// layout without dropping the lock, provided every crop stays inside the
+/// decoded union, which `drift_px + step_px` pads. `drift_px = 0` disables
+/// both the offset search and this fine-drift re-anchor.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LayoutSearchCfg {
@@ -96,9 +109,14 @@ pub struct LayoutCfg {
     pub lifetime_sob: Option<Rect>,
 }
 
-/// LiveSplit's lifetime attempt counter (the number in the layout header).
-/// Read once per run and stored on the run row — correlates our per-category
-/// numbering with the runner's own lifetime count.
+/// A crop with threshold/invert settings for a static text row of the
+/// layout: `[attempts_counter]`, and reused for `[lifetime_sob]`.
+///
+/// `[attempts_counter]` is LiveSplit's lifetime attempt counter (the number
+/// in the layout header). It is OCR'd every 2 s while the current run has no
+/// number yet and the timer was accepted within the last 3 s, and stored on
+/// the run row once `counter::CounterTracker` accepts the value — correlates
+/// our per-category numbering with the runner's own lifetime count.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CounterCfg {
@@ -171,9 +189,15 @@ impl Default for SplitsCfg {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DebugCfg {
-    /// Append one JSON line per analyzed frame (OCR text, parsed value,
-    /// phase, events) to this file. Invaluable for tuning detection against
-    /// a VOD; replayable and `tail -f`-able.
+    /// Append one JSON line per analyzed frame to this file: timer text
+    /// (`ocr`, from whichever reader read it), parsed value, phase, events,
+    /// active layout and offset, ink and anchor positions, static flag, the
+    /// retry threshold that rescued the read, which reader read it, and the
+    /// splits when they were read. Invaluable for tuning detection against a
+    /// VOD; replayable and `tail -f`-able. With NG_DUMP_TIMER set, the raw
+    /// timer crop of every 25th frame (every frame with NG_DUMP_TIMER=all) is
+    /// saved beside this file under calibration/timer-<frame>.png; log and
+    /// crops together are a corpus for `glyphs train` and `glyphs test`.
     pub obs_log: Option<String>,
 }
 
@@ -187,7 +211,11 @@ pub struct StreamCfg {
     pub quality: String,
     #[serde(default)]
     pub source: SourceKind,
-    /// Frames per second fed to OCR. Detection defaults assume 1.
+    /// Frames per second fed to the timer reader. The `[detection]` counts
+    /// (start/stall/reset/desync confirmations, illegible_reset_count) are
+    /// consecutive frames, so at 2 fps each covers half the wall-clock time
+    /// it does at 1, which the defaults are tuned for; the drift re-anchor
+    /// rule is in seconds and scales itself. live.toml runs 2.
     #[serde(default = "d_fps")]
     pub fps: u32,
     /// The stream is scaled to this canvas before cropping, so crop
@@ -269,8 +297,9 @@ impl StreamCfg {
     }
 
     pub fn recorded_start_ms(&self) -> Result<Option<i64>> {
-        match &self.recorded_start {
-            None => Ok(None),
+        // Empty means unset, as the example config documents it.
+        match self.recorded_start.as_deref().map(str::trim) {
+            None | Some("") => Ok(None),
             Some(s) => Ok(Some(
                 chrono::DateTime::parse_from_rfc3339(s)
                     .with_context(|| format!("stream.recorded_start {s:?} is not RFC3339"))?
@@ -331,9 +360,13 @@ pub struct TimerCfg {
     #[serde(default)]
     pub auto_threshold: bool,
     /// When a locked timer read does not parse, re-threshold the same crop at
-    /// each of these and read again; the first that parses wins. Costs OCR
-    /// only on frames that already failed. Measured on this stream, the
-    /// themes want different cutoffs (60 vs 75), and this covers both.
+    /// each of these (fixed value, no Otsu) and read again with tesseract,
+    /// whichever reader is configured; the first that parses wins. A rescued
+    /// value is trusted only where it agrees with the running clock (within
+    /// detection.max_jump_ms), so a rescued fragment cannot start or restart
+    /// a run by itself. Costs OCR only on frames that already failed.
+    /// Measured on this stream, the themes want different cutoffs (60 vs
+    /// 75), and this covers both.
     #[serde(default)]
     pub retry_thresholds: Vec<u8>,
     /// How the timer's digits are read: "tesseract" (general OCR), or
@@ -372,7 +405,8 @@ impl Default for TimerCfg {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OcrCfg {
-    /// "auto" (leptess if compiled in, else cli), "cli", or "leptess".
+    /// "auto" (leptess if compiled in and it initializes, e.g. finds its
+    /// tessdata; otherwise cli, with a warning), "cli", or "leptess".
     #[serde(default = "d_engine")]
     pub engine: String,
     #[serde(default = "d_lang")]
@@ -421,6 +455,9 @@ pub struct GameCfg {
     /// The best known time from BEFORE tracking started (e.g. read off the
     /// LiveSplit comparison column). A finish only counts as a NEW record if
     /// it beats this too, so the bot never claims a record it can't back.
+    /// Once the pane pass has read the season best the layout prints under
+    /// the timer (see `lifetime_sob`), that value replaces this one and is
+    /// remembered across restarts, so a season rollover needs no edit here.
     #[serde(default)]
     pub baseline_best: Option<String>,
     /// Only record runs while the layout's own title row names this game.
@@ -744,6 +781,51 @@ mod tests {
         cfg.stream.channel = cfg.stream.channel.trim().to_ascii_lowercase();
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// The two configs in the repository parse: the example everyone copies,
+    /// and the live one the deployed bot reads.
+    #[test]
+    fn repository_configs_parse() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        Config::load(&root.join("config.example.toml")).expect("config.example.toml");
+        Config::load(&root.join("live.toml")).expect("live.toml");
+    }
+
+    /// Every commented-out `# field = value` in the example is a real field
+    /// with a value that parses and validates: with them all switched on, the
+    /// example still loads. Unknown fields are rejected, so a field that was
+    /// renamed or removed fails here rather than in a user's config.
+    #[test]
+    fn example_config_documents_only_real_fields() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(root.join("config.example.toml")).unwrap();
+        let mut on = String::new();
+        for line in text.lines() {
+            // "# key = value   # explanation" -> "key = value"; prose
+            // comments and continuation lines stay comments.
+            let uncommented = line
+                .strip_prefix("# ")
+                .filter(|rest| {
+                    let key = rest.split('=').next().unwrap_or("").trim();
+                    rest.contains(" = ")
+                        && !key.is_empty()
+                        && key
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_' || c == '[' || c == ']')
+                })
+                .map(|rest| rest.split("  #").next().unwrap_or(rest).trim_end());
+            match uncommented {
+                Some(l) => on.push_str(l),
+                None => on.push_str(line),
+            }
+            on.push('\n');
+        }
+        // The commented layout block: its header and rectangles too.
+        let on = on.replace("# [[layouts]]", "[[layouts]]");
+        let cfg = parse(&on).unwrap_or_else(|e| panic!("example with every field on: {e:#}\n{on}"));
+        assert_eq!(cfg.timer.reader, "tesseract");
+        assert_eq!(cfg.layouts.len(), 1);
     }
 
     #[test]
