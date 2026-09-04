@@ -64,6 +64,27 @@ Resources:
         SigningBehavior: always
         SigningProtocol: sigv4
 
+  # The data files under /api/ are meant to be fetched from other origins
+  # (a bot's page, a dashboard): allow any origin to read them and to see the
+  # ETag so it can poll with If-None-Match. Nothing here is private.
+  CorsHeaders:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub "${AWS::StackName}-cors"
+        CorsConfig:
+          AccessControlAllowOrigins:
+            Items: ["*"]
+          AccessControlAllowMethods:
+            Items: [GET, HEAD, OPTIONS]
+          AccessControlAllowHeaders:
+            Items: ["*"]
+          AccessControlExposeHeaders:
+            Items: [ETag, Content-Length, Last-Modified, Cache-Control]
+          AccessControlAllowCredentials: false
+          AccessControlMaxAgeSec: 86400
+          OriginOverride: true
+
   Distribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -74,6 +95,13 @@ Resources:
         DefaultRootObject: index.html
         HttpVersion: http2and3
         PriceClass: PriceClass_100
+        # S3 answers a missing key with 403 through OAC; a client asking for a
+        # day file that does not exist should see 404.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 404
+            ResponsePagePath: /404.html
+            ErrorCachingMinTTL: 60
         Origins:
           - Id: s3
             DomainName: !GetAtt SiteBucket.RegionalDomainName
@@ -86,6 +114,7 @@ Resources:
           Compress: true
           # Managed CachingOptimized policy
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: !Ref CorsHeaders
         ViewerCertificate:
           AcmCertificateArn: !Ref Certificate
           SslSupportMethod: sni-only

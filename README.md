@@ -496,6 +496,30 @@ rectangles included. Edit those for another deployment. Beyond the bot's own
 ffmpeg and tesseract, the scripts need `bash` and `sqlite3`, the site
 scripts `curl`, `jq` and `flock`, and `deploy-site.sh` the AWS CLI.
 
+## Machine-readable data
+
+The site publishes its data for bots and assistants as static JSON under
+`https://ng.lexicone.com/api/v1/`, produced by `build-site.sh` from the same
+report the page embeds and uploaded by `deploy-site.sh` on every deploy:
+
+- `latest.json` (~4 KB): state of the grind in one document — today, the
+  records with their scope and source, the last run and finish, streaks,
+  golds, deaths by act. What a chat bot or an LLM tool call should fetch.
+- `summary.json` (~35 KB): every aggregate the site shows, no per-run rows.
+- `report.json` (~1 MB, 85 KB gzipped): every run, split and session.
+- `index.json`: manifest with byte sizes and the build time; `/api/index.json`
+  is the version root; `/llms.txt` is the plain-text entry point for
+  assistants; `/api/v1/README.md` (tracked at `site/static/api/v1/README.md`)
+  is the field reference.
+
+`latest.json` is the projection `scripts/api-latest.jq` computes; the other
+two are `jq` filters inline in `build-site.sh`. Everything is served with
+`max-age=60` (the docs 3600), an ETag, and `Access-Control-Allow-Origin: *`
+(a CloudFront response-headers policy in `infra/site-stack.yml`; a missing
+key answers 404). Fields are only added within a version; a change of meaning
+bumps the path. The feed names the game and category but not the streamer,
+as the page does. Per-day files behind a manifest are the planned phase 2.
+
 ## Maintenance notes
 
 - Twitch occasionally rotates the web player client-id or retires the GraphQL

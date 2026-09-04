@@ -48,6 +48,36 @@ else
 fi
 [ -s "$tmp" ] || { echo "report produced no JSON; not building" >&2; exit 1; }
 jq -e . "$tmp" >/dev/null || { echo "report JSON is not valid; not building" >&2; exit 1; }
+
+# ---- machine-readable data: site/api/v1/ (field reference: site/static/api/v1/README.md)
+# Projections of the same report the page embeds, written compact (CloudFront
+# gzips on the wire) and BEFORE the "</" escaping below, which is only for the
+# copy spliced into the page. TZ_NAME is the streamer's IANA zone: the report
+# carries only today's UTC offset, and the box's /etc/localtime is a plain
+# file, so it cannot be derived here — hardcoded like the speedrun.com ids.
+TZ_NAME=America/Los_Angeles
+api=site/api/v1
+mkdir -p "$api"
+env="{schema_version:1, timezone:\"$TZ_NAME\", docs:\"https://ng.lexicone.com/api/v1/README.md\", generated_at:(.generated_at_ms/1000|floor|todate)}"
+jq -c ". + $env" "$tmp" > "$api/report.json.tmp"
+jq -c ". + $env | del(.runs, .splits_by_run, .recent_runs) | .sessions |= map(del(.events))" "$tmp" > "$api/summary.json.tmp"
+jq -c --arg tz "$TZ_NAME" -f scripts/api-latest.jq "$tmp" > "$api/latest.json.tmp"
+for f in report summary latest; do
+  jq -e . "$api/$f.json.tmp" >/dev/null || { echo "$api/$f.json is not valid; not building" >&2; exit 1; }
+done
+jq -n -c --arg tz "$TZ_NAME" --argjson g "$(jq .generated_at_ms "$tmp")" \
+  --argjson latest "$(wc -c < "$api/latest.json.tmp")" \
+  --argjson summary "$(wc -c < "$api/summary.json.tmp")" \
+  --argjson report "$(wc -c < "$api/report.json.tmp")" '{
+    schema_version: 1, generated_at_ms: $g, generated_at: ($g/1000|floor|todate), timezone: $tz,
+    docs: "https://ng.lexicone.com/api/v1/README.md", llms_txt: "https://ng.lexicone.com/llms.txt",
+    files: [
+      {path: "/api/v1/latest.json",  purpose: "state of the grind in one small document: today, records, last run, streaks", bytes: $latest,  cache_max_age: 60},
+      {path: "/api/v1/summary.json", purpose: "every aggregate the site shows, without per-run rows", bytes: $summary, cache_max_age: 60},
+      {path: "/api/v1/report.json",  purpose: "the whole dataset: every run, split and session", bytes: $report, cache_max_age: 60},
+      {path: "/api/v1/README.md",    purpose: "field reference", cache_max_age: 3600}
+    ]}' > "$api/index.json.tmp"
+for f in report summary latest index; do mv "$api/$f.json.tmp" "$api/$f.json"; done
 # The JSON is spliced into a <script> element, where the parser ends the
 # script at the first "</" regardless of JSON quoting.
 sed -i 's|</|<\\/|g' "$tmp"

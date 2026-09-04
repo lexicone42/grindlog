@@ -102,6 +102,12 @@ install and the in-process build).
   page; `scripts/build-site.sh` builds it and `scripts/deploy-site.sh`
   uploads it. A single uncaught JavaScript error blanks the whole page, so
   check it in a browser after touching the template.
+- The same build writes the machine-readable feed (`site/api/v1/`, see the
+  README's *Machine-readable data*): `latest.json` comes from
+  `scripts/api-latest.jq`, the rest from `jq` in `build-site.sh`. Within
+  `/api/v1/` only add fields; a change of meaning is a new version path. The
+  feed does not name the streamer (the page does not either); that is the
+  owner's call, not a default to flip.
 - `pkill -f`/`pgrep -f` patterns must not appear literally in the same
   command line (`ngtwitchtimer --config live.toml ru[n]`), or they match the
   shell running them.
