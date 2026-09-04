@@ -12,9 +12,11 @@
 /backfill-logs/
 /calibration/
 
-# Generated site output (index.html is built from template.html + the db)
+# Generated site output (index.html is built from template.html + the db;
+# site/api/ holds the machine-readable projections; site/static/ is tracked)
 /site/index.html
 /site/data.json
+/site/api/
 
 # Local screenshots / scratch — but the glyph reader's test crops are kept
 *.png

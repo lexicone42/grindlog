@@ -1,0 +1,37 @@
+# Grind Log
+
+> A record of one speedrunner's Ninja Gaiden (NES) Any% attempts, read off the
+> public Twitch broadcast frame by frame by an OCR bot: every attempt, its
+> death or finish time, per-act splits, the runner's own attempt numbers, and
+> capture health per day. Rendered at https://ng.lexicone.com/.
+
+## Data
+
+Static JSON, rebuilt every 10 minutes while a stream is live, nightly, and
+after each VOD import; served with `Cache-Control: max-age=60` and an ETag.
+
+- https://ng.lexicone.com/api/v1/latest.json — state of the grind in ~3 KB:
+  today, records (season best, best tracked, Sum of Best, references), the
+  last run and last finish, streaks, golds, deaths by act. Poll this.
+- https://ng.lexicone.com/api/v1/summary.json — every aggregate the site
+  shows (~35 KB): daily rows with the runner's attempt-number span, all
+  finishes, PB history, golds, death chart, sessions with capture health.
+- https://ng.lexicone.com/api/v1/report.json — everything (~1 MB, ~85 KB
+  gzipped): every run with its outcome and times, per-run splits, sessions.
+- https://ng.lexicone.com/api/v1/index.json — manifest with byte sizes and
+  the build time.
+- https://ng.lexicone.com/api/v1/README.md — the field reference.
+
+## Caveats
+
+- Every time was read off the video by OCR. The timer reader is accurate to
+  the hundredth on well over 99% of frames; a finish is the timer frozen for
+  several frames, so finish times are exact to the display.
+- Days are the streamer's local day (`timezone` in each file). `today` is the
+  day at build time: after the nightly build it is the day that just closed
+  until the next live build. Check `today.day`.
+- Two attempt numbers exist. `livesplit_attempt` is the runner's own counter
+  read off the layout and is the run's identity; `tracked_ordinal` is the
+  bot's count of what it saw. Prefer the former; it is null when unread.
+- "Season best" is the runner's comparison, which resets with each season of
+  his splits file; the lifetime PB and the world record are `references`.
