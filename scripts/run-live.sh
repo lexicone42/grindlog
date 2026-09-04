@@ -12,14 +12,20 @@ cd "$(dirname "$0")/.." || exit 1
 export OMP_THREAD_LIMIT=1 OMP_NUM_THREADS=1
 mkdir -p logs
 LOG=logs/live.log
-# Rotate unbounded logs when they grow past ~100MB (months of runtime).
-for f in obs-live.jsonl "$LOG"; do
-  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 104857600 ]; then
-    mv "$f" "${f%.jsonl}.$(date +%Y%m%d).old" 2>/dev/null || mv "$f" "$f.$(date +%Y%m%d).old"
-    gzip -f "${f%.jsonl}.$(date +%Y%m%d).old" "$f.$(date +%Y%m%d).old" 2>/dev/null || true
-  fi
-done
+# Rotate the unbounded logs when they grow past ~100MB — checked before every
+# bot start, so a rollout or a crash is enough to rotate; the supervisor
+# itself runs for months. (An earlier version checked once, at supervisor
+# start, and never again.)
+rotate() {
+  for f in obs-live.jsonl "$LOG"; do
+    if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 104857600 ]; then
+      old="$f.$(date +%Y%m%d-%H%M).old"
+      mv "$f" "$old" && gzip -f "$old" || true
+    fi
+  done
+}
 while true; do
+  rotate
   echo "[wrapper] starting bot $(date -Is)" >> "$LOG"
   RUST_LOG=info ./target/release/ngtwitchtimer --config live.toml run >> "$LOG" 2>&1
   code=$?

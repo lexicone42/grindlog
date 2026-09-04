@@ -85,7 +85,10 @@ install and the in-process build).
 - The live bot runs supervised (`scripts/run-live.sh`, in a tmux session on
   the reference box) and logs to `logs/live.log`; observations go to
   `obs-live.jsonl`. `kill` (SIGTERM) is a clean stop; the supervisor
-  restarts it.
+  restarts it. The schedule lives in `scripts/crontab.example` (a reboot
+  line that restarts the supervisor, the site deploys, the nightly
+  `backup-db.sh`); `scripts/install-cron.sh` installs it idempotently.
+  Backups land in `backups/` (ignored by git), 30 days kept.
 - tesseract must run with `OMP_THREAD_LIMIT=1`; the binary re-execs itself
   with it set, and the scripts export it. Several tesseract workers on one
   box otherwise spin-wait each other to a crawl.

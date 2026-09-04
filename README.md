@@ -474,14 +474,18 @@ best (tracked)" next to the runner's own Sum of Best row read off the layout
 | `scripts/merge-backfill.sh [--swap]` | full chronological rebuild into `ninja-gaiden-merged.db` from every completed VOD database, plus live-tracked sessions on days no VOD covers (settings copied from the live db, run numbers filled); `--swap` moves it into place and keeps the old database as `ninja-gaiden-pre-merge-<timestamp>.db` (stop the bot before `--swap`) |
 | `scripts/fill-run-numbers.sh [db]` | clear a LiveSplit run number that falls outside its two agreeing neighbours (a misread), then infer missing numbers where the arithmetic between known neighbours is unambiguous; safe to run while the bot is writing the database; reports `outliers_cleared`, `filled`, `coverage` |
 | `scripts/build-site.sh [cfg]` / `deploy-site.sh [--infra]` / `deploy-if-live.sh` | `build-site.sh` bakes `report --json` into `site/index.html` under a lock (two builds overlap in normal operation), merging the WR and lifetime PB from speedrun.com when reachable (`curl` + `jq`; the game/category/user ids are hardcoded at its top; layout-read values win) and validating the JSON with `jq`. `deploy-site.sh` runs `fill-run-numbers.sh` on the live database, builds, uploads to S3 and invalidates CloudFront (`aws` CLI; `--infra` also deploys `infra/site-stack.yml`). `deploy-if-live.sh` is for a ten-minute cron and deploys only while an `hls` session is open |
+| `scripts/backup-db.sh [db]` | nightly snapshot of the live database through sqlite's online `.backup` (safe while the bot writes), gzipped into `backups/`, 30 days kept; with `NG_BACKUP_S3=s3://bucket/prefix` also copied there (the public site bucket is refused) |
+| `scripts/crontab.example` / `install-cron.sh [--show]` | the reference deployment's schedule: a `@reboot` line that restarts the supervisor in tmux, the two site deploys and the backup. The installer replaces the grindlog lines in the user's crontab with the example's and leaves everything else alone |
 | `scripts/make-test-video.sh` | synthetic timer video for end-to-end tests |
 | `infra/site-stack.yml` | CloudFormation for the site (S3 + CloudFront + certificate + Route53 alias); pass your own `HostedZoneId` |
 
 Typical rhythm: the live bot runs all day under `run-live.sh` in tmux from
-the tracked `live.toml`; a change reaches it through `rollout.sh`; a cron
-runs `deploy-if-live.sh` every ten minutes and `deploy-site.sh` once
-nightly; old VODs are backfilled in a few parallel `backfill-vods.sh` chains
-with `import-when-done.sh` landing each day as it completes.
+the tracked `live.toml`; a change reaches it through `rollout.sh`; cron
+(`scripts/crontab.example`, installed by `install-cron.sh`) runs
+`deploy-if-live.sh` every ten minutes, `deploy-site.sh` and `backup-db.sh`
+nightly, and restarts the supervisor after a reboot; old VODs are backfilled
+in a few parallel `backfill-vods.sh` chains with `import-when-done.sh`
+landing each day as it completes.
 
 The scripts are written for the reference deployment and hardcode its names:
 `live.toml`, `ninja-gaiden.db` and `obs-live.jsonl` in `run-live.sh`,
