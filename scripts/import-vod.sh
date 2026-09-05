@@ -27,9 +27,13 @@
 # never finished are dropped; attempt_number is renumbered chronologically
 # across the whole database; then fill-run-numbers.sh runs on it. Days are
 # the machine's local dates, so a VOD that crosses midnight replaces both.
-# LIVE=<path> targets another database (a copy, for a dry run). Exits 1 when
-# the per-VOD database is missing, 2 while its session is still open, 3 when
-# the gate above refuses.
+# The transaction and fill-run-numbers.sh run under the site build's lock
+# (.build-site.lock, the one build-site.sh holds; waits up to 120 s), so an
+# import cannot commit in the middle of a build that is reading the database
+# for the per-day feed. LIVE=<path> targets another database (a copy, for a
+# dry run). Exits 1 when the per-VOD database is missing, 2 while its session
+# is still open, 3 when the gate above refuses, 4 when the lock could not be
+# taken in time.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 LIVE="${LIVE:-ninja-gaiden.db}"   # override for a dry run on a copy
@@ -96,6 +100,13 @@ for c in frames parsed probing relocks counter_reads events vod_id vod_created_a
 done
 hc="${hc%, }"
 
+# The site build's lock, for the transaction and the run-number fill: a build
+# in progress reads the database in several queries and the per-day feed's
+# files must all come from one state of it. Released before any deploy below,
+# which takes the same lock in build-site.sh.
+exec 9> .build-site.lock
+flock -w 120 9 || { echo "!!! could not take .build-site.lock within 120 s (a site build stuck?); not importing"; exit 4; }
+
 # SQL on STDIN with -bail, never as an argument: given SQL as an argument the
 # CLI keeps going after a runtime error (reaching the COMMIT, making the
 # day-wipe DELETEs permanent) and still exits 0. On stdin with -bail it stops
@@ -147,6 +158,7 @@ sqlite3 -bail "$LIVE" <<SQL
 SQL
 
 ./scripts/fill-run-numbers.sh "$LIVE"
+exec 9>&-
 echo "now in $LIVE for $days: $(sqlite3 "$LIVE" "SELECT COUNT(*)||' runs, '||SUM(outcome='finished')||' finished, '||COUNT(ls_attempt)||' numbered, best '||IFNULL(printf('%d:%05.2f', MIN(final_time_ms)/60000, (MIN(final_time_ms)%60000)/1000.0), '-') FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days)")"
 
 if $deploy; then

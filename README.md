@@ -488,7 +488,7 @@ best (tracked)" next to the runner's own Sum of Best row read off the layout
 | `scripts/obs-accuracy.sh <obs.jsonl>` | the label-free misread check over an observation log: consecutive running frames must advance by one frame interval within ±60 ms (`TOL_MS`); resets, frozen timers, values under 10 s, event frames and the frames after a lock are excluded and counted by reason. Prints the rate per pair and per frame, per reader, and the worst frames with the readings around them |
 | `scripts/obs-diff.sh [-q] <a.jsonl> <b.jsonl>` | join two observation logs of the same window on the frame number and list the frames where OCR text, parsed value, phase, layout offset or events differ; summary line first, exit status like `diff`. Warns when the logs are not frame-aligned |
 | `scripts/backfill-vods.sh <vod_id>...` | analyze Twitch VODs one after another straight from Twitch (no download), one database each in `backfill-db/vod-<id>.db` with its obs log in `backfill-logs/`; run several chains in parallel. It does not read `live.toml`: it writes its own config per VOD with the reference deployment baked in (channel, layouts, acts, 480p30, 2 fps, the glyph reader, `min_final_ms`, the AppImage `tessdata_path`), so edit the heredoc for another streamer. Workers run under `nice`; a rerun replaces an earlier pass over the same VOD |
-| `scripts/import-vod.sh <vod_id> [--deploy] [--force]` | replace one broadcast day in the live database from its completed VOD database (refuses a VOD whose sessions are not all closed); one transaction, safe while the bot is running; normalises finished runs' final-act split to the finish time, renumbers attempts chronologically and runs `fill-run-numbers.sh`. Before replacing it compares the incoming day with the one in the live database (runs, numbered runs, session span) and refuses with exit 3 when the new pass holds under 90% of either count, so a pass that died partway cannot overwrite a fuller day; `--force` replaces anyway. `LIVE=copy.db` targets another database for a dry run |
+| `scripts/import-vod.sh <vod_id> [--deploy] [--force]` | replace one broadcast day in the live database from its completed VOD database (refuses a VOD whose sessions are not all closed); one transaction, safe while the bot is running, held under the site build's lock (`.build-site.lock`, up to 120 s) so it cannot commit in the middle of a feed build; normalises finished runs' final-act split to the finish time, renumbers attempts chronologically and runs `fill-run-numbers.sh`. Before replacing it compares the incoming day with the one in the live database (runs, numbered runs, session span) and refuses with exit 3 when the new pass holds under 90% of either count, so a pass that died partway cannot overwrite a fuller day; `--force` replaces anyway. `LIVE=copy.db` targets another database for a dry run |
 | `scripts/import-when-done.sh <vod_id>...` | detached: import each VOD as its chain finishes and redeploy the site. A VOD the import gate refuses is left unmarked and reported; it is retried only when its database changes, and the final line names the refused ids (exit 3) |
 | `scripts/list-vods.sh <channel> [--game <substring>]` | list a channel's archived VODs newest first (`id  date  hours  title`) from Twitch's GraphQL endpoint with `curl` + `jq`, so a backfill can be assembled without guessing ids; `--game` filters titles case-insensitively; falls back to `yt-dlp` (no dates) when GraphQL declines. `TWITCH_CLIENT_ID` overrides the web client-id |
 | `scripts/rebackfill.sh [--chains N] [--label L] [--dry-run] <vod_id>...` | re-run VODs safely: archives their earlier passes to `backfill-db/rerun-<stamp>/` and `backfill-logs/rerun-<stamp>/`, strips the ids from `backfill-db/imported.txt`, then launches N detached `backfill-vods.sh` chains and one `import-when-done.sh` over the ids. Refuses ids a running chain or worker is already processing |
@@ -496,7 +496,7 @@ best (tracked)" next to the runner's own Sum of Best row read off the layout
 | `scripts/fill-run-numbers.sh [db]` | clear a LiveSplit run number that falls outside its two agreeing neighbours (a misread), then infer missing numbers where the arithmetic between known neighbours is unambiguous; safe to run while the bot is writing the database; reports `outliers_cleared`, `filled`, `coverage` |
 | `scripts/build-site.sh [cfg]` / `deploy-site.sh [--infra]` / `deploy-if-live.sh` | `build-site.sh` bakes `report --json` into `site/index.html` under a lock (two builds overlap in normal operation), merging the WR and lifetime PB from speedrun.com when reachable (`curl` + `jq`; the game/category/user ids are hardcoded at its top; layout-read values win) and validating the JSON with `jq`. `deploy-site.sh` runs `fill-run-numbers.sh` on the live database, builds, uploads to S3 and invalidates CloudFront (`aws` CLI; `--infra` also deploys `infra/site-stack.yml`). `deploy-if-live.sh` is for a ten-minute cron and deploys only while an `hls` session is open |
 | `scripts/backup-db.sh [db]` | nightly snapshot of the live database through sqlite's online `.backup` (safe while the bot writes), gzipped into `backups/`, 30 days kept; with `NG_BACKUP_S3=s3://bucket/prefix` also copied there (the public site bucket is refused) |
-| `scripts/healthcheck.sh [-v]` | dead-man check for a ten-minute cron: the tmux supervisor exists, exactly one live bot process, no crash loop (at most 3 starts in 30 minutes), the observation log still grows while a live session is open, an offline poll within 35 minutes inside `active_hours`, over 5 GB of disk, the database readable. Each failing signal alerts once an hour and once more as an all-clear on recovery (state in `logs/health-state/`, record in `logs/health.log`); `-v` prints every signal. Always exits 0 |
+| `scripts/healthcheck.sh [-v]` | dead-man check for a ten-minute cron: the tmux supervisor exists, exactly one live bot process, no crash loop (at most 3 starts in 30 minutes), the observation log still grows while a live session is open, an offline poll within 35 minutes inside `active_hours`, over 5 GB of disk, the database readable, and the last deploy (`logs/deploy.log`, entries start with `=== <time> deploy start`) reached its `live:` line and printed no `!!!` line (the per-day feed not built) when it started within the last 20 minutes. Each failing signal alerts once an hour and once more as an all-clear on recovery (state in `logs/health-state/`, record in `logs/health.log`); `-v` prints every signal. Always exits 0 |
 | `scripts/daily-summary.sh [YYYY-MM-DD]` | one plain-text block for a day (default today): attempts, finishes and the best time with its LiveSplit run number, resets by act, coverage against his own counter span, sessions with capture health, glyph reader totals, VOD imports that landed and the day's healthcheck alerts; cron runs it at 23:58 |
 | `scripts/notify.sh <subject>` (body on stdin) | delivery for the two monitoring scripts: `NG_ALERT_URL` posts ntfy-style (a URL containing `discord` gets a JSON `content` body), else `NG_ALERT_MAIL` goes through `mail`, else the message is appended to `logs/health.log`. Set the variables at the top of your own crontab, not in the tracked example |
 | `scripts/crontab.example` / `install-cron.sh [--show]` | the reference deployment's schedule: a `@reboot` line that restarts the supervisor in tmux, the two site deploys, the backup, the ten-minute healthcheck and the daily summary. The installer replaces the grindlog lines in the user's crontab with the example's and leaves everything else alone |
@@ -535,14 +535,34 @@ report the page embeds and uploaded by `deploy-site.sh` on every deploy:
   is the version root; `/llms.txt` is the plain-text entry point for
   assistants; `/api/v1/README.md` (tracked at `site/static/api/v1/README.md`)
   is the field reference.
+- `manifest.json` and `days/<YYYY-MM-DD>.json`: the per-day feed, for a
+  reader that keeps a copy and wants only what changed. The manifest lists
+  every broadcast day's file with its size, sha256 and whether the day is
+  `closed` (behind today, no session still open), plus the records with
+  their scope and source and the bot's last state transition; a day file
+  holds every run of that day with its splits and the day's sessions with
+  capture health, keyed by the run's start time. A closed day's bytes change
+  rarely but do change — a VOD import replaces the day and renumbers
+  `attempt_number` database-wide, run numbers get filled in later — and the
+  manifest's sha256 is the only truth about a file. `history.json` is the
+  per-day stats and every finish without the runs; `schema.json` is the
+  JSON Schema of the three, generated from the structs that write them.
 
-`latest.json` is the projection `scripts/api-latest.jq` computes; the other
-two are `jq` filters inline in `build-site.sh`. Everything is served with
-`max-age=60` (the docs 3600), an ETag, and `Access-Control-Allow-Origin: *`
-(a CloudFront response-headers policy in `infra/site-stack.yml`; a missing
-key answers 404). Fields are only added within a version; a change of meaning
-bumps the path. The feed names the game and category but not the streamer,
-as the page does. Per-day files behind a manifest are the planned phase 2.
+`latest.json` is the projection `scripts/api-latest.jq` computes; `summary`,
+`report` and `index` are `jq` filters inline in `build-site.sh`; the per-day
+feed is written by the binary itself, `report --api-dir` (`src/api.rs`),
+into a scratch directory that `build-site.sh` moves into place only when the
+build succeeded, manifest last — a failed feed build prints a `!!!` line,
+keeps the previous feed and still ships the page. Cache lifetimes: the JSON
+files `max-age=60`; the docs, the schema, `llms.txt` and `/api/index.json`
+3600; a closed day file `max-age=60, s-maxage=31536000` (a year at the
+edge, a minute in the client; `deploy-site.sh` invalidates `days/*` when a
+day already published as closed changed, and only then). Everything carries
+an ETag and `Access-Control-Allow-Origin: *` (a CloudFront response-headers
+policy in `infra/site-stack.yml`; a missing key answers 404). Fields are only
+added within a version; a change of meaning bumps the path. The feed names
+the game and category but not the streamer, as the page does; a session's
+Twitch VOD id appears only with `[game] public_vod_links`.
 
 ## Maintenance notes
 

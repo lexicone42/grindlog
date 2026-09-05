@@ -4,7 +4,8 @@
 # Produces site/index.html, a self-contained page (copy the one file to any
 # static host; ng.lexicone.com is the reference deployment, see
 # deploy-site.sh), the machine-readable feed under site/api/v1/ (the full
-# report and its projections), and site/data.json, the copy of the report
+# report and its projections, then the per-day files behind manifest.json
+# that `report --api-dir` writes), and site/data.json, the copy of the report
 # the page embeds (trimmed of what the template never reads, see below; kept
 # for inspection, not uploaded). First fetches the WR and lifetime-PB
 # reference times from speedrun.com (see below for what they can override),
@@ -68,6 +69,34 @@ jq -c --arg tz "$TZ_NAME" -f scripts/api-latest.jq "$tmp" > "$api/latest.json.tm
 for f in report summary latest; do
   jq -e . "$api/$f.json.tmp" >/dev/null || { echo "$api/$f.json is not valid; not building" >&2; exit 1; }
 done
+
+# Phase 2, written by the binary itself (src/api.rs): one file per broadcast
+# day under days/, history.json, schema.json and, last, manifest.json with
+# each file's size and sha256. Built into a scratch directory beside the
+# feed and moved into place file by file (same filesystem, so each move is a
+# rename; manifest last) only when the binary succeeded and every file it
+# lists parses. Otherwise the previous manifest and day files stay as they
+# were and the phase-1 site still ships: the per-day feed must never take
+# the page down. The "!!!" line is what healthcheck.sh's deploy signal looks
+# for in logs/deploy.log.
+feed=$(mktemp -d "$api/feed.XXXXXX")
+trap 'rm -f "$tmp" "$tmp.tmp" "$api/index.json.tmp2"; rm -rf "$feed"' EXIT
+build_feed() {
+  ./target/release/ngtwitchtimer --config "$cfg" report --api-dir "$feed" || return 1
+  local f
+  for f in $(jq -r '.days[].path, .files[].path' "$feed/manifest.json") manifest.json; do
+    jq -e . "$feed/$f" >/dev/null 2>&1 || { echo "$f is not valid JSON" >&2; return 1; }
+  done
+}
+if build_feed; then
+  mkdir -p "$api/days"
+  for f in "$feed"/days/*.json; do [ -e "$f" ] && mv -f "$f" "$api/days/"; done
+  mv -f "$feed/history.json" "$feed/schema.json" "$api/"
+  mv -f "$feed/manifest.json" "$api/manifest.json"
+else
+  echo "!!! per-day feed not built: report --api-dir failed; keeping the previous manifest and day files" >&2
+fi
+
 jq -n -c --arg tz "$TZ_NAME" --argjson g "$(jq .generated_at_ms "$tmp")" \
   --argjson latest "$(wc -c < "$api/latest.json.tmp")" \
   --argjson summary "$(wc -c < "$api/summary.json.tmp")" \
@@ -80,6 +109,20 @@ jq -n -c --arg tz "$TZ_NAME" --argjson g "$(jq .generated_at_ms "$tmp")" \
       {path: "/api/v1/report.json",  purpose: "the whole dataset: every run, split and session", bytes: $report, cache_max_age: 60},
       {path: "/api/v1/README.md",    purpose: "field reference", cache_max_age: 3600}
     ]}' > "$api/index.json.tmp"
+# The per-day feed's entries, from whatever manifest is in place (this
+# build's, or the previous one's when the feed was not rebuilt); none before
+# the first successful feed build.
+if [ -f "$api/manifest.json" ]; then
+  jq -c --argjson manifest "$(wc -c < "$api/manifest.json")" \
+    --argjson history "$(jq .files.history.bytes "$api/manifest.json")" \
+    --argjson schema "$(jq .files.schema.bytes "$api/manifest.json")" \
+    --argjson days "$(jq '.days | length' "$api/manifest.json")" '
+    .files = .files[:-1] + [
+      {path: "/api/v1/manifest.json", purpose: "per-day feed: lists days/<day>.json with size, sha256 and whether the day is closed; start here to fetch only what changed", bytes: $manifest, cache_max_age: 60, days: $days},
+      {path: "/api/v1/history.json",  purpose: "per-day stats and every finish, without the runs", bytes: $history, cache_max_age: 60},
+      {path: "/api/v1/schema.json",   purpose: "JSON Schema of manifest.json, days/<day>.json and history.json", bytes: $schema, cache_max_age: 3600}
+    ] + .files[-1:]' "$api/index.json.tmp" > "$api/index.json.tmp2" && mv "$api/index.json.tmp2" "$api/index.json.tmp"
+fi
 for f in report summary latest index; do mv "$api/$f.json.tmp" "$api/$f.json"; done
 
 # ---- the page's copy: only what site/template.html reads
