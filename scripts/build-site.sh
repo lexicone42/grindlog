@@ -3,8 +3,10 @@
 #   ./scripts/build-site.sh [config.toml]
 # Produces site/index.html, a self-contained page (copy the one file to any
 # static host; ng.lexicone.com is the reference deployment, see
-# deploy-site.sh), and site/data.json, the report JSON it was built from
-# (kept for inspection; not uploaded). First fetches the WR and lifetime-PB
+# deploy-site.sh), the machine-readable feed under site/api/v1/ (the full
+# report and its projections), and site/data.json, the copy of the report
+# the page embeds (trimmed of what the template never reads, see below; kept
+# for inspection, not uploaded). First fetches the WR and lifetime-PB
 # reference times from speedrun.com (see below for what they can override),
 # then checks that the JSON parses with jq. Holds .build-site.lock so the
 # live cron and a finishing import cannot build at once. Needs the release
@@ -50,11 +52,12 @@ fi
 jq -e . "$tmp" >/dev/null || { echo "report JSON is not valid; not building" >&2; exit 1; }
 
 # ---- machine-readable data: site/api/v1/ (field reference: site/static/api/v1/README.md)
-# Projections of the same report the page embeds, written compact (CloudFront
-# gzips on the wire) and BEFORE the "</" escaping below, which is only for the
-# copy spliced into the page. TZ_NAME is the streamer's IANA zone: the report
-# carries only today's UTC offset, and the box's /etc/localtime is a plain
-# file, so it cannot be derived here — hardcoded like the speedrun.com ids.
+# Projections of the full report, written compact (CloudFront gzips on the
+# wire) and BEFORE the page's diet and the "</" escaping below, which are only
+# for the copy spliced into the page. TZ_NAME is the streamer's IANA zone: the
+# report carries only today's UTC offset, and the box's /etc/localtime is a
+# plain file, so it cannot be derived here — hardcoded like the speedrun.com
+# ids.
 TZ_NAME=America/Los_Angeles
 api=site/api/v1
 mkdir -p "$api"
@@ -78,6 +81,18 @@ jq -n -c --arg tz "$TZ_NAME" --argjson g "$(jq .generated_at_ms "$tmp")" \
       {path: "/api/v1/README.md",    purpose: "field reference", cache_max_age: 3600}
     ]}' > "$api/index.json.tmp"
 for f in report summary latest index; do mv "$api/$f.json.tmp" "$api/$f.json"; done
+
+# ---- the page's copy: only what site/template.html reads
+# The full report stays in site/api/v1/report.json; the copy embedded in the
+# page loses what the template never looks at. The once-a-minute title reads
+# (`events` of kind "title", thousands per season and a sixth of the page)
+# go: the template uses events for the day's pitch (kind "geometry") and the
+# capture line's tooltip of the last few, which those reads only buried. Every
+# run's `game`/`category` go too: `runs` is already filtered to the tracked
+# game, and the page names it from `current_game`/`current_category`. Any
+# field the template starts reading must be put back here.
+jq '.sessions |= map(if .events then .events |= map(select(.k != "title")) else . end)
+    | .runs |= map(del(.game, .category))' "$tmp" > "$tmp.tmp" && mv "$tmp.tmp" "$tmp"
 # The JSON is spliced into a <script> element, where the parser ends the
 # script at the first "</" regardless of JSON quoting.
 sed -i 's|</|<\\/|g' "$tmp"
