@@ -30,8 +30,9 @@ What makes it more than a timer scraper:
 - **Layout resilience.** The streamer switches OBS scenes, nudges and
   resizes the LiveSplit window. The bot probes configured layouts at a grid
   of pixel offsets, re-anchors on small drifts, and measures the pane's row
-  pitch from the frame at every lock, so the splits column and attempt
-  counter follow the window instead of a hand-measured rectangle.
+  pitch from the frame at every lock and again every minute, so the splits
+  column and attempt counter follow the window instead of a hand-measured
+  rectangle, and a lock taken on an odd scene corrects itself.
 - **Capture health.** Every session records how much of the feed it read
   and every layout event, and the site shows it per day — a bad day is
   visible rather than silently thin.
@@ -411,8 +412,17 @@ the median pitch and the right-aligned cumulative column, and derives the
 splits rectangle (and the attempt counter above it) from that. The
 configured `splits`/`attempts_counter` rectangles are the fallback when
 fewer than two rows can be read (`pane geometry: 6/6 split rows read, pitch
-45px; …` in the log). Layouts whose timer rectangles overlap are told apart
-the same way: the one whose splits column reads as times wins.
+45px; …` in the log). A column is only believed when it looks like a
+cumulative column: its times share one format and never decrease down the
+pane, otherwise a clipped pane's segment column would stand in for it. The
+measurement is not final: the same pass runs again every 60 s while locked
+(every 10 s while the counter has not been found), and a geometry that two
+consecutive passes agree on replaces the one in force (`pane geometry
+re-measured: …`). One morning the bot locked on the stream's opening scene,
+where the pane is drawn larger and cropped, and the geometry from that
+frame lost a whole day's run numbers and splits; now it holds for ten
+seconds. Layouts whose timer rectangles overlap are told apart the same
+way: the one whose splits column reads as times wins.
 
 **The pane's own words.** A second, unrestricted sparse-text pass over the
 same crop reads the letters: at every lock (with `[splits]` enabled) and

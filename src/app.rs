@@ -585,6 +585,31 @@ impl PaneGeometry {
         inside.then_some((x as u32, y as u32, w, h))
     }
 
+    /// Whether two measurements describe the same pane: the row pitch within
+    /// 2 px, the splits column within 6 px in place and width, and the
+    /// counter found in both within 6 px or in neither. The block's height is
+    /// pitch times acts and follows the pitch; the Sum of Best row does not
+    /// count, its label is read or missed frame by frame.
+    fn agrees(&self, other: &PaneGeometry) -> bool {
+        fn close(a: (i32, i32, u32, u32), b: (i32, i32, u32, u32)) -> bool {
+            (a.0 - b.0).abs() <= 6 && (a.1 - b.1).abs() <= 6 && (a.2 as i64 - b.2 as i64).abs() <= 6
+        }
+        (self.pitch as i64 - other.pitch as i64).abs() <= 2
+            && close(self.splits, other.splits)
+            && match (self.counter, other.counter) {
+                (Some(a), Some(b)) => close(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
+    /// A measurement that did not find the attempt counter describes the
+    /// pane incompletely — the frame was cropped, covered or mid-transition
+    /// — and is re-measured on a short cadence until one finds it.
+    fn provisional(&self) -> bool {
+        self.counter.is_none()
+    }
+
     /// Rebuild `regs`' splits/counter rectangles from the geometry (union
     /// coordinates, clamped to the union).
     fn apply(&self, regs: &mut Regions) {
@@ -605,6 +630,14 @@ impl PaneGeometry {
 fn time_shaped(text: &str) -> bool {
     let t = text.trim().trim_end_matches('.');
     t.contains([':', '.']) && parse_time(t).is_some()
+}
+
+/// Whether a time-shaped word carries a fraction ("0:47.3", "5.00"): a '.'
+/// followed by a digit. "0:4" and "11:3" do not; nor does a trailing '.'.
+fn has_fraction(text: &str) -> bool {
+    text.trim()
+        .split_once('.')
+        .is_some_and(|(_, f)| f.chars().next().is_some_and(|c| c.is_ascii_digit()))
 }
 
 /// What a labelled time on the layout means. LiveSplit panes carry a row of
@@ -884,7 +917,7 @@ fn pane_geometry(
         .map(|w| ((w.x / sc, w.y / sc, w.w.max(1) / sc, w.h.max(1) / sc), w))
         .collect();
     let cy = |r: R| r.1 as i64 + r.3 as i64 / 2;
-    let mut above: Vec<R> = boxes
+    let mut above: Vec<(R, &ocr::Word)> = boxes
         .iter()
         .filter(|(r, w)| {
             time_shaped(&w.text)
@@ -894,23 +927,64 @@ fn pane_geometry(
                 && r.3 >= 10
                 && r.3 < timer.3
         })
-        .map(|(r, _)| *r)
+        .map(|(r, w)| (*r, *w))
         .collect();
-    above.sort_by_key(|r| cy(*r));
-    let mut rows: Vec<Vec<R>> = Vec::new();
-    for r in above {
+    above.sort_by_key(|(r, _)| cy(*r));
+    let mut rows: Vec<Vec<(R, &ocr::Word)>> = Vec::new();
+    for (r, w) in above {
         match rows.last_mut() {
-            Some(row) if (cy(row[0]) - cy(r)).abs() <= (r.3 as i64 / 2).max(4) => row.push(r),
-            _ => rows.push(vec![r]),
+            Some(row) if (cy(row[0].0) - cy(r)).abs() <= (r.3 as i64 / 2).max(4) => {
+                row.push((r, w))
+            }
+            _ => rows.push(vec![(r, w)]),
         }
     }
-    let col: Vec<R> = rows
+    // The rightmost word of each row: LiveSplit's cumulative column.
+    let col_words: Vec<(R, &ocr::Word)> = rows
         .iter()
-        .map(|row| *row.iter().max_by_key(|r| r.0 + r.2).unwrap())
+        .map(|row| *row.iter().max_by_key(|(r, _)| r.0 + r.2).unwrap())
         .collect();
-    if col.len() < 2 {
+    if col_words.len() < 2 {
         return None;
     }
+    // LiveSplit formats its time columns uniformly (the signed delta column
+    // has its own accuracy and is left out). So a row whose rightmost word
+    // has no fraction while another time on the row does, or a column with
+    // fractions on some rows and not others, is clipped or misread, not a
+    // pane. On one opening scene the pane was drawn larger than the crop
+    // and the cumulative column survived as "0:4", "2:4", "11:3" beside the
+    // full segment column; those still parse as times, and the geometry
+    // taken from them (wrong pitch, no counter) held for a whole day. Say
+    // nothing here and let a later frame describe the pane.
+    let unsigned_fraction =
+        |w: &ocr::Word| !w.text.trim_start().starts_with(['+', '-', '−']) && has_fraction(&w.text);
+    let right_clipped = rows.iter().zip(&col_words).any(|(row, (_, right))| {
+        !has_fraction(&right.text) && row.iter().any(|(_, w)| unsigned_fraction(w))
+    });
+    if right_clipped {
+        return None;
+    }
+    let fractions = col_words
+        .iter()
+        .filter(|(_, w)| has_fraction(&w.text))
+        .count();
+    if fractions != 0 && fractions != col_words.len() {
+        return None;
+    }
+    // The cumulative column never decreases down the pane: comparison times
+    // are running totals, and a run's own totals replace them from the top.
+    // A column that dips is the segment column (0:47.3, 1:53.5, 1:22.9 …)
+    // standing in for a cumulative column that was cropped off the frame —
+    // what the opening scene showed, with its clipped right column reading
+    // as nothing at all.
+    let values: Vec<i64> = col_words
+        .iter()
+        .filter_map(|(_, w)| parse_time(w.text.trim().trim_end_matches('.')))
+        .collect();
+    if values.windows(2).any(|p| p[1] < p[0]) {
+        return None;
+    }
+    let col: Vec<R> = col_words.iter().map(|(r, _)| *r).collect();
     let mut gaps: Vec<i64> = col.windows(2).map(|w| cy(w[1]) - cy(w[0])).collect();
     gaps.sort_unstable();
     let pitch = gaps[gaps.len() / 2];
@@ -1614,8 +1688,11 @@ pub async fn run(cfg: Config) -> Result<()> {
     // still gets its confirmations) without another six OCR calls.
     let mut last_splits_crop: Option<GrayImage> = None;
     let mut last_splits_values: Vec<Option<i64>> = Vec::new();
-    // Splits/counter rectangles measured from the frame at the last lock.
+    // Splits/counter rectangles measured from the frame at the last lock, or
+    // adopted since from the periodic pane read; and a measurement that
+    // disagreed with it once, waiting for a second that agrees with it.
     let mut pane_geom: Option<PaneGeometry> = None;
+    let mut geom_pending: Option<PaneGeometry> = None;
     // The same rectangles in union coordinates, plus where the digits were
     // (absolute) when first measured after that lock: a re-anchor moves them
     // by the digits' real displacement, never by our crop correction.
@@ -2294,6 +2371,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 at(new_regs.sob, g.sob.is_some(), "SoB"),
                             );
                                 pane_geom = Some(g);
+                                geom_pending = None;
                                 geom_abs = Some((new_regs.splits, new_regs.counter, new_regs.sob));
                                 geom_ink_abs = None;
                                 geom_ink_samples.clear();
@@ -2307,6 +2385,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                     "pane geometry not measurable here; using configured rectangles"
                                 );
                                 pane_geom = None;
+                                geom_pending = None;
                                 geom_abs = None;
                                 geom_ink_abs = None;
                                 geom_ink_samples.clear();
@@ -2539,6 +2618,24 @@ pub async fn run(cfg: Config) -> Result<()> {
                                         geom_abs = Some((nr.splits, nr.counter, nr.sob));
                                     }
                                     geom_ink_abs = Some(now_abs);
+                                    // The timer-relative copy that the periodic
+                                    // re-measurement compares against must
+                                    // follow the timer, or the next read
+                                    // disagrees with it by exactly this
+                                    // correction and re-adopts the same pane.
+                                    // A counter or SoB it never had stays
+                                    // absent: the configured fallback in `nr`
+                                    // is not a measurement.
+                                    if let Some(g) = pane_geom.as_mut() {
+                                        let (tx, ty) = (nr.timer.0 as i32, nr.timer.1 as i32);
+                                        let rel =
+                                            |r: R| (r.0 as i32 - tx, r.1 as i32 - ty, r.2, r.3);
+                                        if let Some(s) = nr.splits.map(rel) {
+                                            g.splits = s;
+                                            g.counter = g.counter.and(nr.counter.map(rel));
+                                            g.sob = g.sob.and(nr.sob.map(rel));
+                                        }
+                                    }
                                 } else if let Some(g) = pane_geom {
                                     g.apply(&mut nr);
                                 }
@@ -2833,7 +2930,22 @@ pub async fn run(cfg: Config) -> Result<()> {
         // a suppressed run leaves the timer parsing perfectly, so a single
         // misread title would otherwise turn recording off for the rest of
         // the broadcast with nothing able to turn it back on.
-        if layout_locked && t - last_sob_read_t >= 60_000 {
+        //
+        // The same pass measures the geometry again, because the lock's
+        // measurement can be wrong for the day: one morning the bot locked
+        // on the opening scene, where the pane is drawn larger and cropped,
+        // ten seconds before the gameplay scene came up, and the row pitch
+        // and missing counter from that frame held all day (75 runs, none
+        // numbered, no splits). A geometry without the counter, or none at
+        // all, is provisional and re-read every 10 s; a change is adopted
+        // once two consecutive measurements agree with each other and not
+        // with the one in force, so a single odd frame changes nothing.
+        let pane_read_every = match pane_geom {
+            Some(g) if !g.provisional() => 60_000,
+            _ => 10_000,
+        };
+        let mut adopt: Option<PaneGeometry> = None;
+        if layout_locked && t - last_sob_read_t >= pane_read_every {
             last_sob_read_t = t;
             let acts = shared.acts.len().max(1) as u32;
             match measure_pane(
@@ -2845,7 +2957,17 @@ pub async fn run(cfg: Config) -> Result<()> {
             )
             .await
             {
-                Ok((_, readings)) => {
+                Ok((geom, readings)) => {
+                    if let Some(g) = geom {
+                        if pane_geom.is_some_and(|c| c.agrees(&g)) {
+                            geom_pending = None;
+                        } else if geom_pending.is_some_and(|p| p.agrees(&g)) {
+                            adopt = Some(g);
+                            geom_pending = None;
+                        } else {
+                            geom_pending = Some(g);
+                        }
+                    }
                     let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
                     apply_title(
                         &readings,
@@ -2900,6 +3022,49 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
                 Err(e) => warn!("pane re-read failed: {e:#}"),
             }
+        }
+        if let Some(g) = adopt {
+            let acts = shared.acts.len().max(1) as u32;
+            let mut nr = active_regs.clone();
+            g.apply(&mut nr);
+            let was = match pane_geom {
+                Some(c) => format!(
+                    "pitch {}px, counter {}",
+                    c.pitch,
+                    if c.counter.is_some() {
+                        "found"
+                    } else {
+                        "missing"
+                    }
+                ),
+                None => "configured rectangles".to_string(),
+            };
+            info!(
+                "pane geometry re-measured: {}/{acts} split rows read, pitch {}px, counter {} (was {was}); rectangles rebuilt",
+                g.rows_read,
+                g.pitch,
+                if g.counter.is_some() { "found" } else { "missing" },
+            );
+            pane_geom = Some(g);
+            geom_abs = Some((nr.splits, nr.counter, nr.sob));
+            geom_ink_abs = None;
+            geom_ink_samples.clear();
+            active_regs = nr;
+            // The column moved: what was read from the old rectangle says
+            // nothing about the new one.
+            last_splits_crop = None;
+            last_splits_values.clear();
+            if let Some(st) = splits_tracker.as_mut() {
+                st.rebaseline();
+            }
+            health.event(
+                time_base.map(|b| b + t).unwrap_or_else(util::unix_ms),
+                "geometry",
+                format!(
+                    "re-measured: {}/{acts} rows, pitch {}px",
+                    g.rows_read, g.pitch
+                ),
+            );
         }
 
         {
@@ -3673,6 +3838,94 @@ mod tests {
             word(260, 300, 70, 20, "2:44.2"),
         ];
         assert!(pane_geometry(&far, &[], 1, timer, 6).is_none());
+    }
+
+    /// July 14: the bot locked on the opening scene, where the pane overflows
+    /// the crop and the cumulative column survives as "1:4", "2:4" beside
+    /// the full segment column. Those parse as times, but a row whose
+    /// rightmost time lacks the fraction its neighbour has is clipped, and a
+    /// column mixing formats across rows is no better. Uniform columns —
+    /// tenths everywhere, or whole seconds everywhere — measure, and the
+    /// signed delta column never counts.
+    #[test]
+    fn a_clipped_or_mixed_column_is_not_a_geometry() {
+        let timer = (60, 400, 300, 90);
+        // His six segments and their running totals, as the pane shows them.
+        let segments = ["0:47.3", "1:53.5", "1:22.9", "2:11.7", "2:26.4", "2:57.2"];
+        let totals = ["0:47.3", "2:40.9", "4:03.8", "6:15.5", "8:42.0", "11:39.2"];
+        let rows = |right: &[&str], right_w: u32| -> Vec<ocr::Word> {
+            let mut words = vec![word(330, 60, 60, 20, "94120")];
+            for (i, seg) in segments.iter().enumerate() {
+                let y = 100 + i as u32 * 45;
+                words.push(word(160, y, 100, 20, seg));
+                words.push(word(300, y, right_w, 20, right[i]));
+            }
+            words
+        };
+        // The opening scene: the totals column cropped to its first glyphs.
+        let clipped = rows(&["0:4", "2:4", "4:0", "6:1", "8:4", "11:3"], 40);
+        assert!(pane_geometry(&clipped, &[], 1, timer, 6).is_none());
+        // The segment column alone (the totals cropped away entirely) dips
+        // at Act 3 and is not a cumulative column either.
+        let mut alone = vec![word(330, 60, 60, 20, "94120")];
+        for (i, seg) in segments.iter().enumerate() {
+            alone.push(word(160, 100 + i as u32 * 45, 100, 20, seg));
+        }
+        assert!(pane_geometry(&alone, &[], 1, timer, 6).is_none());
+        // The gameplay scene measures.
+        let full = rows(&totals, 100);
+        let g = pane_geometry(&full, &[], 1, timer, 6).expect("a clean pane measures");
+        assert_eq!(g.rows_read, 6);
+        assert!(g.counter.is_some());
+        // Fractions on some rows of the column and not others.
+        let mixed = rows(
+            &["0:47.3", "2:40", "4:03.8", "6:15", "8:42.0", "11:39"],
+            100,
+        );
+        assert!(pane_geometry(&mixed, &[], 1, timer, 6).is_none());
+        // A board timed to the second, with a signed delta column in tenths.
+        let mut whole = Vec::new();
+        for (i, total) in ["21:48", "26:12", "1:29:33", "1:45:16", "1:58:25", "2:26:44"]
+            .iter()
+            .enumerate()
+        {
+            let y = 100 + i as u32 * 45;
+            whole.push(word(180, y, 50, 20, "-21.2"));
+            whole.push(word(300, y, 60, 20, total));
+        }
+        assert!(pane_geometry(&whole, &[], 1, timer, 6).is_some());
+        assert!(has_fraction("0:47.3") && has_fraction("5.00"));
+        assert!(!has_fraction("0:4") && !has_fraction("11:3") && !has_fraction("0:47."));
+    }
+
+    /// Two measurements of the same pane differ by a pixel or two; a
+    /// different pitch, a moved column or a lost counter is another pane.
+    #[test]
+    fn geometry_agreement_has_tolerances() {
+        let g = PaneGeometry {
+            splits: (10, -300, 120, 270),
+            counter: Some((40, -340, 100, 32)),
+            sob: None,
+            rows_read: 6,
+            pitch: 45,
+        };
+        let mut near = g;
+        near.pitch = 47;
+        near.splits = (15, -305, 124, 282);
+        near.counter = Some((44, -338, 104, 32));
+        near.sob = Some((0, 0, 1, 1));
+        near.rows_read = 5;
+        assert!(g.agrees(&near) && near.agrees(&g));
+        let mut far = g;
+        far.pitch = 54;
+        assert!(!g.agrees(&far));
+        let mut moved = g;
+        moved.splits.0 += 9;
+        assert!(!g.agrees(&moved));
+        let mut lost = g;
+        lost.counter = None;
+        assert!(!g.agrees(&lost));
+        assert!(lost.provisional() && !g.provisional());
     }
 
     #[test]
