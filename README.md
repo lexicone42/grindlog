@@ -535,14 +535,27 @@ report the page embeds and uploaded by `deploy-site.sh` on every deploy:
   is the version root; `/llms.txt` is the plain-text entry point for
   assistants; `/api/v1/README.md` (tracked at `site/static/api/v1/README.md`)
   is the field reference.
+- `manifest.json` and `days/<YYYY-MM-DD>.json`: the per-day feed, for a
+  reader that keeps a copy and wants only what changed. The manifest lists
+  every broadcast day's file with its size, sha256 and whether the day is
+  `closed` (behind today, no session still open — served as immutable, since
+  its bytes only change when its rows do), plus the records with their scope
+  and source and the bot's last state transition; a day file holds every run
+  of that day with its splits and the day's sessions with capture health.
+  `history.json` is the per-day stats and every finish without the runs;
+  `schema.json` is the JSON Schema of the three, generated from the structs
+  that write them.
 
-`latest.json` is the projection `scripts/api-latest.jq` computes; the other
-two are `jq` filters inline in `build-site.sh`. Everything is served with
-`max-age=60` (the docs 3600), an ETag, and `Access-Control-Allow-Origin: *`
-(a CloudFront response-headers policy in `infra/site-stack.yml`; a missing
-key answers 404). Fields are only added within a version; a change of meaning
-bumps the path. The feed names the game and category but not the streamer,
-as the page does. Per-day files behind a manifest are the planned phase 2.
+`latest.json` is the projection `scripts/api-latest.jq` computes; `summary`,
+`report` and `index` are `jq` filters inline in `build-site.sh`; the per-day
+feed is written by the binary itself, `report --api-dir site/api/v1`
+(`src/api.rs`), manifest last and each file atomically. Everything is served
+with `max-age=60` (the docs and the schema 3600, closed days a year), an
+ETag, and `Access-Control-Allow-Origin: *` (a CloudFront response-headers
+policy in `infra/site-stack.yml`; a missing key answers 404). Fields are only
+added within a version; a change of meaning bumps the path. The feed names
+the game and category but not the streamer, as the page does; a session's
+Twitch VOD id appears only with `[game] public_vod_links`.
 
 ## Maintenance notes
 

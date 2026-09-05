@@ -21,11 +21,16 @@ build time).
 | `/api/v1/summary.json` | every aggregate the site shows, no per-run rows | ~35 KB |
 | `/api/v1/report.json` | the whole dataset: runs, splits, sessions | ~1 MB (85 KB gzipped) |
 | `/api/v1/index.json` | manifest: files, byte sizes, build time | <1 KB |
+| `/api/v1/manifest.json` | the per-day feed's index: every day file with size and sha256, the records, the last transition | ~7 KB |
+| `/api/v1/days/<YYYY-MM-DD>.json` | one broadcast day: its runs with splits, its sessions with capture health | 15–80 KB |
+| `/api/v1/history.json` | per-day stats and every finish, no runs | ~30 KB |
+| `/api/v1/schema.json` | JSON Schema of the manifest, a day file and history | ~18 KB |
 | `/api/index.json` | version root: which versions exist | <1 KB |
 | `/llms.txt` | plain-text entry point for assistants | ~2 KB |
 
-Every file carries an envelope: `schema_version` (1), `generated_at_ms`,
-`generated_at` (ISO 8601, UTC), `timezone`, `docs` (this document).
+The first four carry an envelope: `schema_version` (1), `generated_at_ms`,
+`generated_at` (ISO 8601, UTC), `timezone`, `docs` (this document). The
+per-day feed puts its build time in the manifest only (see below).
 Fields are only ever added within a version; a removal or a change of
 meaning bumps the version and the path.
 
@@ -111,6 +116,85 @@ Everything in `summary.json` plus:
 - `recent_runs` — the last 15 runs by id, with the same fields as `runs`.
 - `sessions[*].events` — diagnostic layout events (locks, re-anchors, the
   once-a-minute title reads).
+
+## The per-day feed: `manifest.json` and `days/`
+
+For a reader that keeps its own copy and wants to fetch only what changed.
+Start at `/api/v1/manifest.json` and follow `days[]`; the whole history is
+one file per broadcast day, and a day that is over never changes.
+
+**How to poll.** Fetch the manifest every `stale_after_s` seconds (900): it
+is rebuilt every ten minutes while a stream is live, nightly, and after each
+VOD import, so polling faster gains nothing, and a manifest older than
+`stale_after_s` means no live build has happened — the stream is off or the
+bot is down. For each entry in `days[]`, compare `sha256` with the copy you
+hold and fetch `path` (relative to the manifest) only when it differs. A
+`closed` day is served with `Cache-Control: immutable`; its bytes change only
+when the database rows behind it were edited (a VOD re-import of that day, a
+corrected time, run numbers filled in afterwards), and the manifest's
+`sha256` is how you find out. The day named by `today` is the live one; it
+and any day with a session still open are never closed. `history.json` and
+`schema.json` are listed under `files` the same way.
+
+**`manifest.json`** — `schema_version`, `generated_at_ms`/`generated_at`,
+`stale_after_s`, `today` (the streamer's local day at build time),
+`day_offset_minutes`, `game`, `category`, `record_label`,
+`attempt_numbering` (the two attempt numbers explained in words, see below),
+`records`, `last_transition`, `days`, `files`.
+
+- `records` — `[{label, ms, scope, source}]`, the times to beat. `scope` is
+  `"season"` (the runner's comparison, which resets with each season of his
+  splits file — the `record_label` entry) or `"lifetime"` (his lifetime PB,
+  the world record). `source` is `"layout"` when the value was read off the
+  LiveSplit layout's own reference rows, which he keeps current, and
+  `"config"` when it is the deployment's configured value standing in until
+  the layout has been read.
+- `last_transition` — the bot's most recent state-machine transition,
+  `{at_ms, from, to, game, category, detail}` (phases such as `IDLE`,
+  `RUNNING`, `FINISHED`; `detail` is free text like `final_ms=696810`), or
+  `null` before the first.
+- `days` — `[{day, path, closed, bytes, sha256}]`, sorted by day. `sha256`
+  is the lowercase hex SHA-256 of the file's exact bytes.
+- `files` — `{history: {path, bytes, sha256}, schema: {…}}`.
+
+**`days/<YYYY-MM-DD>.json`** — `day`, `closed`, `stats`, `sessions`, `runs`.
+No timestamp inside: the file is a pure function of the rows.
+
+- `stats` — `attempts`, `finished`, `resets`, `best_ms`, `first_no`,
+  `last_no`: the day's row of `daily`, computed from the runs below.
+- `sessions` — the sessions that started on this day or recorded a run on
+  it, oldest first, so every run's `session_id` resolves within the file:
+  `id`, `started_at_ms`, `ended_at_ms` (`null` while ongoing), `source`,
+  `tag`, `attempts`/`finished`/`best_ms` (over the whole session), capture
+  health `frames`, `parsed`, `probing`, `relocks`, `counter_reads`, and
+  `events` (`[{t, k, d}]`, diagnostic). `vod_id` and `vod_created_at_ms`
+  appear only where the deployment publishes VOD links and the VOD is known;
+  a run sits at `started_at_ms - vod_created_at_ms` into it.
+- `runs` — every attempt that started on this day, oldest first: `id`,
+  `attempt_number`, `ls_attempt`, `started_at_ms`, `ended_at_ms`, `outcome`,
+  `reset_reason`, `final_time_ms`, `last_timer_ms`, `session_id`, and
+  `splits` (`[{act_index, act_name, cumulative_ms}]`, in act order; the final
+  act's split is the finish). **`id` is the run's `started_at_ms`**: it is
+  unique, and it is the one field a VOD re-import preserves — database ids
+  are not published. `session_id` is a database id and can change with a
+  re-import; resolve it within the same file.
+
+**Attempt numbering, again.** `ls_attempt` is the runner's own LiveSplit
+attempt counter, read off the layout while the run was in progress; it is
+the number he and the site use, and `null` when it was not read.
+`attempt_number` is the bot's own count of the runs it saw, renumbered
+chronologically by imports; use it only to name a run that has no
+`ls_attempt`. The manifest's `attempt_numbering` says the same in words.
+
+**`history.json`** — `days` (`[{day, attempts, finished, resets, best_ms,
+first_no, last_no}]`, one per day with captured runs, oldest first) and
+`finishes` (`[{attempt_number, ls_attempt, started_at_ms, final_time_ms}]`,
+oldest first): what a chart needs without downloading the runs.
+
+**`schema.json`** — a JSON Schema (draft 2020-12) generated from the code
+that writes these files. Its `properties.manifest`, `properties.day` and
+`properties.history` are the three documents; shared types are under
+`$defs`. Every field above carries a description there.
 
 ## Provenance
 

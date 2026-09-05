@@ -20,6 +20,13 @@ after each VOD import; served with `Cache-Control: max-age=60` and an ETag.
   gzipped): every run with its outcome and times, per-run splits, sessions.
 - https://ng.lexicone.com/api/v1/index.json — manifest with byte sizes and
   the build time.
+- https://ng.lexicone.com/api/v1/manifest.json — the per-day feed, for a
+  reader that keeps a copy: lists `days/<YYYY-MM-DD>.json` (every run of one
+  day with its splits, the day's sessions and capture health) with size,
+  sha256 and whether the day is closed (closed files do not change), plus the
+  records to beat with their scope and source. `history.json` is the per-day
+  stats and every finish without the runs; `schema.json` the JSON Schema.
+  Fetch the manifest, then only the days whose sha256 differs from your copy.
 - https://ng.lexicone.com/api/v1/README.md — the field reference.
 
 ## Caveats

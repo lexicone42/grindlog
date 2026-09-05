@@ -4,7 +4,8 @@
 # Produces site/index.html, a self-contained page (copy the one file to any
 # static host; ng.lexicone.com is the reference deployment, see
 # deploy-site.sh), the machine-readable feed under site/api/v1/ (the full
-# report and its projections), and site/data.json, the copy of the report
+# report and its projections, then the per-day files behind manifest.json
+# that `report --api-dir` writes), and site/data.json, the copy of the report
 # the page embeds (trimmed of what the template never reads, see below; kept
 # for inspection, not uploaded). First fetches the WR and lifetime-PB
 # reference times from speedrun.com (see below for what they can override),
@@ -68,17 +69,35 @@ jq -c --arg tz "$TZ_NAME" -f scripts/api-latest.jq "$tmp" > "$api/latest.json.tm
 for f in report summary latest; do
   jq -e . "$api/$f.json.tmp" >/dev/null || { echo "$api/$f.json is not valid; not building" >&2; exit 1; }
 done
+
+# Phase 2, written by the binary itself (src/api.rs): one file per broadcast
+# day under days/, history.json, schema.json and, last, manifest.json with
+# each file's size and sha256. The binary replaces each file atomically and
+# refuses to build when two runs share a started_at_ms (the feed's run id),
+# which stops this build too: better no update than an ambiguous one.
+./target/release/ngtwitchtimer --config "$cfg" report --api-dir "$api"
+for f in $(jq -r '.days[].path, .files[].path' "$api/manifest.json") manifest.json; do
+  jq -e . "$api/$f" >/dev/null || { echo "$api/$f is not valid; not building" >&2; exit 1; }
+done
+
 jq -n -c --arg tz "$TZ_NAME" --argjson g "$(jq .generated_at_ms "$tmp")" \
   --argjson latest "$(wc -c < "$api/latest.json.tmp")" \
   --argjson summary "$(wc -c < "$api/summary.json.tmp")" \
-  --argjson report "$(wc -c < "$api/report.json.tmp")" '{
+  --argjson report "$(wc -c < "$api/report.json.tmp")" \
+  --argjson manifest "$(wc -c < "$api/manifest.json")" \
+  --argjson history "$(jq .files.history.bytes "$api/manifest.json")" \
+  --argjson schema "$(jq .files.schema.bytes "$api/manifest.json")" \
+  --argjson days "$(jq '.days | length' "$api/manifest.json")" '{
     schema_version: 1, generated_at_ms: $g, generated_at: ($g/1000|floor|todate), timezone: $tz,
     docs: "https://ng.lexicone.com/api/v1/README.md", llms_txt: "https://ng.lexicone.com/llms.txt",
     files: [
-      {path: "/api/v1/latest.json",  purpose: "state of the grind in one small document: today, records, last run, streaks", bytes: $latest,  cache_max_age: 60},
-      {path: "/api/v1/summary.json", purpose: "every aggregate the site shows, without per-run rows", bytes: $summary, cache_max_age: 60},
-      {path: "/api/v1/report.json",  purpose: "the whole dataset: every run, split and session", bytes: $report, cache_max_age: 60},
-      {path: "/api/v1/README.md",    purpose: "field reference", cache_max_age: 3600}
+      {path: "/api/v1/latest.json",   purpose: "state of the grind in one small document: today, records, last run, streaks", bytes: $latest,  cache_max_age: 60},
+      {path: "/api/v1/summary.json",  purpose: "every aggregate the site shows, without per-run rows", bytes: $summary, cache_max_age: 60},
+      {path: "/api/v1/report.json",   purpose: "the whole dataset: every run, split and session", bytes: $report, cache_max_age: 60},
+      {path: "/api/v1/manifest.json", purpose: "per-day feed: lists days/<day>.json with size, sha256 and whether the day is closed; start here to fetch only what changed", bytes: $manifest, cache_max_age: 60, days: $days},
+      {path: "/api/v1/history.json",  purpose: "per-day stats and every finish, without the runs", bytes: $history, cache_max_age: 60},
+      {path: "/api/v1/schema.json",   purpose: "JSON Schema of manifest.json, days/<day>.json and history.json", bytes: $schema, cache_max_age: 3600},
+      {path: "/api/v1/README.md",     purpose: "field reference", cache_max_age: 3600}
     ]}' > "$api/index.json.tmp"
 for f in report summary latest index; do mv "$api/$f.json.tmp" "$api/$f.json"; done
 
