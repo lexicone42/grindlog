@@ -4,17 +4,37 @@
 //! with capture health, finishes, golds, and the reference times. Values
 //! read off the layout win over configured ones: its WR and lifetime PB
 //! replace the references of the same label, and its season best replaces
-//! `baseline_best_ms`.
+//! `baseline_best_ms`. `--api-dir` writes the per-day feed instead (api.rs):
+//! one file per broadcast day behind a manifest, for readers that want to
+//! fetch only what changed.
+
+use std::path::Path;
 
 use anyhow::Result;
 
 use crate::config::Config;
 use crate::timeparse::format_ms;
-use crate::{app, db, stats, util};
+use crate::{api, app, db, stats, util};
 
-pub async fn run(cfg: Config, json: bool) -> Result<()> {
+pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> {
     let pool = db::open(&cfg.database.path).await?;
     let (game, category) = app::load_game(&pool, &cfg).await?;
+    if let Some(dir) = api_dir {
+        let opts = api::Options::from_config(&cfg);
+        let today = db::local_today(&pool).await?;
+        let feed = api::build(&pool, &game, &category, &opts, &today, util::unix_ms()).await?;
+        let w = api::write(&feed, dir)?;
+        println!(
+            "wrote {} files ({} bytes) to {}: {} days, {} closed, today {}",
+            w.files,
+            w.bytes,
+            dir.display(),
+            feed.days.len(),
+            feed.days.iter().filter(|d| d.closed).count(),
+            today,
+        );
+        return Ok(());
+    }
     let summaries = db::summaries(&pool).await?;
     let today = db::today_stats(&pool, &game, &category, util::local_day_start_ms()).await?;
     // Every run and every split, for the site's per-day log.

@@ -4,7 +4,7 @@
 use anyhow::Result;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Row, SqlitePool};
+use sqlx::{FromRow, Row, SqlitePool};
 
 pub const OUTCOME_FINISHED: &str = "finished";
 pub const OUTCOME_RESET: &str = "reset";
@@ -823,6 +823,72 @@ pub async fn summaries(pool: &SqlitePool) -> Result<Vec<GameSummary>> {
             attempts: r.get("attempts"),
         })
         .collect())
+}
+
+// ---- the per-day feed (api.rs). Days are SQLite's local dates, the very
+// expression `daily_stats` groups by, so the feed's files, the site's daily
+// rows and import-vod.sh's day replacement all draw the same boundaries.
+
+const LOCAL_DAY: &str = "date(started_at_ms / 1000, 'unixepoch', 'localtime')";
+
+/// Every run of a game/category with the local day it started on, in
+/// chronological order (started_at_ms, then id).
+pub async fn runs_with_day(
+    pool: &SqlitePool,
+    game: &str,
+    category: &str,
+) -> Result<Vec<(String, RunRow)>> {
+    let rows = sqlx::query(&format!(
+        "SELECT *, {LOCAL_DAY} AS day FROM runs WHERE game = ? AND category = ? \
+         ORDER BY started_at_ms, id"
+    ))
+    .bind(game)
+    .bind(category)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|r| Ok((r.get("day"), RunRow::from_row(r)?)))
+        .collect()
+}
+
+/// Every session's id with the local day it started on.
+pub async fn session_days(pool: &SqlitePool) -> Result<Vec<(i64, String)>> {
+    let rows = sqlx::query(&format!("SELECT id, {LOCAL_DAY} AS day FROM sessions"))
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.get("id"), r.get("day")))
+        .collect())
+}
+
+/// Today as SQLite sees it — the same clock and zone as the day grouping.
+pub async fn local_today(pool: &SqlitePool) -> Result<String> {
+    let day: String = sqlx::query_scalar("SELECT date('now', 'localtime')")
+        .fetch_one(pool)
+        .await?;
+    Ok(day)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct TransitionRow {
+    pub at_ms: i64,
+    pub from_phase: String,
+    pub to_phase: String,
+    pub game: String,
+    pub category: String,
+    pub detail: Option<String>,
+}
+
+/// The latest state-machine transition on record, if any.
+pub async fn last_transition(pool: &SqlitePool) -> Result<Option<TransitionRow>> {
+    let row = sqlx::query_as::<_, TransitionRow>(
+        "SELECT at_ms, from_phase, to_phase, game, category, detail FROM transitions \
+         ORDER BY at_ms DESC, id DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }
 
 #[cfg(test)]

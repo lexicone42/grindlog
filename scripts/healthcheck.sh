@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Dead-man check for the live deployment, for a ten-minute cron (see
-# crontab.example). Each pass reads six signals:
+# crontab.example). Each pass reads seven signals:
 #
 #   supervisor  the tmux session "ngtimer" (scripts/run-live.sh) exists
 #   bot         exactly one `ngtwitchtimer --config live.toml run` is alive
@@ -14,6 +14,13 @@
 #               last 35 minutes: the bot polls every offline_poll_secs (60)
 #               there, and a Twitch API breakage logs capture errors instead
 #   disk        more than 5 GB free on the repository's filesystem
+#   deploy      the last deploy-site.sh entry in logs/deploy.log (cron's
+#               redirect for deploy-if-live.sh and the nightly deploy; each
+#               entry starts with a "=== <time> deploy start" line), when it
+#               started within the last 20 minutes, reached its "live:" line
+#               (else the build or an upload failed) and printed no "!!!"
+#               line (build-site.sh's "per-day feed not built"). Older
+#               entries are the daily summary's business
 #
 # A failing signal is reported at most once an hour (logs/health-state/<signal>
 # remembers the last alert) and once more, as an all-clear, when it recovers.
@@ -171,6 +178,32 @@ case $avail_kb in
       check disk 1 "only ${gb} GB free on $(df -P . 2>/dev/null | awk 'NR==2 {print $6}')"
     fi ;;
 esac
+
+# --- deploy: the last deploy's entry in logs/deploy.log, from its start
+# marker to the end of the file. Within 20 minutes of its start it must have
+# reached "live:" (every failure under set -e stops before that line) and
+# printed no "!!!" line (the per-day feed not built; the page still shipped).
+# A deploy takes well under a minute, so one started over 5 minutes ago
+# without a "live:" line died. No marker at all (a log from before the
+# markers) is nothing to alert on.
+DEPLOY_LOG=logs/deploy.log
+entry=$(awk '/^=== .* deploy start$/ {buf=""} {buf=buf $0 "\n"} END {printf "%s", buf}' "$DEPLOY_LOG" 2>/dev/null)
+stamp=$(printf '%s' "$entry" | head -1 | sed -n 's/^=== \(.*\) deploy start$/\1/p')
+e=$(date -d "${stamp:-1970-01-01T00:00:00Z}" +%s 2>/dev/null || echo 0)
+age=$((now - e))
+if [ -z "$stamp" ] || [ "$e" -eq 0 ]; then
+  check deploy 0 "no marked deploy entry in $DEPLOY_LOG yet"
+elif [ "$age" -gt 1200 ]; then
+  check deploy 0 "last deploy $((age / 60)) min ago"
+elif printf '%s' "$entry" | grep -q '^!!!'; then
+  check deploy 1 "deploy $((age / 60)) min ago: $(printf '%s' "$entry" | grep -m1 '^!!!' | cut -c1-200)"
+elif printf '%s' "$entry" | grep -q '^live: '; then
+  check deploy 0 "deploy $((age / 60)) min ago finished"
+elif [ "$age" -gt 300 ]; then
+  check deploy 1 "deploy started $((age / 60)) min ago did not reach 'live:' (tail $DEPLOY_LOG)"
+else
+  check deploy 0 "deploy in progress, started ${age}s ago"
+fi
 
 # --- deliver what changed, as one message.
 if [ ${#alerts[@]} -gt 0 ] || [ ${#clears[@]} -gt 0 ]; then
