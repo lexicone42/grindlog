@@ -279,6 +279,68 @@ fn trim_at_border(proc: &GrayImage) -> GrayImage {
     image::imageops::crop_imm(proc, 0, 0, end, h).to_image()
 }
 
+/// Is this a split worth recording? `Ok(Some(name))` with the act's name,
+/// `Ok(None)` for an act that is never taken from the column (the final
+/// act: its split IS the finish, written by the finish handler; the column
+/// can only offer a misread of the comparison row for it, which would pass
+/// every bound and become an impossible gold), `Err(why)` for a value that
+/// fails a plausibility check:
+/// - a split far below the act's configured boundary is a misread column
+///   (wrong row, wrong pane), not a segment nobody has ever run: an act
+///   cannot end before 90% of the previous act's (PB-padded) boundary, the
+///   first act before 60% of its own;
+/// - a split happened in the past: it cannot be later than the timer;
+/// - it must come after the previous act's split.
+fn vet_split(
+    acts: &[(String, Option<i64>)],
+    existing: &[crate::splits::RecordedSplit],
+    idx: usize,
+    cum: i64,
+    now: Option<i64>,
+) -> Result<Option<String>, String> {
+    if existing.iter().any(|s| s.act_index == idx) {
+        return Ok(None);
+    }
+    if idx + 1 == acts.len() {
+        return Ok(None);
+    }
+    let act_name = acts
+        .get(idx)
+        .map(|a| a.0.clone())
+        .unwrap_or_else(|| format!("Act {}", idx + 1));
+    let floor = match idx {
+        0 => acts.first().and_then(|a| a.1).map(|end| end * 6 / 10),
+        k => acts.get(k - 1).and_then(|a| a.1).map(|end| end * 9 / 10),
+    };
+    if let Some(floor) = floor.filter(|&f| cum < f) {
+        return Err(format!(
+            "{act_name} at {} (below {} — misread column?)",
+            format_ms(cum),
+            format_ms(floor)
+        ));
+    }
+    if let Some(now) = now.filter(|&n| cum > n + 5_000) {
+        return Err(format!(
+            "{act_name} at {} while the timer reads {}",
+            format_ms(cum),
+            format_ms(now)
+        ));
+    }
+    let prev_cum = existing
+        .iter()
+        .filter(|s| s.act_index < idx)
+        .map(|s| s.cumulative_ms)
+        .max();
+    if let Some(p) = prev_cum.filter(|&p| cum <= p) {
+        return Err(format!(
+            "{act_name} at {} is not after the previous act ({})",
+            format_ms(cum),
+            format_ms(p)
+        ));
+    }
+    Ok(Some(act_name))
+}
+
 /// The component-wise median of a few points (at least one).
 fn median_point(pts: &[(i32, i32)]) -> (i32, i32) {
     let mut xs: Vec<i32> = pts.iter().map(|p| p.0).collect();
@@ -2568,78 +2630,24 @@ pub async fn run(cfg: Config) -> Result<()> {
                         );
                         continue;
                     }
-                    if current
+                    let existing: &[crate::splits::RecordedSplit] = current
                         .as_ref()
-                        .is_some_and(|cr| cr.splits.iter().any(|s| s.act_index == idx))
-                    {
-                        continue;
-                    }
-                    // The final act's split IS the finish and is written by
-                    // the finish handler. The column can only offer a misread
-                    // of the comparison row for it — "11:35.0" for a PB of
-                    // 11:35.1, read twice — which then passes every bound and
-                    // becomes an impossible gold on a run that was reset.
-                    if idx + 1 == shared.acts.len() {
-                        continue;
-                    }
-                    let act_name = shared
-                        .acts
-                        .get(idx)
-                        .map(|a| a.0.clone())
-                        .unwrap_or_else(|| format!("Act {}", idx + 1));
-                    // A split far below the act's configured boundary is a
-                    // misread column (wrong row, wrong pane), not a segment
-                    // nobody has ever run; keep it out of the golds.
-                    // Floor: an act can't end before 90% of the previous
-                    // act's (PB-padded) boundary; the first act before 60%
-                    // of its own. The final act, which has no boundary,
-                    // uses the previous one too.
-                    let floor = match idx {
-                        0 => shared
-                            .acts
-                            .first()
-                            .and_then(|a| a.1)
-                            .map(|end| end * 6 / 10),
-                        k => shared
-                            .acts
-                            .get(k - 1)
-                            .and_then(|a| a.1)
-                            .map(|end| end * 9 / 10),
+                        .map(|cr| cr.splits.as_slice())
+                        .unwrap_or(&[]);
+                    let act_name = match vet_split(
+                        &shared.acts,
+                        existing,
+                        idx,
+                        cum,
+                        tracker.smoothed_now(t),
+                    ) {
+                        Ok(Some(name)) => name,
+                        Ok(None) => continue,
+                        Err(why) => {
+                            warn!("ignoring implausible split: {why}");
+                            continue;
+                        }
                     };
-                    if let Some(floor) = floor.filter(|&f| cum < f) {
-                        warn!(
-                            "ignoring implausible split: {act_name} at {} (below {} — misread column?)",
-                            format_ms(cum),
-                            format_ms(floor)
-                        );
-                        continue;
-                    }
-                    // A split happened in the past: it can't be later than the
-                    // timer, and it must come after the previous act's split.
-                    let now = tracker.smoothed_now(t);
-                    if let Some(now) = now.filter(|&n| cum > n + 5_000) {
-                        warn!(
-                            "ignoring implausible split: {act_name} at {} while the timer reads {}",
-                            format_ms(cum),
-                            format_ms(now)
-                        );
-                        continue;
-                    }
-                    let prev_cum = current.as_ref().and_then(|cr| {
-                        cr.splits
-                            .iter()
-                            .filter(|s| s.act_index < idx)
-                            .map(|s| s.cumulative_ms)
-                            .max()
-                    });
-                    if let Some(p) = prev_cum.filter(|&p| cum <= p) {
-                        warn!(
-                            "ignoring implausible split: {act_name} at {} is not after the previous act ({})",
-                            format_ms(cum),
-                            format_ms(p)
-                        );
-                        continue;
-                    }
                     info!("split: {act_name} done at {}", format_ms(cum));
                     let rs = crate::splits::RecordedSplit {
                         act_index: idx,
@@ -2873,6 +2881,41 @@ pub async fn run(cfg: Config) -> Result<()> {
                     shared.current_splits.write().await.clear();
                 }
                 Event::Finished { .. } | Event::Reset { .. } => {
+                    // Acts whose actual time tied the comparison never show
+                    // as a change; a later act would have backfilled them,
+                    // and at the run's end nothing else will. Take what the
+                    // column settled on, bounded by where the run ended (a
+                    // finish, or where a zeroed reset says it died — a desync
+                    // or a vanished timer bounds nothing).
+                    let end = match &ev {
+                        Event::Finished { final_ms } => Some(*final_ms),
+                        Event::Reset {
+                            last_ms,
+                            reason: crate::state::ResetReason::Zeroed,
+                        } => Some(*last_ms),
+                        _ => None,
+                    };
+                    if let (Some(end), Some(st), Some(cr)) =
+                        (end, splits_tracker.as_mut(), current.as_mut())
+                    {
+                        for (idx, cum) in st.drain_stable(end) {
+                            match vet_split(&shared.acts, &cr.splits, idx, cum, Some(end)) {
+                                Ok(Some(act_name)) => {
+                                    info!(
+                                        "split: {act_name} done at {} (tied its comparison; recorded at the run's end)",
+                                        format_ms(cum)
+                                    );
+                                    cr.splits.push(crate::splits::RecordedSplit {
+                                        act_index: idx,
+                                        act_name,
+                                        cumulative_ms: cum,
+                                    });
+                                }
+                                Ok(None) => {}
+                                Err(why) => debug!("tied split not recorded: {why}"),
+                            }
+                        }
+                    }
                     splits_tracker = None;
                     shared.current_splits.write().await.clear();
                 }

@@ -55,6 +55,34 @@ impl SplitsTracker {
         }
     }
 
+    /// The run is over at `end_ms` (its finish, or where it died): every act
+    /// not yet recorded whose row settled on a value that fits — after the
+    /// previous recorded act, before the end — completed with its actual
+    /// time TYING the comparison to the display's precision, which never
+    /// shows as a change and so was never recorded. A later act would have
+    /// backfilled it; at the run's end nothing else will. Returns them in
+    /// row order; the caller applies its own plausibility checks.
+    pub fn drain_stable(&mut self, end_ms: i64) -> Vec<(usize, i64)> {
+        let mut out = Vec::new();
+        for j in 0..self.recorded.len() {
+            if self.recorded[j].is_some() {
+                continue;
+            }
+            let Some((sv, n)) = self.stable[j] else {
+                continue;
+            };
+            let after_prev = self.recorded[..j]
+                .iter()
+                .flatten()
+                .all(|&earlier| sv > earlier);
+            if n >= self.confirmations && sv > 0 && sv < end_ms && after_prev {
+                self.recorded[j] = Some(sv);
+                out.push((j, sv));
+            }
+        }
+        out
+    }
+
     /// One OCR pass over the panel: one value per row (None = unreadable).
     /// `timer_ms` is the current main-timer estimate, used as a plausibility
     /// bound (a split can't be later than "now"). Returns newly confirmed
@@ -129,6 +157,43 @@ impl SplitsTracker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tied_acts_are_drained_when_the_run_ends() {
+        use super::SplitsTracker;
+        // Three acts; act 0 ties its comparison (never changes), act 1
+        // records normally, act 2 is where the run dies.
+        let mut t = SplitsTracker::new(3, 50, 2);
+        let base = [Some(47_000), Some(161_000), Some(242_000)];
+        assert!(t.observe(&base, Some(10_000)).is_empty());
+        for _ in 0..3 {
+            assert!(t.observe(&base, Some(60_000)).is_empty());
+        }
+        // Act 1 changes: recorded, and act 0 is backfilled from its stable
+        // (tied) value by the existing rule.
+        let changed = [Some(47_000), Some(160_200), Some(242_000)];
+        assert!(t.observe(&changed, Some(161_000)).is_empty());
+        assert_eq!(
+            t.observe(&changed, Some(162_000)),
+            vec![(0, 47_000), (1, 160_200)]
+        );
+        // Nothing left to drain: act 2 shows the comparison, not a time.
+        assert_eq!(t.drain_stable(200_000), vec![]);
+
+        // A run that dies in act 1 with act 0 tied: nothing ever changed,
+        // so nothing was recorded; the drain at the death recovers act 0.
+        let mut t = SplitsTracker::new(3, 50, 2);
+        for _ in 0..4 {
+            assert!(t.observe(&base, Some(90_000)).is_empty());
+        }
+        assert_eq!(t.drain_stable(95_000), vec![(0, 47_000)]);
+        // ...but not an act whose stable value lies past the death.
+        let mut t = SplitsTracker::new(3, 50, 2);
+        for _ in 0..4 {
+            assert!(t.observe(&base, Some(30_000)).is_empty());
+        }
+        assert_eq!(t.drain_stable(30_000), vec![]);
+    }
+
     use super::*;
 
     /// Baseline row values (the PB comparison shown before each act is done).

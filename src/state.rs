@@ -207,6 +207,13 @@ struct Run {
     /// readings go back through the normal desync logic — a quick restart
     /// still gets its run, two frames later.
     truncated_streak: u32,
+    /// The last good reading before the timer showed the pre-start offset
+    /// while this run was still young. A run that dies in its first seconds
+    /// and is restarted shows "-5.00" (read as 5.00) and then the countdown,
+    /// which a young run cannot tell from its own timer passing 5 seconds
+    /// until the next reading goes DOWN; when it does, this is where the run
+    /// really died, not the 5.00.
+    before_offset_ms: Option<i64>,
 }
 
 /// Is `v` the expected reading with its leading digits dropped? "1:56.71"
@@ -234,6 +241,17 @@ impl Run {
             // right for a run joined mid-way, whose start we never saw.
             last_low_at: t - v,
             truncated_streak: 0,
+            before_offset_ms: None,
+        }
+    }
+
+    /// Where the run really stood when it ended: a run that died in its
+    /// first seconds and was restarted last "read" the pre-start offset (5.00
+    /// for "-5.00"), which is the reset screen, not a time.
+    fn death_ms(&self, cfg: &TrackerConfig, at: i64) -> i64 {
+        match self.before_offset_ms {
+            Some(b) if (at - cfg.prestart_offset_ms).abs() <= cfg.stall_tolerance_ms => b,
+            _ => at,
         }
     }
 }
@@ -354,6 +372,51 @@ impl Tracker {
             run.last_low_at = t;
         }
 
+        // 0. The pre-start countdown of the NEXT attempt, on a run that died
+        //    in its first seconds: LiveSplit shows "-5.00", read as a bare
+        //    5.00, then counts DOWN. A young run's own timer passes 5.00 too,
+        //    so a reading at the offset is held rather than accepted, and
+        //    the next reading decides: down means countdown (reset evidence,
+        //    and the run died at the reading before the offset), up means
+        //    the run goes on. Without this the countdown's 5.00 was accepted
+        //    as a time, deaths under ten seconds were recorded at 5.0, and
+        //    the attempt counter — already bumped for the new attempt — was
+        //    read for the dying run.
+        let young = run.last_good_ms < cfg.prestart_offset_ms + 5_000;
+        let at_offset = cfg.prestart_offset_ms > 0
+            && (v - cfg.prestart_offset_ms).abs() <= cfg.stall_tolerance_ms;
+        let counting_down = cfg.prestart_offset_ms > 0
+            && v < cfg.prestart_offset_ms
+            && v > cfg.reset_epsilon_ms
+            && last_raw <= cfg.prestart_offset_ms + cfg.stall_tolerance_ms
+            && last_raw - v >= cfg.stall_tolerance_ms
+            && run.before_offset_ms.is_some();
+        if young && counting_down {
+            run.zeroish += 1;
+            run.suspects.clear();
+            if run.zeroish >= cfg.reset_confirmations {
+                events.push(Event::Reset {
+                    last_ms: run.before_offset_ms.unwrap_or(run.last_good_ms),
+                    reason: ResetReason::Zeroed,
+                });
+                return Phase::Idle { chain: Vec::new() };
+            }
+            return Phase::Running(run);
+        }
+        if young && at_offset && run.before_offset_ms.is_none() {
+            // Held: neither accepted nor rejected. Repeats of it still count
+            // toward a frozen timer below (a run parked on the reset screen
+            // ends as TooShort, at the time it really died).
+            run.before_offset_ms = Some(run.last_good_ms);
+            run.streak_value = v;
+            run.streak_repeats = 0;
+            return Phase::Running(run);
+        }
+        if run.before_offset_ms.is_some() && v > cfg.prestart_offset_ms + cfg.stall_tolerance_ms {
+            // The run went on past the offset after all.
+            run.before_offset_ms = None;
+        }
+
         // 1. Same value as last accepted reading: the timer is not advancing.
         //    Checked before the expected-window test, because a frozen timer
         //    drifts ever further from the wall-clock expectation.
@@ -364,7 +427,7 @@ impl Tracker {
             if run.streak_repeats >= cfg.stall_confirmations {
                 if run.streak_value < cfg.min_final_ms {
                     events.push(Event::Reset {
-                        last_ms: run.streak_value,
+                        last_ms: run.death_ms(cfg, run.streak_value),
                         reason: ResetReason::TooShort,
                     });
                 } else {
@@ -403,7 +466,7 @@ impl Tracker {
             run.suspects.clear();
             if run.zeroish >= cfg.reset_confirmations {
                 events.push(Event::Reset {
-                    last_ms: run.last_good_ms,
+                    last_ms: run.death_ms(cfg, run.last_good_ms),
                     reason: ResetReason::Zeroed,
                 });
                 return Phase::Idle { chain: Vec::new() };
@@ -661,6 +724,9 @@ mod tests {
     fn short_freeze_is_a_reset_not_a_finish() {
         // Runner dies at ~5s and resets; LiveSplit's "-5.00" pre-start offset
         // OCRs as a constant "5.00" that would otherwise look like a finish.
+        // The 5.00 itself is the reset screen as far as anyone can tell, so
+        // the death is reported at the last reading that was certainly the
+        // timer (4.0 s), not at the offset's value.
         let mut s = Sim::new(cfg());
         s.start_run(5000);
         for _ in 0..4 {
@@ -669,7 +735,7 @@ mod tests {
         assert_eq!(
             s.time(5000),
             vec![Event::Reset {
-                last_ms: 5000,
+                last_ms: 4000,
                 reason: ResetReason::TooShort
             }]
         );
@@ -870,6 +936,85 @@ mod tests {
         assert_eq!(s.time(361_000), vec![]);
         let ev = s.time(362_000);
         assert!(matches!(ev.first(), Some(Event::Resynced { .. })), "{ev:?}");
+    }
+
+    /// A run that dies at four seconds and is restarted: LiveSplit shows the
+    /// pre-start "-5.00" (read as 5.00) for a moment, then counts down. The
+    /// run must end where it died, the countdown must not be accepted as
+    /// timer readings, and the new attempt must start on the way up.
+    #[test]
+    fn a_young_death_followed_by_the_countdown_ends_at_the_death() {
+        let mut s = Sim::new(cfg());
+        s.start_run(4_000);
+        let died_at = s.t;
+        // The reset screen: the offset, held rather than accepted.
+        assert_eq!(s.time(5_000), vec![]);
+        assert_eq!(s.time(5_000), vec![]);
+        assert_eq!(
+            s.tr.accepted_age_ms(s.t),
+            Some(s.t - died_at),
+            "the offset reading must not count as an accepted time"
+        );
+        // Counting down: reset evidence, and the death time is the 4.0 s
+        // reading, not the 5.00.
+        assert_eq!(s.time(4_500), vec![]);
+        assert_eq!(
+            s.time(4_000),
+            vec![Event::Reset {
+                last_ms: 4_000,
+                reason: ResetReason::Zeroed,
+            }]
+        );
+        assert_eq!(s.tr.phase_name(), "IDLE");
+        // The countdown continues and the new attempt starts on the way up.
+        for v in [3_500, 3_000, 2_500, 2_000, 1_500, 1_000, 500] {
+            assert_eq!(s.time(v), vec![], "countdown value {v}");
+        }
+        assert_eq!(s.time(300), vec![]);
+        assert_eq!(s.time(1_300), vec![]);
+        assert_eq!(s.time(2_300), vec![]);
+        assert_eq!(s.time(3_300), vec![Event::Started { timer_ms: 3_300 }]);
+    }
+
+    /// The same run parked on the reset screen (he waits before restarting):
+    /// a frozen offset is TooShort, at the time it really died.
+    #[test]
+    fn a_young_run_parked_on_the_reset_screen_died_before_the_offset() {
+        let mut s = Sim::new(cfg());
+        s.start_run(4_000);
+        // The first offset reading is held (it counts as the first sighting
+        // of the frozen value); stall_confirmations repeats then end it.
+        for _ in 0..5 {
+            assert_eq!(s.time(5_000), vec![]);
+        }
+        assert_eq!(
+            s.time(5_000),
+            vec![Event::Reset {
+                last_ms: 4_000,
+                reason: ResetReason::TooShort,
+            }]
+        );
+    }
+
+    /// A run that simply passes five seconds is not disturbed by the hold:
+    /// the offset-valued reading is skipped and the run goes on.
+    #[test]
+    fn a_run_passing_the_offset_value_goes_on() {
+        let mut s = Sim::new(cfg());
+        s.start_run(4_000);
+        assert_eq!(s.time(5_000), vec![]);
+        s.advance_quietly(6_000, 20_000);
+        assert_eq!(s.tr.phase_name(), "RUNNING");
+        assert_eq!(s.tr.accepted_age_ms(s.t), Some(0));
+        // ...and a reset much later is reported where it happened.
+        assert_eq!(s.time(200), vec![]);
+        assert_eq!(
+            s.time(200),
+            vec![Event::Reset {
+                last_ms: 20_000,
+                reason: ResetReason::Zeroed,
+            }]
+        );
     }
 
     #[test]
