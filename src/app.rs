@@ -1148,9 +1148,17 @@ async fn measure_pane(
     // block is anchored from the bottom over `acts` rows, so on a pane with
     // more rows than acts it starts too low and the rows above it would
     // pass for title lines). Without either, above the timer.
+    // Only a row that looks like one may raise the boundary: a stray word
+    // that happens to parse as a time (the digits pass emits fragments like
+    // "4.6" over title text, at confidence 0) forms a one-cell, nameless
+    // row, and letting that stand would push the title out of its own lines.
     let splits_top = [
         geom.map(|g| timer.1 as i64 + g.splits.1 as i64),
-        board.rows.first().map(|r| r.y),
+        board
+            .rows
+            .iter()
+            .find(|r| r.cells.len() >= 2 || r.name.is_some())
+            .map(|r| r.y),
     ]
     .into_iter()
     .flatten()
@@ -1314,15 +1322,16 @@ fn apply_title(
 /// it would do with the board — the (game, category) its runs would be
 /// filed under (`board::canonical_key`) and the rows it read — once per
 /// distinct board, as a `layout snapshot:` log line and a `layout` session
-/// event. Two boards are the same when their snapshots agree in normalised
-/// form (`board::Snapshot::normalised`: the key and the legible names), so
-/// the once-a-minute re-reads of one pane record one event; the running
-/// row losing its label, a "???" row read differently, the counter ticking
-/// over do not. Nothing recorded changes.
+/// event. A board is news only when its key changes or a name appears that
+/// the last snapshot under that key did not carry
+/// (`board::Snapshot::is_news_against`), so the once-a-minute re-reads of
+/// one pane record one event; the running row losing its label, a "???" row
+/// read differently, the counter ticking over do not. Nothing recorded
+/// changes.
 fn shadow_board(
     board: &Board,
     cfg: &Config,
-    last: &mut Option<String>,
+    last: &mut Option<board::Snapshot>,
     health: &mut db::SessionHealth,
     at_ms: i64,
 ) {
@@ -1330,8 +1339,7 @@ fn shadow_board(
         return;
     }
     let snap = board::Snapshot::of(board, cfg);
-    let norm = snap.normalised();
-    if last.as_deref() == Some(norm.as_str()) {
+    if !snap.is_news_against(last.as_ref()) {
         return;
     }
     info!(
@@ -1346,7 +1354,7 @@ fn shadow_board(
             .unwrap_or_default()
     );
     health.event(at_ms, "layout", snap.json());
-    *last = Some(norm);
+    *last = Some(snap);
 }
 
 /// Persist a confirmed reference time and, for the season best, adopt it as
@@ -1790,8 +1798,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut pane_game: Option<String> = None;
     let mut pane_game_ok = true;
     let mut title_mismatches: u32 = 0;
-    // The board reader's last snapshot (normalised), in shadow mode.
-    let mut last_board_snapshot: Option<String> = None;
+    // The board reader's last snapshot, in shadow mode.
+    let mut last_board_snapshot: Option<board::Snapshot> = None;
 
     // Recorded sources (vod/file) may decode much faster than realtime, so
     // the state machine is ticked by frame index instead of wall clock —

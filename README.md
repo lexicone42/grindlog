@@ -462,9 +462,12 @@ ignored; the `???` rows of a marathon board read differently every minute
 and do not count), so the once-a-minute re-reads of one pane record one
 event and a game drawn onto the board records another. The key is the
 configured `game.name` when
-the title fuzzy-matches it, else the `[[games]]` entry whose `match` string
-the normalised title contains (`name = "Arcathlon"`, `match = ["arcath"]`,
-optional `category`), else the title itself with the subtitle as category.
+the title fuzzy-matches it (a title the crop cut short, `Nin Gaid`, still
+does), else the `[[games]]` entry one of whose `match` strings a word of the
+title reads as, letter damage allowed (`name = "Arcathlon"`, `match =
+["arcath", "randomized"]`, optional `category` — list every word that names
+the event, since one of them can fall under the confidence gate), else the
+title itself with the subtitle as category.
 Nothing acts on it yet: runs, splits and counters are recorded as before,
 and `follow_title` is exclusive with `require_title_match`. The page's copy
 of the report drops the `title` events (`build-site.sh`) and keeps these.

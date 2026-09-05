@@ -555,8 +555,17 @@ pub fn game_matches(detected: &str, configured: &str) -> bool {
     if a.contains(&b) || b.contains(&a) {
         return true;
     }
-    // Levenshtein, capped: names of different games differ by far more.
-    let (m, n) = (a.len(), b.len());
+    edit_close(&a, &b)
+}
+
+/// Levenshtein within a fifth of the longer string, capped: two names of
+/// different games differ by far more than OCR damage does. Empty strings
+/// never match.
+fn edit_close(a: &str, b: &str) -> bool {
+    let (m, n) = (a.chars().count(), b.chars().count());
+    if m == 0 || n == 0 {
+        return false;
+    }
     let mut prev: Vec<usize> = (0..=n).collect();
     let mut cur = vec![0usize; n + 1];
     for (i, ca) in a.chars().enumerate() {
@@ -571,11 +580,40 @@ pub fn game_matches(detected: &str, configured: &str) -> bool {
     prev[n] * 5 <= m.max(n)
 }
 
+/// Does any word of the title read as this `match` string? Tesseract damages
+/// a letter or two per word on this footage ("Arcathlon" comes back
+/// "Arcathion", "Areathion", "Arcathton"), so an exact substring test files
+/// the same board under a different key every time a letter flips. A word
+/// counts when it contains the match string, or when it is within a fifth of
+/// its length in edits — the same tolerance `game_matches` uses, applied to
+/// the word rather than the whole line, since the rest of the title
+/// ("Randomized ", "#6") is not the part being matched.
+fn word_matches(norm_title: &str, m: &str) -> bool {
+    if m.is_empty() {
+        return false;
+    }
+    if norm_title.contains(m) {
+        return true;
+    }
+    norm_title.split(' ').any(|w| {
+        if w.is_empty() {
+            return false;
+        }
+        // A match string is a fragment ("arcath" of "Arcathlon"), so compare
+        // it with as much of the word as it covers: "areathion" begins
+        // "areath", one edit from "arcath". The whole word would be four
+        // edits away and no fragment would ever match a longer word.
+        let head: String = w.chars().take(m.chars().count()).collect();
+        edit_close(&head, m) || edit_close(w, m)
+    })
+}
+
 /// The (game, category) a board's runs would be filed under. The configured
 /// game by fuzzy match first; then a `[[games]]` alias whose `match` string
-/// the normalised title contains; else the title itself (original casing,
-/// punctuation dropped, single spaces) with the subtitle as the category
-/// when it has three letters, "unknown" otherwise. None without a title.
+/// (or name) a word of the title reads as; else the title itself (original
+/// casing, punctuation dropped, single spaces) with the subtitle as the
+/// category when it has three letters, "unknown" otherwise. None without a
+/// title.
 pub fn canonical_key(board: &Board, cfg: &Config) -> Option<(String, String)> {
     let title = board.title.as_deref()?;
     if game_matches(title, &cfg.game.name) {
@@ -583,12 +621,13 @@ pub fn canonical_key(board: &Board, cfg: &Config) -> Option<(String, String)> {
     }
     let norm = normalise_title(title);
     for alias in &cfg.games {
-        if alias
+        let matched = alias
             .r#match
             .iter()
+            .chain(std::iter::once(&alias.name))
             .map(|m| normalise_title(m))
-            .any(|m| !m.is_empty() && norm.contains(&m))
-        {
+            .any(|m| word_matches(&norm, &m));
+        if matched {
             return Some((
                 alias.name.clone(),
                 alias
@@ -597,6 +636,22 @@ pub fn canonical_key(board: &Board, cfg: &Config) -> Option<(String, String)> {
                     .unwrap_or_else(|| "unknown".to_string()),
             ));
         }
+    }
+    // A title the crop cut short ("Nin Gaid" where the pane is clipped, or
+    // one word of the configured name read at confidence) is that game, not
+    // a new one: every word of the title reads as a word of the configured
+    // name, and there is at least one such word. Without this the fallback
+    // mints a key per spelling and the shadow log flaps between them.
+    let cfg_norm = normalise_title(&cfg.game.name);
+    let title_words: Vec<&str> = norm.split(' ').filter(|w| !w.is_empty()).collect();
+    if !title_words.is_empty()
+        && title_words.iter().all(|w| {
+            cfg_norm
+                .split(' ')
+                .any(|c| !c.is_empty() && (c.starts_with(w) || edit_close(w, c)))
+        })
+    {
+        return Some((cfg.game.name.clone(), cfg.game.category.clone()));
     }
     let cased: String = title
         .chars()
@@ -666,6 +721,11 @@ impl Snapshot {
             Some((g, c)) => format!("{}|{}", normalise_title(g), normalise_title(c)),
             None => String::new(),
         };
+        format!("{key}#{}", self.legible().join("/"))
+    }
+
+    /// The legible names on the board, normalised, sorted and deduplicated.
+    fn legible(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .names
             .iter()
@@ -674,7 +734,31 @@ impl Snapshot {
             .collect();
         names.sort();
         names.dedup();
-        format!("{key}#{}", names.join("/"))
+        names
+    }
+
+    /// Whether this board is news against the last one reported. The same
+    /// key and a name set that only lost names is the same board read less
+    /// well: the highlighted row's label is unreadable while it is current,
+    /// so a game would otherwise be reported again every time its row comes
+    /// up. A name never seen on this key is a new board.
+    pub fn is_news_against(&self, last: Option<&Snapshot>) -> bool {
+        let Some(prev) = last else {
+            return true;
+        };
+        if self.normalised() == prev.normalised() {
+            return false;
+        }
+        let key = |s: &Snapshot| {
+            s.key
+                .as_ref()
+                .map(|(g, c)| (normalise_title(g), normalise_title(c)))
+        };
+        if key(self) != key(prev) {
+            return true;
+        }
+        let before = prev.legible();
+        self.legible().iter().any(|n| !before.contains(n))
     }
 
     /// The session event's detail: `{"key":[game,category],"rows":n,"names":[...]}`.
@@ -911,7 +995,11 @@ mod tests {
         cfg.games = vec![GameAlias {
             name: "Arcathlon".into(),
             category: Some("10 games".into()),
-            r#match: vec!["arcath".into()],
+            // Both words of his marathon title: on the 1080p board the
+            // second word comes back under the confidence gate and only
+            // "Randomized" is read, so an alias on "arcath" alone would
+            // miss the very frames the board reader was built for.
+            r#match: vec!["arcath".into(), "randomized".into()],
         }];
         cfg
     }
@@ -1331,5 +1419,118 @@ mod tests {
                 cells: 1.0,
             },
         );
+    }
+
+    /// The keys the real panes file under, read end to end: the fixture's own
+    /// words through `read_board` into `canonical_key`. The titles come back
+    /// damaged and cut — "Randomized" alone where "Arcathlon" fell under the
+    /// confidence gate, "Randomi zed Areathion", a clipped "Nin Gaid" — and
+    /// all of them must still land on the game they are, or the shadow log
+    /// mints a key per spelling and reports the same board over and over.
+    #[test]
+    fn every_real_pane_files_under_the_game_it_is() {
+        let cfg = cfg_with_alias();
+        let ng = Some(("Ninja Gaiden (NES)".to_string(), "Any%".to_string()));
+        let arca = Some(("Arcathlon".to_string(), "10 games".to_string()));
+        for (name, want) in [
+            ("ng-default", &ng),
+            ("ng-theme", &ng),
+            ("jul14-gameplay", &ng),
+            ("arcathlon-final", &arca),
+            ("arcathlon-numbered", &arca),
+            ("arcathlon-early", &arca),
+        ] {
+            let f = load(name);
+            let board = read_board(&to_words(&f.words), &to_words(&f.letters), f.scale, f.timer);
+            assert_eq!(
+                &canonical_key(&board, &cfg),
+                want,
+                "{name}: title {:?}",
+                board.title
+            );
+        }
+        // The July 14 opening scene cuts the title away entirely; with no
+        // title there is no key, and shadow mode says nothing.
+        let f = load("jul14-opening");
+        let board = read_board(&to_words(&f.words), &to_words(&f.letters), f.scale, f.timer);
+        assert_eq!(board.title, None);
+        assert_eq!(canonical_key(&board, &cfg), None);
+    }
+
+    /// A word of the title reads as the match string even when tesseract
+    /// damages it, and the alias's own name matches as well; an unrelated
+    /// game still falls through to its own key.
+    #[test]
+    fn aliases_match_through_ocr_damage() {
+        let cfg = cfg_with_alias();
+        let arca = Some(("Arcathlon".to_string(), "10 games".to_string()));
+        for title in [
+            "Randomized Arcathlon",
+            "Randomized Arcathion",
+            "Randomized Areathion",
+            "Arcathlon #6",
+            "Arcathton £4",
+            "RANDOMIZED ARCATHLON!",
+        ] {
+            assert_eq!(canonical_key(&titled(title, None), &cfg), arca, "{title}");
+        }
+        assert_eq!(
+            canonical_key(&titled("Castlevania II", Some("Any%")), &cfg),
+            Some(("Castlevania II".to_string(), "Any%".to_string()))
+        );
+    }
+
+    /// A clipped or half-read title of the configured game is that game: the
+    /// default scene's crop cuts "Ninja Gaiden (NES)" to its first letters
+    /// on some frames, and a key per spelling would flap all day.
+    #[test]
+    fn a_cut_title_of_the_configured_game_is_that_game() {
+        let cfg = cfg_with_alias();
+        let ng = Some(("Ninja Gaiden (NES)".to_string(), "Any%".to_string()));
+        for title in ["Nin Gaid", "Ninja Gaid", "Ninja", "Nlnja Galden"] {
+            assert_eq!(canonical_key(&titled(title, None), &cfg), ng, "{title}");
+        }
+        // Not everything short is his game.
+        assert_ne!(canonical_key(&titled("Jaws", None), &cfg), ng);
+    }
+
+    /// The highlighted row's label is unreadable while that row is current,
+    /// so a board whose names only shrink is the same board read less well;
+    /// a name never seen under this key is a new board.
+    #[test]
+    fn a_row_losing_its_name_is_not_a_new_board() {
+        let cfg = cfg_with_alias();
+        let row = |n: Option<&str>| BoardRow {
+            name: n.map(Into::into),
+            cells: vec!["1:00".into(), "1:00".into()],
+            y: 0,
+        };
+        let board = |names: &[Option<&str>]| Board {
+            title: Some("Randomized Arcathlon".into()),
+            rows: names.iter().map(|n| row(*n)).collect(),
+            ..Board::default()
+        };
+        let full = Snapshot::of(&board(&[Some("Astyanax"), Some("King Kong 2")]), &cfg);
+        let lost = Snapshot::of(&board(&[Some("Astyanax"), None]), &cfg);
+        let grown = Snapshot::of(
+            &board(&[Some("Astyanax"), Some("King Kong 2"), Some("Hebereke")]),
+            &cfg,
+        );
+        assert!(full.is_news_against(None));
+        assert!(!lost.is_news_against(Some(&full)));
+        assert!(!full.is_news_against(Some(&full)));
+        // The name comes back: still nothing new, it was seen before.
+        assert!(!full.is_news_against(Some(&full)));
+        assert!(grown.is_news_against(Some(&full)));
+        // A different key is always news, even with the same names.
+        let ng = Snapshot::of(
+            &Board {
+                title: Some("Ninja Gaiden (NES)".into()),
+                rows: vec![row(Some("Astyanax")), row(Some("King Kong 2"))],
+                ..Board::default()
+            },
+            &cfg,
+        );
+        assert!(ng.is_news_against(Some(&full)));
     }
 }

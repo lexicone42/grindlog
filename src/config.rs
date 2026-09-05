@@ -726,9 +726,15 @@ impl Config {
             if g.name.trim().is_empty() {
                 bail!("a [[games]] entry has no name");
             }
-            if !g.r#match.iter().any(|m| !m.trim().is_empty()) {
+            // Matching is on the title's alphanumerics, so a match string of
+            // punctuation alone survives trimming and still matches nothing.
+            if !g
+                .r#match
+                .iter()
+                .any(|m| !crate::board::normalise_title(m).is_empty())
+            {
                 bail!(
-                    "[[games]] entry {:?} has no match strings, so no title can ever name it",
+                    "[[games]] entry {:?} has no usable match strings (letters or digits), so no title can ever name it",
                     g.name
                 );
             }

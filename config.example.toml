@@ -262,15 +262,19 @@ category = "Any%"
                                 #   default. The ids are stored either way
 
 # Other games the pane's title row may name, for the board reader. A title
-# that does not fuzzy-match [game] name files under the entry whose match
-# string the normalised title (lowercase letters, digits, single spaces)
-# contains: "Randomized Arcathlon" and "Arcathlon #6" both contain "arcath".
-# Without a matching entry the title itself is the name. One entry per
-# game; the category is optional ("unknown" without it).
+# that does not fuzzy-match [game] name files under the entry one of whose
+# match strings a word of the normalised title (lowercase letters, digits,
+# single spaces) reads as, allowing for the letter or two OCR damages:
+# "Randomized Arcathlon", "Arcathlon #6" and the misread "Randomized
+# Areathion" all match "arcath". List every word that identifies the event,
+# not only the obvious one: on some frames a word falls under the OCR
+# confidence gate and only the other is read. Without a matching entry the
+# title itself is the name. One entry per game; the category is optional
+# ("unknown" without it).
 [[games]]
 name = "Arcathlon"
 category = "10 games"
-match = ["arcath"]
+match = ["arcath", "randomized"]
 
 [database]
 # path = "ngtimer.db"
