@@ -128,6 +128,25 @@ pub struct RunRow {
     pub ls_attempt: Option<i64>,
 }
 
+impl RunRow {
+    /// How the run is named to people; see [`run_no`].
+    pub fn run_no(&self) -> String {
+        run_no(self.ls_attempt, self.attempt_number)
+    }
+}
+
+/// The run's name in chat and the log: the runner's own LiveSplit attempt
+/// counter ("run 96677") when it was read, and only otherwise our tracked
+/// ordinal, marked as such ("tracked #2056") so nobody mistakes it for his.
+/// The finish announcement, every chat reply and the site follow this one
+/// rule, so a run is called the same thing everywhere.
+pub fn run_no(ls_attempt: Option<i64>, attempt_number: i64) -> String {
+    match ls_attempt {
+        Some(n) => format!("run {n}"),
+        None => format!("tracked #{attempt_number}"),
+    }
+}
+
 pub struct NewRun<'a> {
     pub game: &'a str,
     pub category: &'a str,
@@ -368,8 +387,25 @@ pub async fn personal_best(
     Ok(row)
 }
 
-pub async fn last_run(pool: &SqlitePool) -> Result<Option<RunRow>> {
-    let row = sqlx::query_as::<_, RunRow>("SELECT * FROM runs ORDER BY id DESC LIMIT 1")
+/// The most recent run of a game/category: the one that *started* last, not
+/// the last row inserted. Imports and backfills add older days after newer
+/// ones, so the highest id can be a run from weeks ago; `!lastrun`,
+/// `!correct` and `!void` mean the run the chat just watched.
+pub async fn last_run(pool: &SqlitePool, game: &str, category: &str) -> Result<Option<RunRow>> {
+    let row = sqlx::query_as::<_, RunRow>(
+        "SELECT * FROM runs WHERE game = ? AND category = ? \
+         ORDER BY started_at_ms DESC, id DESC LIMIT 1",
+    )
+    .bind(game)
+    .bind(category)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+async fn run_by_id(pool: &SqlitePool, id: i64) -> Result<Option<RunRow>> {
+    let row = sqlx::query_as::<_, RunRow>("SELECT * FROM runs WHERE id = ?")
+        .bind(id)
         .fetch_optional(pool)
         .await?;
     Ok(row)
@@ -418,25 +454,38 @@ pub async fn total_attempts(pool: &SqlitePool, game: &str, category: &str) -> Re
     Ok(n)
 }
 
-/// Overwrite the final time of the most recent run (mod `!correct`); also
-/// flips its outcome to finished, since a corrected time implies completion.
-pub async fn correct_last_run(pool: &SqlitePool, final_ms: i64) -> Result<Option<RunRow>> {
-    let res = sqlx::query(
+/// Overwrite the final time of the most recent run of a game/category (mod
+/// `!correct`, see [`last_run`] for which run that is); also flips its
+/// outcome to finished, since a corrected time implies completion. Returns
+/// the corrected row.
+pub async fn correct_last_run(
+    pool: &SqlitePool,
+    game: &str,
+    category: &str,
+    final_ms: i64,
+) -> Result<Option<RunRow>> {
+    let Some(row) = last_run(pool, game, category).await? else {
+        return Ok(None);
+    };
+    sqlx::query(
         "UPDATE runs SET final_time_ms = ?, outcome = 'finished', reset_reason = NULL \
-         WHERE id = (SELECT MAX(id) FROM runs)",
+         WHERE id = ?",
     )
     .bind(final_ms)
+    .bind(row.id)
     .execute(pool)
     .await?;
-    if res.rows_affected() == 0 {
-        return Ok(None);
-    }
-    last_run(pool).await
+    run_by_id(pool, row.id).await
 }
 
-/// Delete the most recent run (mod `!void`). Returns the deleted row.
-pub async fn void_last_run(pool: &SqlitePool) -> Result<Option<RunRow>> {
-    let Some(row) = last_run(pool).await? else {
+/// Delete the most recent run of a game/category (mod `!void`, see
+/// [`last_run`] for which run that is). Returns the deleted row.
+pub async fn void_last_run(
+    pool: &SqlitePool,
+    game: &str,
+    category: &str,
+) -> Result<Option<RunRow>> {
+    let Some(row) = last_run(pool, game, category).await? else {
         return Ok(None);
     };
     sqlx::query("DELETE FROM runs WHERE id = ?")
@@ -855,16 +904,87 @@ mod tests {
     #[tokio::test]
     async fn correct_and_void_last_run() {
         let (_dir, pool) = test_pool().await;
-        assert!(correct_last_run(&pool, 1).await.unwrap().is_none());
+        assert!(correct_last_run(&pool, "smb", "Any%", 1)
+            .await
+            .unwrap()
+            .is_none());
         insert_run(&pool, run("smb", 1, 1000, None)).await.unwrap();
-        let fixed = correct_last_run(&pool, 123_400).await.unwrap().unwrap();
+        let fixed = correct_last_run(&pool, "smb", "Any%", 123_400)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(fixed.final_time_ms, Some(123_400));
         assert_eq!(fixed.outcome, OUTCOME_FINISHED);
         assert_eq!(fixed.reset_reason, None);
 
-        let gone = void_last_run(&pool).await.unwrap().unwrap();
+        let gone = void_last_run(&pool, "smb", "Any%").await.unwrap().unwrap();
         assert_eq!(gone.id, fixed.id);
-        assert!(last_run(&pool).await.unwrap().is_none());
+        assert!(last_run(&pool, "smb", "Any%").await.unwrap().is_none());
+    }
+
+    /// The last run is the one that started last within the tracked
+    /// game/category, not the highest id: a backfill import writes older
+    /// days after newer ones, and another game's run is not ours.
+    #[tokio::test]
+    async fn last_run_is_the_latest_started_of_the_game() {
+        let (_dir, pool) = test_pool().await;
+        assert!(last_run(&pool, "smb", "Any%").await.unwrap().is_none());
+        // Live: attempt 7 finished just now.
+        let live = insert_run(&pool, run("smb", 7, 5_000_000, Some(300_000)))
+            .await
+            .unwrap();
+        // Then an import lands a run from days ago (higher id, older start)
+        // and another game's run starts even later.
+        let imported = insert_run(&pool, run("smb", 3, 1_000_000, None))
+            .await
+            .unwrap();
+        insert_run(&pool, run("zelda", 1, 9_000_000, None))
+            .await
+            .unwrap();
+        assert!(imported > live);
+
+        let last = last_run(&pool, "smb", "Any%").await.unwrap().unwrap();
+        assert_eq!(last.id, live);
+        assert_eq!(last.attempt_number, 7);
+
+        // !correct and !void act on that same run, leaving the import alone.
+        let fixed = correct_last_run(&pool, "smb", "Any%", 299_000)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixed.id, live);
+        assert_eq!(fixed.final_time_ms, Some(299_000));
+        let gone = void_last_run(&pool, "smb", "Any%").await.unwrap().unwrap();
+        assert_eq!(gone.id, live);
+        let remaining = last_run(&pool, "smb", "Any%").await.unwrap().unwrap();
+        assert_eq!(remaining.id, imported);
+        assert_eq!(remaining.outcome, OUTCOME_RESET);
+        // The other game's run was never a candidate.
+        let z = last_run(&pool, "zelda", "Any%").await.unwrap().unwrap();
+        assert_eq!(z.attempt_number, 1);
+    }
+
+    #[test]
+    fn run_no_prefers_the_runners_counter() {
+        assert_eq!(run_no(Some(96_677), 2056), "run 96677");
+        assert_eq!(run_no(None, 2056), "tracked #2056");
+        let mut r = RunRow {
+            id: 1,
+            game: "smb".into(),
+            category: "Any%".into(),
+            attempt_number: 2056,
+            started_at_ms: 0,
+            ended_at_ms: 0,
+            outcome: OUTCOME_FINISHED.into(),
+            reset_reason: None,
+            final_time_ms: Some(1),
+            last_timer_ms: Some(1),
+            session_id: None,
+            ls_attempt: Some(96_677),
+        };
+        assert_eq!(r.run_no(), "run 96677");
+        r.ls_attempt = None;
+        assert_eq!(r.run_no(), "tracked #2056");
     }
 
     #[tokio::test]

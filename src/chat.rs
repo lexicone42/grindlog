@@ -9,6 +9,13 @@
 //!   !setgame <game...> <category>   !correct <time>   !void
 //! With `chat.command_prefix` set, every command is namespaced under it (see
 //! `parse_prefixed`) and the bare form is left to other bots.
+//!
+//! Replies name a run the way the finish announcement and the site do
+//! (`db::run_no`): by the runner's own LiveSplit counter ("run 96677"), or by
+//! our tracked ordinal marked as ours ("tracked #2056") when it was not read.
+//! "The last run" (`!lastrun`, `!correct`, `!void`) is the run of the tracked
+//! game/category that started last, not the last row written: imports land
+//! older days after newer ones.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -225,16 +232,16 @@ async fn build_reply(ctx: &ChatCtx, cmd: &Cmd) -> Result<Option<String>> {
                     if base < pb.final_time_ms.unwrap_or(i64::MAX) =>
                 {
                     Some(format!(
-                        "{label} for {game} [{category}]: {} (pre-tracking) — best tracked run: {} (attempt #{})",
+                        "{label} for {game} [{category}]: {} (pre-tracking) — best tracked run: {} ({})",
                         format_ms(base),
                         format_ms(pb.final_time_ms.unwrap_or(0)),
-                        pb.attempt_number,
+                        pb.run_no(),
                     ))
                 }
                 (Some(pb), _) => Some(format!(
-                    "{label} for {game} [{category}]: {} (attempt #{}, {})",
+                    "{label} for {game} [{category}]: {} ({}, {})",
                     format_ms(pb.final_time_ms.unwrap_or(0)),
-                    pb.attempt_number,
+                    pb.run_no(),
                     util::date_of_ms(pb.ended_at_ms),
                 )),
                 (None, Some(base)) => Some(format!(
@@ -246,20 +253,20 @@ async fn build_reply(ctx: &ChatCtx, cmd: &Cmd) -> Result<Option<String>> {
                 }
             }
         }
-        Cmd::LastRun => match db::last_run(&ctx.pool).await? {
+        Cmd::LastRun => match db::last_run(&ctx.pool, &game, &category).await? {
             Some(r) if r.outcome == db::OUTCOME_FINISHED => Some(format!(
-                "Last run: {} ({} [{}], attempt #{})",
+                "Last run: {} ({} [{}], {})",
                 format_ms(r.final_time_ms.unwrap_or(0)),
                 r.game,
                 r.category,
-                r.attempt_number,
+                r.run_no(),
             )),
             Some(r) => Some(format!(
-                "Last run: reset at {} ({} [{}], attempt #{})",
+                "Last run: reset at {} ({} [{}], {})",
                 r.last_timer_ms.map(format_ms).unwrap_or_else(|| "?".into()),
                 r.game,
                 r.category,
-                r.attempt_number,
+                r.run_no(),
             )),
             None => Some("No runs recorded yet.".to_string()),
         },
@@ -346,7 +353,10 @@ async fn build_reply(ctx: &ChatCtx, cmd: &Cmd) -> Result<Option<String>> {
                 match cur.last() {
                     None => Some(format!("Timer ~{timer} — no splits yet this run.")),
                     Some(last) => {
-                        let vs_pb = match db::personal_best(&ctx.pool, &game, &category).await? {
+                        // Against the best tracked run, named by what the
+                        // config calls the record ("PB", "season best").
+                        let vs_record = match db::personal_best(&ctx.pool, &game, &category).await?
+                        {
                             Some(pb) => db::run_splits(&ctx.pool, pb.id)
                                 .await?
                                 .iter()
@@ -364,7 +374,7 @@ async fn build_reply(ctx: &ChatCtx, cmd: &Cmd) -> Result<Option<String>> {
                             None => String::new(),
                         };
                         Some(format!(
-                            "{} done at {}{vs_pb} (timer ~{timer})",
+                            "{} done at {}{vs_record} (timer ~{timer})",
                             last.act_name,
                             format_ms(last.cumulative_ms),
                         ))
@@ -411,18 +421,16 @@ async fn build_reply(ctx: &ChatCtx, cmd: &Cmd) -> Result<Option<String>> {
             *ctx.shared.game.write().await = (g.clone(), c.clone());
             Some(format!("Now tracking {g} [{c}]."))
         }
-        Cmd::Correct { ms } => match db::correct_last_run(&ctx.pool, *ms).await? {
+        Cmd::Correct { ms } => {
+            match db::correct_last_run(&ctx.pool, &game, &category, *ms).await? {
+                Some(r) => Some(format!("Corrected {} to {}.", r.run_no(), format_ms(*ms))),
+                None => Some("No run to correct.".to_string()),
+            }
+        }
+        Cmd::Void => match db::void_last_run(&ctx.pool, &game, &category).await? {
             Some(r) => Some(format!(
-                "Corrected run #{} to {}.",
-                r.attempt_number,
-                format_ms(*ms)
-            )),
-            None => Some("No run to correct.".to_string()),
-        },
-        Cmd::Void => match db::void_last_run(&ctx.pool).await? {
-            Some(r) => Some(format!(
-                "Voided run #{} ({}).",
-                r.attempt_number,
+                "Voided {} ({}).",
+                r.run_no(),
                 match r.final_time_ms {
                     Some(ms) => format_ms(ms),
                     None => r.outcome.clone(),
@@ -526,5 +534,250 @@ mod tests {
         .mod_only());
         assert!(!Cmd::Pb.mod_only());
         assert!(!Cmd::Status.mod_only());
+    }
+
+    // ---- replies against a real (temporary) database ----------------------
+
+    use crate::app::Status;
+    use crate::splits::RecordedSplit;
+    use tokio::sync::RwLock;
+
+    const GAME: &str = "Ninja Gaiden";
+    const CAT: &str = "Any%";
+
+    /// A chat context over an empty temp database, tracking GAME [CAT] and
+    /// calling the record `record_label`, as live.toml does ("season best").
+    async fn test_ctx(record_label: &str) -> (tempfile::TempDir, ChatCtx) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat.db");
+        let pool = db::open(path.to_str().unwrap()).await.unwrap();
+        let shared = Arc::new(Shared {
+            game: RwLock::new((GAME.into(), CAT.into())),
+            status: RwLock::new(Status {
+                phase: "IDLE".into(),
+                ..Default::default()
+            }),
+            acts: vec![("Act 1".into(), Some(120_000)), ("Act 2".into(), None)],
+            current_splits: RwLock::new(Vec::new()),
+            record_label: record_label.into(),
+            baseline_best_ms: RwLock::new(None),
+        });
+        let cfg = ChatCfg {
+            enabled: true,
+            channel: "testchannel".into(),
+            username: "bot".into(),
+            oauth_token: String::new(),
+            announce: false,
+            command_cooldown_secs: 10,
+            mods: Vec::new(),
+            command_prefix: String::new(),
+        };
+        let ctx = ChatCtx {
+            cfg,
+            channel: "testchannel".into(),
+            pool,
+            shared,
+        };
+        (dir, ctx)
+    }
+
+    /// Insert one run of GAME [CAT]: finished at `final_ms`, or a reset
+    /// that died at 0:42.0 when `None`.
+    async fn add_run(
+        ctx: &ChatCtx,
+        attempt: i64,
+        ls_attempt: Option<i64>,
+        started_at_ms: i64,
+        final_ms: Option<i64>,
+    ) -> i64 {
+        db::insert_run(
+            &ctx.pool,
+            db::NewRun {
+                game: GAME,
+                category: CAT,
+                attempt_number: attempt,
+                started_at_ms,
+                ended_at_ms: started_at_ms + 800_000,
+                outcome: if final_ms.is_some() {
+                    db::OUTCOME_FINISHED
+                } else {
+                    db::OUTCOME_RESET
+                },
+                reset_reason: if final_ms.is_some() {
+                    None
+                } else {
+                    Some("zeroed")
+                },
+                final_time_ms: final_ms,
+                last_timer_ms: final_ms.or(Some(42_000)),
+                session_id: None,
+                ls_attempt,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn reply(ctx: &ChatCtx, cmd: Cmd) -> String {
+        build_reply(ctx, &cmd).await.unwrap().expect("a reply")
+    }
+
+    #[tokio::test]
+    async fn lastrun_names_the_run_by_the_runners_counter() {
+        let (_dir, ctx) = test_ctx("season best").await;
+        assert_eq!(reply(&ctx, Cmd::LastRun).await, "No runs recorded yet.");
+
+        // His LiveSplit counter was read: that is the run's name.
+        add_run(&ctx, 2056, Some(96_677), 1_000_000, Some(754_500)).await;
+        assert_eq!(
+            reply(&ctx, Cmd::LastRun).await,
+            "Last run: 12:34.5 (Ninja Gaiden [Any%], run 96677)"
+        );
+
+        // Not read: our ordinal, marked as ours, never "attempt #".
+        add_run(&ctx, 2057, None, 2_000_000, None).await;
+        assert_eq!(
+            reply(&ctx, Cmd::LastRun).await,
+            "Last run: reset at 0:42.0 (Ninja Gaiden [Any%], tracked #2057)"
+        );
+    }
+
+    #[tokio::test]
+    async fn lastrun_is_the_latest_started_not_the_last_inserted() {
+        let (_dir, ctx) = test_ctx("PB").await;
+        // The live bot logs attempt 2057, then an import lands a run from
+        // days ago with a higher row id, and another game has a newer row.
+        add_run(&ctx, 2057, Some(96_678), 5_000_000, Some(700_000)).await;
+        add_run(&ctx, 1500, Some(95_000), 1_000_000, None).await;
+        db::insert_run(
+            &ctx.pool,
+            db::NewRun {
+                game: "Other Game",
+                category: CAT,
+                attempt_number: 1,
+                started_at_ms: 9_000_000,
+                ended_at_ms: 9_100_000,
+                outcome: db::OUTCOME_RESET,
+                reset_reason: Some("zeroed"),
+                final_time_ms: None,
+                last_timer_ms: Some(1000),
+                session_id: None,
+                ls_attempt: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reply(&ctx, Cmd::LastRun).await,
+            "Last run: 11:40.0 (Ninja Gaiden [Any%], run 96678)"
+        );
+    }
+
+    #[tokio::test]
+    async fn pb_reply_names_the_record_run() {
+        let (_dir, ctx) = test_ctx("season best").await;
+        assert_eq!(
+            reply(&ctx, Cmd::Pb).await,
+            "No finished runs recorded yet for Ninja Gaiden [Any%]."
+        );
+        add_run(&ctx, 2000, Some(96_000), 1_000_000, Some(695_100)).await;
+        add_run(&ctx, 2001, Some(96_001), 2_000_000, Some(720_000)).await;
+        let r = reply(&ctx, Cmd::Pb).await;
+        assert!(
+            r.starts_with("season best for Ninja Gaiden [Any%]: 11:35.1 (run 96000, "),
+            "{r}"
+        );
+        assert!(!r.contains("attempt #"), "{r}");
+
+        // A faster pre-tracking baseline is the record; the tracked best is
+        // still named by his number.
+        *ctx.shared.baseline_best_ms.write().await = Some(690_000);
+        assert_eq!(
+            reply(&ctx, Cmd::Pb).await,
+            "season best for Ninja Gaiden [Any%]: 11:30.0 (pre-tracking) — best tracked run: 11:35.1 (run 96000)"
+        );
+
+        // Without his number the fallback is marked as ours.
+        db::void_last_run(&ctx.pool, GAME, CAT).await.unwrap();
+        db::void_last_run(&ctx.pool, GAME, CAT).await.unwrap();
+        add_run(&ctx, 2002, None, 3_000_000, Some(695_100)).await;
+        assert_eq!(
+            reply(&ctx, Cmd::Pb).await,
+            "season best for Ninja Gaiden [Any%]: 11:30.0 (pre-tracking) — best tracked run: 11:35.1 (tracked #2002)"
+        );
+    }
+
+    #[tokio::test]
+    async fn correct_and_void_name_the_run_and_take_the_latest_started() {
+        let (_dir, ctx) = test_ctx("PB").await;
+        assert_eq!(
+            reply(&ctx, Cmd::Correct { ms: 1 }).await,
+            "No run to correct."
+        );
+        assert_eq!(reply(&ctx, Cmd::Void).await, "No run to void.");
+
+        // The run just watched (reset), then an imported older run with a
+        // higher id: !correct and !void must pick the one just watched.
+        add_run(&ctx, 2056, Some(96_677), 5_000_000, None).await;
+        let imported = add_run(&ctx, 1500, Some(95_000), 1_000_000, None).await;
+        assert_eq!(
+            reply(&ctx, Cmd::Correct { ms: 720_000 }).await,
+            "Corrected run 96677 to 12:00.0."
+        );
+        let fixed = db::last_run(&ctx.pool, GAME, CAT).await.unwrap().unwrap();
+        assert_eq!(fixed.ls_attempt, Some(96_677));
+        assert_eq!(fixed.outcome, db::OUTCOME_FINISHED);
+        assert_eq!(
+            reply(&ctx, Cmd::LastRun).await,
+            "Last run: 12:00.0 (Ninja Gaiden [Any%], run 96677)"
+        );
+        assert_eq!(reply(&ctx, Cmd::Void).await, "Voided run 96677 (12:00.0).");
+        let left = db::last_run(&ctx.pool, GAME, CAT).await.unwrap().unwrap();
+        assert_eq!(left.id, imported);
+
+        // A run whose number was not read voids under the tracked ordinal
+        // with its outcome, as before.
+        add_run(&ctx, 2057, None, 6_000_000, None).await;
+        assert_eq!(
+            reply(&ctx, Cmd::Void).await,
+            "Voided tracked #2057 (reset)."
+        );
+    }
+
+    #[tokio::test]
+    async fn pace_is_labelled_with_the_record_label() {
+        let (_dir, ctx) = test_ctx("season best").await;
+        assert_eq!(reply(&ctx, Cmd::Pace).await, "No run in progress.");
+
+        // The best tracked run reached Act 1 at 2:00.0.
+        let pb_id = add_run(&ctx, 2000, Some(96_000), 1_000_000, Some(695_100)).await;
+        db::insert_splits(
+            &ctx.pool,
+            pb_id,
+            &[RecordedSplit {
+                act_index: 0,
+                act_name: "Act 1".into(),
+                cumulative_ms: 120_000,
+            }],
+        )
+        .await
+        .unwrap();
+        // The run in progress did it in 1:58.0.
+        *ctx.shared.status.write().await = Status {
+            phase: "RUNNING".into(),
+            smoothed_ms: Some(130_000),
+            read_age_ms: Some(500),
+            updated_unix_ms: util::unix_ms(),
+            ..Default::default()
+        };
+        ctx.shared.current_splits.write().await.push(RecordedSplit {
+            act_index: 0,
+            act_name: "Act 1".into(),
+            cumulative_ms: 118_000,
+        });
+        assert_eq!(
+            reply(&ctx, Cmd::Pace).await,
+            "Act 1 done at 1:58.0 — 0:02.0 ahead of season best pace (timer ~2:10.0)"
+        );
     }
 }

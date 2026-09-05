@@ -3111,11 +3111,9 @@ async fn handle_event(
             )
             .await?;
             let label = &shared.record_label;
-            // His own LiveSplit counter is the run's identity when we have it.
-            let run_no = match run.ls_attempt {
-                Some(n) => format!("run {n}"),
-                None => format!("tracked #{}", run.attempt_number),
-            };
+            // His own LiveSplit counter is the run's identity when we have it;
+            // the chat replies name runs by the same rule.
+            let run_no = db::run_no(run.ls_attempt, run.attempt_number);
             let msg = if is_pb {
                 format!(
                     "Run finished in {} — NEW {label} for {} [{}]! ({run_no})",
