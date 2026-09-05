@@ -40,6 +40,13 @@ pub async fn run(cfg: Config, json: bool) -> Result<()> {
             let mut v = serde_json::to_value(s).unwrap_or_default();
             if let Some(o) = v.as_object_mut() {
                 o.remove("label");
+                // A VOD id names the channel as surely as the label does;
+                // the page and the feed name the game only, until the owner
+                // says otherwise.
+                if !cfg.game.public_vod_links {
+                    o.remove("vod_id");
+                    o.remove("vod_created_at_ms");
+                }
             }
             v
         })

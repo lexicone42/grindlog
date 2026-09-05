@@ -1742,6 +1742,10 @@ pub async fn run(cfg: Config) -> Result<()> {
     // One sessions row per broadcast: opened on the first frame, closed when
     // the channel goes offline (or on shutdown/end of input).
     let mut session_id: Option<i64> = None;
+    // A live session's VOD is looked up when the session opens; Twitch creates
+    // the archive a little after a stream starts, so a miss is retried at this
+    // frame time, a few times.
+    let mut session_vod_retry: Option<(i64, u32)> = None;
     let session_label = match cfg.stream.source {
         crate::config::SourceKind::Vod => format!("vod {}", cfg.stream.vod_id),
         crate::config::SourceKind::File => cfg.stream.input.clone(),
@@ -2555,17 +2559,46 @@ pub async fn run(cfg: Config) -> Result<()> {
 
         if session_id.is_none() {
             let started = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
+            // The broadcast's VOD: a VOD source knows it; a live session asks
+            // Twitch for the archive of the current stream.
+            let vod: Option<(String, i64)> = match cfg.stream.source {
+                crate::config::SourceKind::Vod => time_base.map(|b| (cfg.stream.vod_id.clone(), b)),
+                crate::config::SourceKind::Hls | crate::config::SourceKind::Streamlink => {
+                    match crate::twitch_hls::live_archive(
+                        &reqwest::Client::new(),
+                        &cfg.stream.channel,
+                    )
+                    .await
+                    {
+                        Ok(Some(v)) => Some(v),
+                        Ok(None) => {
+                            session_vod_retry = Some((t + 120_000, 0));
+                            None
+                        }
+                        Err(e) => {
+                            debug!("archive lookup failed: {e:#}");
+                            session_vod_retry = Some((t + 120_000, 0));
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
             match db::open_session(
                 &pool,
                 started,
                 session_source,
                 &session_label,
                 cfg.stream.session_tag.as_deref(),
+                vod.as_ref().map(|(id, at)| (id.as_str(), *at)),
             )
             .await
             {
                 Ok(id) => {
                     info!("session #{id} opened ({session_source}: {session_label})");
+                    if let Some((vid, _)) = &vod {
+                        info!("broadcast vod: {vid}");
+                    }
                     session_id = Some(id);
                     health = db::SessionHealth::default();
                     last_health_flush_t = t;
@@ -2861,6 +2894,24 @@ pub async fn run(cfg: Config) -> Result<()> {
                 last_health_flush_t = t;
                 if let Err(e) = db::update_session_health(&pool, id, &health).await {
                     warn!("failed to update session health: {e:#}");
+                }
+            }
+            if let Some((at, tries)) = session_vod_retry.filter(|(at, _)| t >= *at) {
+                session_vod_retry = None;
+                match crate::twitch_hls::live_archive(&reqwest::Client::new(), &cfg.stream.channel)
+                    .await
+                {
+                    Ok(Some((vid, created))) => {
+                        if let Err(e) = db::set_session_vod(&pool, id, &vid, created).await {
+                            warn!("failed to record the broadcast vod: {e:#}");
+                        } else {
+                            info!("broadcast vod: {vid}");
+                        }
+                    }
+                    // Up to ten tries over twenty minutes; a broadcast Twitch
+                    // is not archiving has no VOD to find.
+                    _ if tries < 9 => session_vod_retry = Some((at + 120_000, tries + 1)),
+                    _ => debug!("no archive found for this broadcast"),
                 }
             }
         }

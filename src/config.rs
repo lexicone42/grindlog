@@ -466,6 +466,11 @@ pub struct GameCfg {
     /// otherwise stop recording.
     #[serde(default)]
     pub require_title_match: bool,
+    /// Publish each session's Twitch VOD id (and so a "watch" link for every
+    /// run) in the report and the site. A VOD id names the channel; off by
+    /// default, like the page, which names the game only.
+    #[serde(default)]
+    pub public_vod_links: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -514,6 +519,7 @@ impl Default for GameCfg {
             references: Vec::new(),
             baseline_best: None,
             require_title_match: false,
+            public_vod_links: false,
         }
     }
 }

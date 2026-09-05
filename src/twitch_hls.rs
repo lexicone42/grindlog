@@ -195,6 +195,38 @@ pub async fn vod_created_at(client: &reqwest::Client, vod_id: &str) -> Result<Op
         .map(|dt| dt.timestamp_millis()))
 }
 
+/// The VOD Twitch is recording of a channel's current broadcast: its id and
+/// the broadcast's start (unix ms). None while offline, or in the first
+/// moments of a stream before the archive exists.
+pub async fn live_archive(
+    client: &reqwest::Client,
+    channel: &str,
+) -> Result<Option<(String, i64)>> {
+    let body = serde_json::json!({
+        "query": format!(
+            "{{user(login:\"{}\"){{stream{{archiveVideo{{id createdAt}}}}}}}}",
+            channel.trim()
+        )
+    });
+    let resp: serde_json::Value = client
+        .post(GQL_URL)
+        .header("Client-ID", CLIENT_ID)
+        .json(&body)
+        .send()
+        .await
+        .context("twitch gql request failed")?
+        .error_for_status()?
+        .json()
+        .await?;
+    let video = &resp["data"]["user"]["stream"]["archiveVideo"];
+    let id = video["id"].as_str().map(|s| s.to_string());
+    let created = video["createdAt"]
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp_millis());
+    Ok(id.zip(created))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Variant {
     pub name: String,
