@@ -1593,6 +1593,9 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut prev_bright: Option<GrayImage> = None;
     let mut last_text = String::new();
     let mut ocr_skipped: u64 = 0;
+    // Wall time of the timer read path per non-static frame, reported every
+    // 600 frames when NG_TIMING is set (a replay is the place to read it).
+    let (mut frame_cost_ns, mut frame_cost_n) = (0u128, 0u32);
     // Frames the glyph reader read, and frames it left to tesseract; the
     // window pair is reset every few hundred frames to notice a theme or
     // font the templates do not cover.
@@ -1890,7 +1893,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 ocr_skipped += 1;
             } else {
                 let g = image::imageops::crop_imm(&union_bright, r.0, r.1, r.2, r.3).to_image();
-                let mut proc = ocr::preprocess(&g, &pre);
+                let frame_t0 = std::time::Instant::now();
                 // NG_DUMP_TIMER=1: save the raw timer crop every 25 frames (for
                 // threshold tuning against real pixels) and log what Otsu
                 // would have chosen for it. NG_DUMP_TIMER=all: every frame —
@@ -1964,7 +1967,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                     }
                     None => {
                         reader_used = "tess";
-                        ocr_engine.recognize_boxed(&ocr::to_png(&proc)?).await
+                        // The upscaled, thresholded image is tesseract's, and
+                        // is built only when tesseract reads: the glyph reader
+                        // took the raw crop, and the ink edge below is measured
+                        // at the crop's own scale.
+                        ocr_engine
+                            .recognize_boxed(&ocr::to_png(&ocr::preprocess(&g, &pre))?)
+                            .await
                     }
                 };
                 match ocr_result {
@@ -1990,7 +1999,6 @@ pub async fn run(cfg: Config) -> Result<()> {
                                     if parse_timer_text(&t2).is_some() {
                                         text = t2;
                                         bbox = b2;
-                                        proc = proc2;
                                         retry_thr = Some(th);
                                         break;
                                     }
@@ -2002,7 +2010,32 @@ pub async fn run(cfg: Config) -> Result<()> {
                         // short of the other digits' right edge, and at 2 fps the
                         // hundredths digit repeats for many frames, which would
                         // read as a consistent shift. Measure on other digits.
-                        let ext = ink_extent(&proc, bbox.map(|b| b.0), pre.upscale);
+                        // Measured at the crop's own scale: the same threshold
+                        // as tesseract's image without the 4x resample that
+                        // only tesseract needs — sixteen times fewer pixels
+                        // for the one thing computed on every frame. Boxes
+                        // from tesseract are in its upscaled image.
+                        let proc1 = ocr::preprocess(
+                            &g,
+                            &ocr::PreprocessCfg {
+                                upscale: 1,
+                                ..pre.clone()
+                            },
+                        );
+                        let ext = ink_extent(&proc1, bbox.map(|b| b.0 / pre.upscale.max(1)), 1);
+                        frame_cost_ns += frame_t0.elapsed().as_nanos();
+                        frame_cost_n += 1;
+                        if frame_cost_n >= 600 {
+                            if std::env::var_os("NG_TIMING").is_some() {
+                                info!(
+                                    "timer path: {:.2} ms per read frame over {} frames",
+                                    frame_cost_ns as f64 / frame_cost_n as f64 / 1e6,
+                                    frame_cost_n
+                                );
+                            }
+                            frame_cost_ns = 0;
+                            frame_cost_n = 0;
+                        }
                         let legible = parse_timer_text(&text).is_some();
                         if fine_drift && legible && drift_measurable(&text) {
                             ink = ext.map(|e| (e.right, e.cy()));

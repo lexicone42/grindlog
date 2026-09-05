@@ -4,7 +4,7 @@
 # capture or an earlier pass) are replaced by the VOD's sessions, runs and
 # splits. Runs inside a transaction, so the live bot can keep the db open.
 #
-#   ./scripts/import-vod.sh <vod_id> [--deploy]
+#   ./scripts/import-vod.sh <vod_id> [--deploy] [--force]
 #
 # This is the path the backfill lands through: import-when-done.sh calls it
 # per VOD as each chain finishes. merge-backfill.sh is the full chronological
@@ -13,17 +13,36 @@
 # written by an older binary brings back the misread final-act gold this
 # script removes.
 #
+# Before replacing anything it compares the incoming pass with what the live
+# database holds for those days (runs, numbered runs, the span of the
+# sessions) and refuses, exit 3, when the incoming day would have fewer than
+# 90% of the existing runs or of the existing numbered runs: a pass that
+# died partway, or a binary that stopped reading a theme, must not overwrite
+# a fuller day. `--force` replaces anyway (a day whose earlier rows were
+# phantom fragments really is thinner when read right); both counts and the
+# spans are printed either way.
+#
 # Not everything it touches is confined to those days: every finished run's
 # final-act split is set to its finish time and last-row splits on runs that
 # never finished are dropped; attempt_number is renumbered chronologically
 # across the whole database; then fill-run-numbers.sh runs on it. Days are
 # the machine's local dates, so a VOD that crosses midnight replaces both.
 # LIVE=<path> targets another database (a copy, for a dry run). Exits 1 when
-# the per-VOD database is missing, 2 while its session is still open.
+# the per-VOD database is missing, 2 while its session is still open, 3 when
+# the gate above refuses.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 LIVE="${LIVE:-ninja-gaiden.db}"   # override for a dry run on a copy
-id="${1:?vod id}"
+id="" deploy=false force=false
+for a in "$@"; do
+  case "$a" in
+    --deploy) deploy=true;;
+    --force) force=true;;
+    -*) echo "unknown option $a (usage: $0 <vod_id> [--deploy] [--force])"; exit 1;;
+    *) id="$a";;
+  esac
+done
+[ -n "$id" ] || { echo "usage: $0 <vod_id> [--deploy] [--force]"; exit 1; }
 f="backfill-db/vod-$id.db"
 [ -f "$f" ] || { echo "no $f"; exit 1; }
 
@@ -33,8 +52,32 @@ if [ "$open" != "0" ] || [ "$done_" = "0" ]; then
   echo "vod $id is not complete yet ($done_ closed, $open open session(s))"; exit 2
 fi
 days=$(sqlite3 "$f" "SELECT GROUP_CONCAT(DISTINCT quote(date(started_at_ms/1000,'unixepoch','localtime'))) FROM sessions")
-echo "vod $id covers $days: $(sqlite3 "$f" "SELECT COUNT(*)||' runs, '||SUM(outcome='finished')||' finished, '||COUNT(ls_attempt)||' numbered' FROM runs")"
-echo "replacing in $LIVE: $(sqlite3 "$LIVE" "SELECT COUNT(*)||' runs' FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days)")"
+in_day="date(started_at_ms/1000,'unixepoch','localtime') IN ($days)"
+
+# The gate: the incoming pass against the live database's rows for the same
+# days. Spans are first session start to last session end (an open live
+# session counts to now); hours are printed to a tenth.
+hours() { printf '%d.%d h' $(($1 / 3600000)) $(($1 % 3600000 * 10 / 3600000)); }
+pct() { if [ "$2" -gt 0 ]; then echo "$(($1 * 100 / $2))%"; else echo "n/a"; fi; }
+read -r new_runs new_fin new_num new_span < <(sqlite3 -separator ' ' "$f" \
+  "SELECT (SELECT COUNT(*) FROM runs), (SELECT IFNULL(SUM(outcome='finished'),0) FROM runs), (SELECT COUNT(ls_attempt) FROM runs),
+          (SELECT IFNULL(MAX(ended_at_ms) - MIN(started_at_ms), 0) FROM sessions)")
+read -r old_runs old_fin old_num old_span < <(sqlite3 -separator ' ' "$LIVE" \
+  "SELECT (SELECT COUNT(*) FROM runs WHERE $in_day), (SELECT IFNULL(SUM(outcome='finished'),0) FROM runs WHERE $in_day),
+          (SELECT COUNT(ls_attempt) FROM runs WHERE $in_day),
+          (SELECT IFNULL(MAX(COALESCE(ended_at_ms, strftime('%s','now')*1000)) - MIN(started_at_ms), 0) FROM sessions WHERE $in_day)")
+echo "vod $id covers $days: $new_runs runs, $new_fin finished, $new_num numbered, sessions span $(hours "$new_span")"
+echo "replacing in $LIVE: $old_runs runs, $old_fin finished, $old_num numbered, sessions span $(hours "$old_span")" \
+     "(incoming: $(pct "$new_runs" "$old_runs") of the runs, $(pct "$new_num" "$old_num") of the numbered, $(pct "$new_span" "$old_span") of the span)"
+if [ $((new_runs * 10)) -lt $((old_runs * 9)) ] || [ $((new_num * 10)) -lt $((old_num * 9)) ]; then
+  if $force; then
+    echo "gate: the incoming day is thinner than the one in $LIVE; --force given, replacing anyway"
+  else
+    echo "!!! refusing to replace a fuller day with a thinner pass (under 90% of the runs or numbered runs);" \
+         "re-run the VOD, or \`$0 $id --force\` to replace anyway"
+    exit 3
+  fi
+fi
 
 # Capture-health and VOD columns exist only in databases written by newer
 # binaries. A VOD session's id and broadcast start are recoverable either
@@ -106,6 +149,6 @@ SQL
 ./scripts/fill-run-numbers.sh "$LIVE"
 echo "now in $LIVE for $days: $(sqlite3 "$LIVE" "SELECT COUNT(*)||' runs, '||SUM(outcome='finished')||' finished, '||COUNT(ls_attempt)||' numbered, best '||IFNULL(printf('%d:%05.2f', MIN(final_time_ms)/60000, (MIN(final_time_ms)%60000)/1000.0), '-') FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days)")"
 
-if [ "${2:-}" = "--deploy" ]; then
+if $deploy; then
   ./scripts/deploy-site.sh
 fi
