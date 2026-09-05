@@ -249,11 +249,28 @@ category = "Any%"
                                 #   Compares against `name` as written here, not a
                                 #   !setgame override. Off by default: a misread
                                 #   title would otherwise stop recording
+# follow_title = "off"          # the board reader. "log": at each pane pass, read
+                                #   the whole pane (title, every split row with its
+                                #   name and times) and log which game it would
+                                #   file the board under, with a "layout" session
+                                #   event per distinct board — shadow mode, nothing
+                                #   acts on it. Exclusive with require_title_match
 # public_vod_links = false      # publish each session's Twitch VOD id in the
                                 #   report and the site, which links every run to
                                 #   its moment in the VOD. A VOD id names the
                                 #   channel; the page names the game only by
                                 #   default. The ids are stored either way
+
+# Other games the pane's title row may name, for the board reader. A title
+# that does not fuzzy-match [game] name files under the entry whose match
+# string the normalised title (lowercase letters, digits, single spaces)
+# contains: "Randomized Arcathlon" and "Arcathlon #6" both contain "arcath".
+# Without a matching entry the title itself is the name. One entry per
+# game; the category is optional ("unknown" without it).
+[[games]]
+name = "Arcathlon"
+category = "10 games"
+match = ["arcath"]
 
 [database]
 # path = "ngtimer.db"
