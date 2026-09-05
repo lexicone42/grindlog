@@ -3,6 +3,13 @@
 # ngtwitchtimer/scripts in the user's crontab with these. Paths are the
 # reference box's; edit REPO for another checkout.
 #
+# The two monitoring lines (healthcheck.sh, daily-summary.sh) deliver through
+# scripts/notify.sh when NG_ALERT_URL (an ntfy topic or a Discord webhook) or
+# NG_ALERT_MAIL is set; with neither they only write logs/health.log and
+# logs/summary.log. Put the variables at the top of your own crontab as
+# NAME=value lines (crontab -e): the installer keeps every line that is not
+# grindlog's, and this tracked file is no place for a webhook.
+#
 # Grind Log: the supervisor survives everything but a reboot; this brings it back in its tmux session.
 @reboot sleep 30 && cd /datar/workspace/claude_code_experiments/ngtwitchtimer && tmux new-session -d -s ngtimer /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/run-live.sh
 # Grind Log: deploy the site every ten minutes while a live session is open.
@@ -10,3 +17,7 @@
 # Grind Log: nightly deploy, then a backup of the database.
 50 23 * * * PATH="/home/bryan/.local/bin:/usr/bin:/bin" /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/deploy-site.sh >> /datar/workspace/claude_code_experiments/ngtwitchtimer/logs/deploy.log 2>&1
 55 23 * * * PATH="/home/bryan/.local/bin:/usr/bin:/bin" /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/backup-db.sh >> /datar/workspace/claude_code_experiments/ngtwitchtimer/logs/backup.log 2>&1
+# Grind Log: dead-man check every ten minutes (supervisor, bot, crash loop, capture, polling, disk); alerts once an hour per signal, all-clear on recovery.
+*/10 * * * * PATH="/home/bryan/.local/bin:/usr/bin:/bin" /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/healthcheck.sh >> /datar/workspace/claude_code_experiments/ngtwitchtimer/logs/health.log 2>&1
+# Grind Log: the day's summary just before midnight (attempts, best, resets by act, coverage, imports, alerts).
+58 23 * * * PATH="/home/bryan/.local/bin:/usr/bin:/bin" /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/daily-summary.sh >> /datar/workspace/claude_code_experiments/ngtwitchtimer/logs/summary.log 2>&1
