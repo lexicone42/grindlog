@@ -91,6 +91,11 @@ pub async fn open(path: &str) -> Result<SqlitePool> {
         ("sessions", "relocks", "INTEGER"),
         ("sessions", "counter_reads", "INTEGER"),
         ("sessions", "events", "TEXT"),
+        // The Twitch VOD of the broadcast, when known: live sessions look it
+        // up at open, VOD sessions know it. With the broadcast's start, a
+        // run's position in the VOD is `started_at_ms - vod_created_at_ms`.
+        ("sessions", "vod_id", "TEXT"),
+        ("sessions", "vod_created_at_ms", "INTEGER"),
     ] {
         let has: Option<i64> = sqlx::query_scalar(&format!(
             "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?"
@@ -165,16 +170,38 @@ pub async fn open_session(
     source: &str,
     label: &str,
     tag: Option<&str>,
+    vod: Option<(&str, i64)>,
 ) -> Result<i64> {
-    let res =
-        sqlx::query("INSERT INTO sessions (started_at_ms, source, label, tag) VALUES (?, ?, ?, ?)")
-            .bind(started_at_ms)
-            .bind(source)
-            .bind(label)
-            .bind(tag)
-            .execute(pool)
-            .await?;
+    let res = sqlx::query(
+        "INSERT INTO sessions (started_at_ms, source, label, tag, vod_id, vod_created_at_ms) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(started_at_ms)
+    .bind(source)
+    .bind(label)
+    .bind(tag)
+    .bind(vod.map(|v| v.0))
+    .bind(vod.map(|v| v.1))
+    .execute(pool)
+    .await?;
     Ok(res.last_insert_rowid())
+}
+
+/// The broadcast's VOD, learned after the session opened (Twitch creates the
+/// archive a little after a stream starts).
+pub async fn set_session_vod(
+    pool: &SqlitePool,
+    id: i64,
+    vod_id: &str,
+    vod_created_at_ms: i64,
+) -> Result<()> {
+    sqlx::query("UPDATE sessions SET vod_id = ?, vod_created_at_ms = ? WHERE id = ?")
+        .bind(vod_id)
+        .bind(vod_created_at_ms)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Forget an attempt number that turned out to be a misread, wherever it was
@@ -271,12 +298,16 @@ pub struct SessionSummary {
     pub relocks: Option<i64>,
     pub counter_reads: Option<i64>,
     pub events: Option<serde_json::Value>,
+    /// The broadcast's Twitch VOD and its start, when known.
+    pub vod_id: Option<String>,
+    pub vod_created_at_ms: Option<i64>,
 }
 
 pub async fn recent_sessions(pool: &SqlitePool, limit: i64) -> Result<Vec<SessionSummary>> {
     let rows = sqlx::query(
         "SELECT s.id, s.started_at_ms, s.ended_at_ms, s.source, s.label, s.tag, \
          s.frames, s.parsed, s.probing, s.relocks, s.counter_reads, s.events, \
+         s.vod_id, s.vod_created_at_ms, \
          COUNT(r.id) AS attempts, \
          COALESCE(SUM(CASE WHEN r.outcome = 'finished' THEN 1 ELSE 0 END), 0) AS finished, \
          MIN(CASE WHEN r.outcome = 'finished' THEN r.final_time_ms END) AS best_ms \
@@ -306,6 +337,8 @@ pub async fn recent_sessions(pool: &SqlitePool, limit: i64) -> Result<Vec<Sessio
             events: r
                 .get::<Option<String>, _>("events")
                 .and_then(|s| serde_json::from_str(&s).ok()),
+            vod_id: r.get("vod_id"),
+            vod_created_at_ms: r.get("vod_created_at_ms"),
         })
         .collect())
 }
@@ -837,7 +870,7 @@ mod tests {
     #[tokio::test]
     async fn session_lifecycle_and_summary() {
         let (_dir, pool) = test_pool().await;
-        let sid = open_session(&pool, 1000, "hls", "somechannel", None)
+        let sid = open_session(&pool, 1000, "hls", "somechannel", None, None)
             .await
             .unwrap();
         let mut r = run("smb", 1, 2000, Some(300_000));

@@ -42,3 +42,6 @@ nohup.out
 
 # Database backups (scripts/backup-db.sh) and retired copies
 /backups/
+
+# Agent worktrees the tooling places inside the repository
+/.claude/
