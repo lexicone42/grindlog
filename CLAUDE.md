@@ -87,8 +87,14 @@ install and the in-process build).
   `obs-live.jsonl`. `kill` (SIGTERM) is a clean stop; the supervisor
   restarts it. The schedule lives in `scripts/crontab.example` (a reboot
   line that restarts the supervisor, the site deploys, the nightly
-  `backup-db.sh`); `scripts/install-cron.sh` installs it idempotently.
+  `backup-db.sh`, the ten-minute `healthcheck.sh` and the 23:58
+  `daily-summary.sh`); `scripts/install-cron.sh` installs it idempotently.
   Backups land in `backups/` (ignored by git), 30 days kept.
+- Monitoring writes to `logs/health.log` and `logs/summary.log`; it only
+  leaves the box when `NG_ALERT_URL` (ntfy topic or Discord webhook) or
+  `NG_ALERT_MAIL` is set at the top of the owner's crontab. Those values are
+  secrets and never go in the tracked example. `scripts/healthcheck.sh -v`
+  shows every signal's state on demand.
 - tesseract must run with `OMP_THREAD_LIMIT=1`; the binary re-execs itself
   with it set, and the scripts export it. Several tesseract workers on one
   box otherwise spin-wait each other to a crawl.
@@ -96,8 +102,13 @@ install and the in-process build).
   per-VOD databases under `backfill-db/`; `scripts/import-when-done.sh`
   imports each finished one into the live database and redeploys the site.
   It treats any per-VOD database with a closed session as finished, so
-  before re-running VODs, delete their old `backfill-db/vod-<id>.db*` and
-  strip their ids from `backfill-db/imported.txt`.
+  re-run VODs through `scripts/rebackfill.sh`, which archives the old
+  passes and strips the ids from `backfill-db/imported.txt` before it
+  launches the chains; by hand, do those two steps first. `import-vod.sh`
+  refuses to replace a day with a thinner pass (under 90% of the runs or
+  numbered runs); `--force` is for days whose earlier rows were phantom
+  fragments. `scripts/list-vods.sh <channel> --game "ninja gaiden"` gives
+  the ids with dates.
 - The site (`site/template.html` + `report --json`) is one self-contained
   page; `scripts/build-site.sh` builds it and `scripts/deploy-site.sh`
   uploads it. A single uncaught JavaScript error blanks the whole page, so
