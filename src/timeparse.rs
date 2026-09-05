@@ -113,6 +113,22 @@ pub fn parse_time(raw: &str) -> Option<i64> {
     Some(((h * 60 + m) * 60 + sec) * 1000 + frac_ms)
 }
 
+/// Whether an OCR'd word is a time: it has a separator and parses (a
+/// trailing '.' is tolerated). Bare digits are not, so an attempt counter
+/// or a row label never passes.
+pub fn time_shaped(text: &str) -> bool {
+    let t = text.trim().trim_end_matches('.');
+    t.contains([':', '.']) && parse_time(t).is_some()
+}
+
+/// Whether a time-shaped word carries a fraction ("0:47.3", "5.00"): a '.'
+/// followed by a digit. "0:4" and "11:3" do not; nor does a trailing '.'.
+pub fn has_fraction(text: &str) -> bool {
+    text.trim()
+        .split_once('.')
+        .is_some_and(|(_, f)| f.chars().next().is_some_and(|c| c.is_ascii_digit()))
+}
+
 /// Parse LiveSplit's attempt counter: a bare integer, tolerating stray
 /// whitelist punctuation OCR sometimes appends.
 pub fn parse_counter(raw: &str) -> Option<i64> {
@@ -228,6 +244,16 @@ mod tests {
         assert_eq!(parse_counter("96:034"), None);
         assert_eq!(parse_counter(""), None);
         assert_eq!(parse_counter("12345678"), None);
+    }
+
+    #[test]
+    fn time_shaped_words_have_a_separator_and_parse() {
+        assert!(time_shaped("0:47.3") && time_shaped("11:35.1") && time_shaped("2.0"));
+        assert!(time_shaped(" 1:03:20 ") && time_shaped("12:34."));
+        assert!(!time_shaped("96326") && !time_shaped("0:4") && !time_shaped("241.9"));
+        assert!(!time_shaped("8:38.6:") && !time_shaped("") && !time_shaped("Act"));
+        assert!(has_fraction("0:47.3") && has_fraction("5.00"));
+        assert!(!has_fraction("0:4") && !has_fraction("11:3") && !has_fraction("0:47."));
     }
 
     #[test]

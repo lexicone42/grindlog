@@ -52,6 +52,39 @@ pub struct Config {
     pub layouts: Vec<LayoutCfg>,
     #[serde(default)]
     pub layout_search: LayoutSearchCfg,
+    /// Other games the layout's title row may name (`[[games]]`), for the
+    /// board reader (`game.follow_title`): a title that fuzzy-matches none
+    /// of `game.name` is looked up here by substring, so "Randomized
+    /// Arcathlon" and "Arcathlon #6" file under one name.
+    #[serde(default)]
+    pub games: Vec<GameAlias>,
+}
+
+/// What the board reader does with the game the pane's title row names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FollowTitle {
+    /// Nothing: the title is logged and recorded as it always was.
+    #[default]
+    Off,
+    /// Shadow mode: log what the reader would file the board under and
+    /// the rows it read, and record a `layout` session event for every
+    /// distinct board; nothing changes in what is recorded.
+    Log,
+}
+
+/// A `[[games]]` entry: the name (and category) a title is filed under
+/// when the normalised title contains one of the `match` strings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GameAlias {
+    pub name: String,
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Lowercase substrings of the normalised title (letters, digits and
+    /// single spaces) that identify the game; any one matching is enough.
+    #[serde(rename = "match", default)]
+    pub r#match: Vec<String>,
 }
 
 /// Tolerance for the streamer nudging the LiveSplit window a few pixels.
@@ -466,6 +499,13 @@ pub struct GameCfg {
     /// otherwise stop recording.
     #[serde(default)]
     pub require_title_match: bool,
+    /// The board reader: "off" (default) or "log" — read the whole pane
+    /// (title, every split row with its name and times) at each pane pass
+    /// and log which game it would file the board under, recording a
+    /// `layout` session event per distinct board. Shadow mode: nothing
+    /// acts on it yet. Exclusive with `require_title_match`.
+    #[serde(default)]
+    pub follow_title: FollowTitle,
     /// Publish each session's Twitch VOD id (and so a "watch" link for every
     /// run) in the report and the site. A VOD id names the channel; off by
     /// default, like the page, which names the game only.
@@ -519,6 +559,7 @@ impl Default for GameCfg {
             references: Vec::new(),
             baseline_best: None,
             require_title_match: false,
+            follow_title: FollowTitle::Off,
             public_vod_links: false,
         }
     }
@@ -673,6 +714,30 @@ impl Config {
                 "game.baseline_best {:?} is unparseable",
                 self.game.baseline_best
             );
+        }
+        if self.game.follow_title != FollowTitle::Off && self.game.require_title_match {
+            bail!(
+                "game.follow_title = {:?} with game.require_title_match = true: \
+                 following the title and suspending on it are exclusive",
+                self.game.follow_title
+            );
+        }
+        for g in &self.games {
+            if g.name.trim().is_empty() {
+                bail!("a [[games]] entry has no name");
+            }
+            // Matching is on the title's alphanumerics, so a match string of
+            // punctuation alone survives trimming and still matches nothing.
+            if !g
+                .r#match
+                .iter()
+                .any(|m| !crate::board::normalise_title(m).is_empty())
+            {
+                bail!(
+                    "[[games]] entry {:?} has no usable match strings (letters or digits), so no title can ever name it",
+                    g.name
+                );
+            }
         }
         for (name, c) in [
             ("attempts_counter", &self.attempts_counter),
@@ -863,6 +928,38 @@ mod tests {
     fn chat_requires_credentials() {
         let err = parse("[stream]\nchannel = \"x\"\n[chat]\nenabled = true\n").unwrap_err();
         assert!(err.to_string().contains("oauth_token"));
+    }
+
+    #[test]
+    fn board_reader_settings_parse_and_exclude_the_title_gate() {
+        let cfg = parse(
+            "[stream]\nchannel = \"x\"\n[game]\nfollow_title = \"log\"\n\
+             [[games]]\nname = \"Arcathlon\"\nmatch = [\"arcath\"]\ncategory = \"10 games\"\n\
+             [[games]]\nname = \"Mega Man 2\"\nmatch = [\"mega man 2\", \"mm2\"]\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.game.follow_title, FollowTitle::Log);
+        assert_eq!(cfg.games.len(), 2);
+        assert_eq!(cfg.games[0].category.as_deref(), Some("10 games"));
+        assert_eq!(cfg.games[1].r#match, ["mega man 2", "mm2"]);
+        assert_eq!(cfg.games[1].category, None);
+        // The default is off, with no aliases.
+        let cfg = parse("[stream]\nchannel = \"x\"\n").unwrap();
+        assert_eq!(cfg.game.follow_title, FollowTitle::Off);
+        assert!(cfg.games.is_empty());
+        // Following the title and suspending on it are exclusive.
+        let err = parse(
+            "[stream]\nchannel = \"x\"\n[game]\nfollow_title = \"log\"\nrequire_title_match = true\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exclusive"), "{err}");
+        // Only the values this version knows.
+        assert!(parse("[stream]\nchannel = \"x\"\n[game]\nfollow_title = \"on\"\n").is_err());
+        // An alias nothing can match is a mistake.
+        assert!(parse("[stream]\nchannel = \"x\"\n[[games]]\nname = \"Arcathlon\"\n").is_err());
+        assert!(
+            parse("[stream]\nchannel = \"x\"\n[[games]]\nname = \"\"\nmatch = [\"a\"]\n").is_err()
+        );
     }
 
     #[test]

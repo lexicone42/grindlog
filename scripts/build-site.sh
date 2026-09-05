@@ -130,10 +130,12 @@ for f in report summary latest index; do mv "$api/$f.json.tmp" "$api/$f.json"; d
 # page loses what the template never looks at. The once-a-minute title reads
 # (`events` of kind "title", thousands per season and a sixth of the page)
 # go: the template uses events for the day's pitch (kind "geometry") and the
-# capture line's tooltip of the last few, which those reads only buried. Every
-# run's `game`/`category` go too: `runs` is already filtered to the tracked
-# game, and the page names it from `current_game`/`current_category`. Any
-# field the template starts reading must be put back here.
+# capture line's tooltip of the last few, which those reads only buried. The
+# board reader's "layout" events (one per distinct board, a handful a day)
+# stay. Every run's `game`/`category` go too: `runs` is already filtered to
+# the tracked game, and the page names it from `current_game`/
+# `current_category`. Any field the template starts reading must be put
+# back here.
 jq '.sessions |= map(if .events then .events |= map(select(.k != "title")) else . end)
     | .runs |= map(del(.game, .category))' "$tmp" > "$tmp.tmp" && mv "$tmp.tmp" "$tmp"
 # The JSON is spliced into a <script> element, where the parser ends the
