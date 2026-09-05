@@ -36,11 +36,20 @@ days=$(sqlite3 "$f" "SELECT GROUP_CONCAT(DISTINCT quote(date(started_at_ms/1000,
 echo "vod $id covers $days: $(sqlite3 "$f" "SELECT COUNT(*)||' runs, '||SUM(outcome='finished')||' finished, '||COUNT(ls_attempt)||' numbered' FROM runs")"
 echo "replacing in $LIVE: $(sqlite3 "$LIVE" "SELECT COUNT(*)||' runs' FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days)")"
 
-# Capture-health columns exist only in databases written by newer binaries.
+# Capture-health and VOD columns exist only in databases written by newer
+# binaries. A VOD session's id and broadcast start are recoverable either
+# way: the label is "vod <id>" and the session starts at the broadcast start.
 have=$(sqlite3 "$f" "SELECT GROUP_CONCAT(name) FROM pragma_table_info('sessions')")
 hc=""
-for c in frames parsed probing relocks counter_reads events; do
-  case ",$have," in *",$c,"*) hc+="$c, ";; *) hc+="NULL AS $c, ";; esac
+for c in frames parsed probing relocks counter_reads events vod_id vod_created_at_ms; do
+  case ",$have," in
+    *",$c,"*) hc+="$c, ";;
+    *) case $c in
+         vod_id) hc+="CASE WHEN source = 'vod' THEN substr(label, 5) END AS vod_id, ";;
+         vod_created_at_ms) hc+="CASE WHEN source = 'vod' THEN started_at_ms END AS vod_created_at_ms, ";;
+         *) hc+="NULL AS $c, ";;
+       esac;;
+  esac
 done
 hc="${hc%, }"
 
@@ -55,7 +64,7 @@ sqlite3 -bail "$LIVE" <<SQL
   DELETE FROM splits WHERE run_id IN (SELECT id FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days));
   DELETE FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days);
   DELETE FROM sessions WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days);
-  INSERT INTO sessions (started_at_ms, ended_at_ms, source, label, tag, frames, parsed, probing, relocks, counter_reads, events)
+  INSERT INTO sessions (started_at_ms, ended_at_ms, source, label, tag, frames, parsed, probing, relocks, counter_reads, events, vod_id, vod_created_at_ms)
     SELECT started_at_ms, ended_at_ms, source, label, tag, $hc FROM s.sessions ORDER BY id;
   -- Sessions/runs are matched back by start time (unique within one VOD).
   INSERT INTO runs (game, category, attempt_number, started_at_ms, ended_at_ms, outcome, reset_reason,
