@@ -189,9 +189,11 @@ crop_h = 90
 # labelled.
 
 # With [splits] enabled, the bot also measures the pane at every layout lock
-# (row pitch, cumulative column, counter, Sum of Best row) and uses those
-# rectangles in preference to the configured ones — the configuration only
-# has to be close.
+# and again every minute while locked (row pitch, cumulative column, counter,
+# Sum of Best row) and uses those rectangles in preference to the configured
+# ones — the configuration only has to be close. A measurement that two
+# consecutive reads agree on replaces the one in force, so a lock taken on
+# a cropped or covered pane corrects itself within a minute.
 
 # Alternate OBS scenes: each [[layouts]] entry gives the same rectangles at
 # their positions in that scene. `timer` is required; omitted regions inherit

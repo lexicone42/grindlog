@@ -585,19 +585,31 @@ impl PaneGeometry {
         inside.then_some((x as u32, y as u32, w, h))
     }
 
-    /// Whether two measurements describe the same pane: the row pitch within
-    /// 2 px, the splits column within 6 px in place and width, and the
-    /// counter found in both within 6 px or in neither. The block's height is
-    /// pitch times acts and follows the pitch; the Sum of Best row does not
-    /// count, its label is read or missed frame by frame.
-    fn agrees(&self, other: &PaneGeometry) -> bool {
-        fn close(a: (i32, i32, u32, u32), b: (i32, i32, u32, u32)) -> bool {
-            (a.0 - b.0).abs() <= 6 && (a.1 - b.1).abs() <= 6 && (a.2 as i64 - b.2 as i64).abs() <= 6
-        }
+    /// Whether two measurements place the same pane: the row pitch within
+    /// 2 px, the column's right edge and the block's top within 6 px. The
+    /// column's left edge and width are left out on purpose: they follow the
+    /// widest row that was read, and the widest row ("11:39.2", the last
+    /// act's) is unreadable while it is the current one, so on one and the
+    /// same pane they swing by some 20 px between a run and idle. The block's
+    /// height is pitch times acts and follows the pitch; the Sum of Best row
+    /// does not count, its label is read or missed frame by frame.
+    fn same_pane(&self, other: &PaneGeometry) -> bool {
+        let right = |s: (i32, i32, u32, u32)| s.0 as i64 + s.2 as i64;
         (self.pitch as i64 - other.pitch as i64).abs() <= 2
-            && close(self.splits, other.splits)
+            && (right(self.splits) - right(other.splits)).abs() <= 6
+            && (self.splits.1 - other.splits.1).abs() <= 6
+    }
+
+    /// The same pane, with the counter found in both within 6 px or in
+    /// neither.
+    fn agrees(&self, other: &PaneGeometry) -> bool {
+        self.same_pane(other)
             && match (self.counter, other.counter) {
-                (Some(a), Some(b)) => close(a, b),
+                (Some(a), Some(b)) => {
+                    (a.0 - b.0).abs() <= 6
+                        && (a.1 - b.1).abs() <= 6
+                        && (a.2 as i64 - b.2 as i64).abs() <= 6
+                }
                 (None, None) => true,
                 _ => false,
             }
@@ -892,8 +904,10 @@ fn game_matches(detected: &str, configured: &str) -> bool {
 }
 
 /// Derive the pane geometry from the split rows visible above the timer:
-/// time-shaped words grouped into rows, rightmost word per row (LiveSplit's
-/// cumulative column), median row pitch. The column block spans `acts` rows
+/// time-shaped words grouped into rows, the right-aligned column that at
+/// least two of them share (LiveSplit's cumulative column, which must read
+/// as one: uniform format, never decreasing), median row pitch. The column
+/// block spans `acts` rows
 /// up from the last act's row: the lowest row read, unless that sits more
 /// than a row and a half above the timer, in which case the anchor moves
 /// down by whole rows (the rows beneath went unread). The column gets two
@@ -929,6 +943,14 @@ fn pane_geometry(
         })
         .map(|(r, w)| (*r, *w))
         .collect();
+    // The timer's own digits reach above its crop when the crop rests low,
+    // and the highlighted row's cells merge into one tall box: both stand
+    // far taller than a split row. Drop boxes over 1.6x the median height.
+    let mut heights: Vec<u32> = above.iter().map(|(r, _)| r.3).collect();
+    heights.sort_unstable();
+    if let Some(&med) = heights.get(heights.len() / 2) {
+        above.retain(|(r, _)| r.3 as u64 * 10 <= med as u64 * 16);
+    }
     above.sort_by_key(|(r, _)| cy(*r));
     let mut rows: Vec<Vec<(R, &ocr::Word)>> = Vec::new();
     for (r, w) in above {
@@ -939,27 +961,55 @@ fn pane_geometry(
             _ => rows.push(vec![(r, w)]),
         }
     }
-    // The rightmost word of each row: LiveSplit's cumulative column.
+    if rows.len() < 2 {
+        return None;
+    }
+    // The cumulative column is right-aligned, so its right edge is the
+    // rightmost edge that at least two words share (within 12 px); a lone
+    // word further right — a merged cell, a stray read — is not a column.
+    // The column's cells are the words on that edge, one per row at most; a
+    // row whose cell went unread (highlighted, blank) has none and stays out
+    // of the checks below, and a row where only the segment time was read
+    // cannot widen the column leftwards.
+    fn edge(r: &R) -> i64 {
+        (r.0 + r.2) as i64
+    }
+    /// The row's cell on the column's right edge, if one was read.
+    fn cell_of<'a>(row: &[(R, &'a ocr::Word)], right_edge: i64) -> Option<(R, &'a ocr::Word)> {
+        row.iter()
+            .filter(|(r, _)| edge(r) <= right_edge && right_edge - edge(r) <= 12)
+            .max_by_key(|(r, _)| edge(r))
+            .copied()
+    }
+    let mut edges: Vec<i64> = rows.iter().flatten().map(|(r, _)| edge(r)).collect();
+    edges.sort_unstable_by(|a, b| b.cmp(a));
+    let right_edge = edges
+        .iter()
+        .copied()
+        .find(|&e| edges.iter().filter(|&&o| o <= e && e - o <= 12).count() >= 2)?;
     let col_words: Vec<(R, &ocr::Word)> = rows
         .iter()
-        .map(|row| *row.iter().max_by_key(|(r, _)| r.0 + r.2).unwrap())
+        .filter_map(|row| cell_of(row, right_edge))
         .collect();
     if col_words.len() < 2 {
         return None;
     }
-    // LiveSplit formats its time columns uniformly (the signed delta column
-    // has its own accuracy and is left out). So a row whose rightmost word
-    // has no fraction while another time on the row does, or a column with
-    // fractions on some rows and not others, is clipped or misread, not a
-    // pane. On one opening scene the pane was drawn larger than the crop
-    // and the cumulative column survived as "0:4", "2:4", "11:3" beside the
-    // full segment column; those still parse as times, and the geometry
-    // taken from them (wrong pitch, no counter) held for a whole day. Say
-    // nothing here and let a later frame describe the pane.
-    let unsigned_fraction =
-        |w: &ocr::Word| !w.text.trim_start().starts_with(['+', '-', '−']) && has_fraction(&w.text);
-    let right_clipped = rows.iter().zip(&col_words).any(|(row, (_, right))| {
-        !has_fraction(&right.text) && row.iter().any(|(_, w)| unsigned_fraction(w))
+    // LiveSplit formats its time columns uniformly. The delta column has its
+    // own accuracy and is left out: it shows tenths of a second with no
+    // colon ("0.2"; the digits whitelist drops its sign), where a time in a
+    // column has minutes. So a cell with no fraction on a row where a
+    // colon-bearing time has one, or a column with fractions on some rows
+    // and not others, is clipped or misread, not a pane. On one opening
+    // scene the pane was drawn larger than the crop and the cumulative
+    // column survived as "0:4", "2:4", "11:3" beside the full segment
+    // column; those still parse as times, and the geometry taken from them
+    // (wrong pitch, no counter) held for a whole day. Say nothing here and
+    // let a later frame describe the pane.
+    let column_fraction = |w: &ocr::Word| w.text.contains(':') && has_fraction(&w.text);
+    let right_clipped = rows.iter().any(|row| {
+        cell_of(row, right_edge).is_some_and(|(_, cell)| {
+            !has_fraction(&cell.text) && row.iter().any(|(_, w)| column_fraction(w))
+        })
     });
     if right_clipped {
         return None;
@@ -984,22 +1034,14 @@ fn pane_geometry(
     if values.windows(2).any(|p| p[1] < p[0]) {
         return None;
     }
-    let col: Vec<R> = col_words.iter().map(|(r, _)| *r).collect();
-    let mut gaps: Vec<i64> = col.windows(2).map(|w| cy(w[1]) - cy(w[0])).collect();
+    let row_cy: Vec<i64> = rows.iter().map(|row| cy(row[0].0)).collect();
+    let mut gaps: Vec<i64> = row_cy.windows(2).map(|w| w[1] - w[0]).collect();
     gaps.sort_unstable();
     let pitch = gaps[gaps.len() / 2];
     if !(24..=80).contains(&pitch) {
         return None;
     }
-    // The cumulative column is right-aligned: its x-extent comes from the
-    // words that share the rightmost edge, so a row where only the segment
-    // time was read cannot widen the column leftwards.
-    let right_edge = col.iter().map(|r| r.0 + r.2).max()? as i64;
-    let aligned: Vec<R> = col
-        .iter()
-        .filter(|r| right_edge - (r.0 + r.2) as i64 <= 12)
-        .copied()
-        .collect();
+    let aligned: Vec<R> = col_words.iter().map(|(r, _)| *r).collect();
     // Room for one more digit on the left than the widest value read: the
     // rows read at lock time may all be sub-10-minute, and "11:35.1" is a
     // digit wider than "8:38.6" — clipped, it reads as "1:35.1".
@@ -1014,7 +1056,7 @@ fn pane_geometry(
     // rows below it went unread (highlighted row, a blank comparison) and
     // the block must be anchored lower — otherwise every act reads the row
     // above it and the golds fill with impossible segments.
-    let mut last_cy = cy(*col.last()?);
+    let mut last_cy = *row_cy.last()?;
     while timer.1 as i64 - last_cy > pitch * 3 / 2 {
         last_cy += pitch;
     }
@@ -1122,7 +1164,7 @@ fn pane_geometry(
         splits,
         counter,
         sob,
-        rows_read: col.len(),
+        rows_read: rows.len(),
         pitch: pitch as u32,
     })
 }
@@ -1693,6 +1735,10 @@ pub async fn run(cfg: Config) -> Result<()> {
     // disagreed with it once, waiting for a second that agrees with it.
     let mut pane_geom: Option<PaneGeometry> = None;
     let mut geom_pending: Option<PaneGeometry> = None;
+    // Pane reads taken on the short cadence since the geometry was last
+    // settled: a layout with no counter to find must not pay for two OCR
+    // passes every 10 s all day.
+    let mut provisional_reads: u32 = 0;
     // The same rectangles in union coordinates, plus where the digits were
     // (absolute) when first measured after that lock: a re-anchor moves them
     // by the digits' real displacement, never by our crop correction.
@@ -2372,6 +2418,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                             );
                                 pane_geom = Some(g);
                                 geom_pending = None;
+                                provisional_reads = 0;
                                 geom_abs = Some((new_regs.splits, new_regs.counter, new_regs.sob));
                                 geom_ink_abs = None;
                                 geom_ink_samples.clear();
@@ -2386,6 +2433,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 );
                                 pane_geom = None;
                                 geom_pending = None;
+                                provisional_reads = 0;
                                 geom_abs = None;
                                 geom_ink_abs = None;
                                 geom_ink_samples.clear();
@@ -2940,13 +2988,20 @@ pub async fn run(cfg: Config) -> Result<()> {
         // all, is provisional and re-read every 10 s; a change is adopted
         // once two consecutive measurements agree with each other and not
         // with the one in force, so a single odd frame changes nothing.
-        let pane_read_every = match pane_geom {
-            Some(g) if !g.provisional() => 60_000,
-            _ => 10_000,
+        // The short cadence gives up after five minutes of reads (a layout
+        // with no counter to find) and the minute cadence takes over.
+        let settled = pane_geom.is_some_and(|g| !g.provisional());
+        let pane_read_every = if settled || provisional_reads >= 30 {
+            60_000
+        } else {
+            10_000
         };
         let mut adopt: Option<PaneGeometry> = None;
         if layout_locked && t - last_sob_read_t >= pane_read_every {
             last_sob_read_t = t;
+            if !settled {
+                provisional_reads += 1;
+            }
             let acts = shared.acts.len().max(1) as u32;
             match measure_pane(
                 &mut ocr_engine,
@@ -2959,7 +3014,22 @@ pub async fn run(cfg: Config) -> Result<()> {
             {
                 Ok((geom, readings)) => {
                     if let Some(g) = geom {
-                        if pane_geom.is_some_and(|c| c.agrees(&g)) {
+                        // Nothing new: the pane in force, read again (a lost
+                        // counter — covered, or its row unread — is not
+                        // news either). With the same pitch, a frame that
+                        // read fewer rows than the measurement in force
+                        // cannot improve on it: the block's anchoring
+                        // depends on the rows read, so such a frame can
+                        // only move it. What is news: another pane, or the
+                        // counter found at last.
+                        let gains_counter =
+                            g.counter.is_some() && pane_geom.is_none_or(|c| c.counter.is_none());
+                        let same = pane_geom.is_some_and(|c| c.same_pane(&g));
+                        let fewer_rows = pane_geom.is_some_and(|c| {
+                            (c.pitch as i64 - g.pitch as i64).abs() <= 2
+                                && g.rows_read < c.rows_read
+                        });
+                        if (same || fewer_rows) && !gains_counter {
                             geom_pending = None;
                         } else if geom_pending.is_some_and(|p| p.agrees(&g)) {
                             adopt = Some(g);
@@ -3046,6 +3116,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 if g.counter.is_some() { "found" } else { "missing" },
             );
             pane_geom = Some(g);
+            provisional_reads = 0;
             geom_abs = Some((nr.splits, nr.counter, nr.sob));
             geom_ink_abs = None;
             geom_ink_samples.clear();
@@ -3846,7 +3917,8 @@ mod tests {
     /// rightmost time lacks the fraction its neighbour has is clipped, and a
     /// column mixing formats across rows is no better. Uniform columns —
     /// tenths everywhere, or whole seconds everywhere — measure, and the
-    /// signed delta column never counts.
+    /// delta column (tenths, no colon, its sign lost to the whitelist) never
+    /// counts.
     #[test]
     fn a_clipped_or_mixed_column_is_not_a_geometry() {
         let timer = (60, 400, 300, 90);
@@ -3883,19 +3955,49 @@ mod tests {
             100,
         );
         assert!(pane_geometry(&mixed, &[], 1, timer, 6).is_none());
-        // A board timed to the second, with a signed delta column in tenths.
+        // A board timed to the second, with a delta column in tenths (the
+        // digits pass drops its sign).
         let mut whole = Vec::new();
         for (i, total) in ["21:48", "26:12", "1:29:33", "1:45:16", "1:58:25", "2:26:44"]
             .iter()
             .enumerate()
         {
             let y = 100 + i as u32 * 45;
-            whole.push(word(180, y, 50, 20, "-21.2"));
+            whole.push(word(180, y, 50, 20, "21.2"));
             whole.push(word(300, y, 60, 20, total));
         }
         assert!(pane_geometry(&whole, &[], 1, timer, 6).is_some());
         assert!(has_fraction("0:47.3") && has_fraction("5.00"));
         assert!(!has_fraction("0:4") && !has_fraction("11:3") && !has_fraction("0:47."));
+    }
+
+    /// A mid-run frame (Sep 1 at lock): the timer's digits reach above its
+    /// crop as one huge "1:35.12", the highlighted row and its neighbours
+    /// merge into tall boxes, and two rows keep only their segment time.
+    /// The column is still found on the edge the readable cells share, the
+    /// leak and the merged boxes are dropped by height, and the pane
+    /// measures with the right edge of the cumulative column.
+    #[test]
+    fn a_mid_run_frame_with_the_timer_leaking_in_still_measures() {
+        let timer = (60, 376, 300, 90);
+        let mut words = vec![word(368, 57, 71, 20, "96318")];
+        let seg = ["0:47.4", "1:53.5", "1:21.2", "2:11.8", "2:24.5", "2:56.4"];
+        for (i, s) in seg.iter().enumerate() {
+            words.push(word(181, 95 + i as u32 * 48, 92, 25, s));
+        }
+        words.push(word(349, 95, 92, 25, "0:47.4"));
+        words.push(word(350, 144, 90, 25, "2:41.0"));
+        words.push(word(349, 191, 111, 37, "4:02.2"));
+        words.push(word(350, 221, 117, 45, "6:14.0"));
+        words.push(word(349, 270, 127, 67, "8:38.6"));
+        words.push(word(333, 320, 150, 59, "1:35.12"));
+        let g = pane_geometry(&words, &[], 1, timer, 6).expect("the pane measures");
+        assert_eq!(g.rows_read, 6);
+        assert_eq!(g.pitch, 48);
+        // Right edge of the cumulative column (441) plus the margin, not the
+        // timer's (483) or the merged cells' (476).
+        assert_eq!(g.splits.0 + g.splits.2 as i32, 441 + 8 - 60);
+        assert!(g.counter.is_some());
     }
 
     /// Two measurements of the same pane differ by a pixel or two; a
@@ -3911,20 +4013,28 @@ mod tests {
         };
         let mut near = g;
         near.pitch = 47;
-        near.splits = (15, -305, 124, 282);
+        near.splits = (15, -305, 120, 282);
         near.counter = Some((44, -338, 104, 32));
         near.sob = Some((0, 0, 1, 1));
         near.rows_read = 5;
         assert!(g.agrees(&near) && near.agrees(&g));
+        // The same pane read during a run, the widest row unreadable: the
+        // column's left edge and width change, its right edge does not.
+        let mut narrower = g;
+        narrower.splits = (30, -300, 100, 270);
+        assert!(g.agrees(&narrower) && g.same_pane(&narrower));
         let mut far = g;
         far.pitch = 54;
-        assert!(!g.agrees(&far));
+        assert!(!g.agrees(&far) && !g.same_pane(&far));
         let mut moved = g;
         moved.splits.0 += 9;
         assert!(!g.agrees(&moved));
+        let mut lower = g;
+        lower.splits.1 += 9;
+        assert!(!g.same_pane(&lower));
         let mut lost = g;
         lost.counter = None;
-        assert!(!g.agrees(&lost));
+        assert!(!g.agrees(&lost) && g.same_pane(&lost));
         assert!(lost.provisional() && !g.provisional());
     }
 
