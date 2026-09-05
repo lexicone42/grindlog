@@ -141,8 +141,11 @@ fi
 
 # --- VOD imports that landed, from the importer's logs (local stamps), else
 # the marker file's mtime.
+# An importer retries a VOD it could not import yet (chain still running,
+# gate refused), so the same id can appear many times a day: keep its last.
 imports=$(grep -ah "^=== ${day}T[0-9:]*[-+][0-9:]* importing vod " logs/import-when-done*.log 2>/dev/null \
-          | awk '{printf "%s (%s), ", $NF, substr($2, 12, 5)}')
+          | awk '{ when[$NF] = substr($2, 12, 5); if (!($NF in order)) order[$NF] = ++n }
+                 END { for (id in order) out[order[id]] = id; for (i = 1; i <= n; i++) printf "%s (%s), ", out[i], when[out[i]] }')
 if [ -n "$imports" ]; then
   say "imports: ${imports%, }"
 elif [ -f backfill-db/imported.txt ] && [ "$(date -d "@$(stat -c %Y backfill-db/imported.txt)" +%F)" = "$day" ]; then
