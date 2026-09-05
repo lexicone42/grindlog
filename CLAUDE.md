@@ -65,14 +65,21 @@ Validate on recorded footage before the live stream ever sees it:
    streamer's own counter span, lock events). Compare a candidate build
    against the current one on the same windows; pick windows that contain
    the thing you changed (scene switches for probing, the NES-styled theme
-   for legibility, a stretch with no timer for cost).
+   for legibility, a stretch with no timer for cost). A local recording
+   works in place of the VOD id: the reference box keeps pinned windows
+   under `vods/windows/<label>-<vod>-<start>.mp4` (ignored by git), which
+   replay identically to the stream and survive Twitch's VOD expiry.
 2. `[debug] obs_log` writes one JSON line per frame (OCR text, parsed value,
-   smoothed clock, phase, events, layout offset, which reader read it). Two
-   runs of the same window diffed frame by frame explain most regressions.
-3. A label-free accuracy check that needs no ground truth: between
-   consecutive frames of a running timer the reading must advance by the
-   frame interval; jumps larger than a few tens of milliseconds are
-   misreads. Resets and the frozen timer after a finish are excluded.
+   smoothed clock, phase, events, layout offset, which reader read it).
+   `scripts/obs-diff.sh <a.jsonl> <b.jsonl>` joins two logs of the same
+   window on the frame number and lists where OCR text, parsed value,
+   phase, offset or events differ; that diff explains most regressions.
+3. `scripts/obs-accuracy.sh <obs.jsonl>` is the label-free accuracy check
+   that needs no ground truth: between consecutive frames of a running
+   timer the reading must advance by the frame interval; a jump beyond
+   ±60 ms is a misread. It excludes resets, the frozen timer after a
+   finish, values under 10 s and the frames after a lock, reports the rate
+   per reader and prints the worst frames with their neighbours.
 4. Only then `scripts/rollout.sh`.
 
 The unit tests run without ffmpeg or tesseract. Anything that needs video
