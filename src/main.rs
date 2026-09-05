@@ -1,4 +1,5 @@
 mod app;
+mod board;
 mod calibrate;
 mod capture;
 mod chat;

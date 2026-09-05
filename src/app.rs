@@ -41,11 +41,12 @@ use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
+use crate::board::{self, game_matches};
 use crate::config::Config;
 use crate::db::{self, NewRun};
 use crate::ocr::{self, OcrEngine, PreprocessCfg};
 use crate::state::{Event, Obs, Tracker};
-use crate::timeparse::{format_ms, parse_time, parse_timer_text};
+use crate::timeparse::{format_ms, has_fraction, parse_time, parse_timer_text, time_shaped};
 use crate::{capture, chat, util};
 use sqlx::SqlitePool;
 
@@ -639,19 +640,6 @@ impl PaneGeometry {
     }
 }
 
-fn time_shaped(text: &str) -> bool {
-    let t = text.trim().trim_end_matches('.');
-    t.contains([':', '.']) && parse_time(t).is_some()
-}
-
-/// Whether a time-shaped word carries a fraction ("0:47.3", "5.00"): a '.'
-/// followed by a digit. "0:4" and "11:3" do not; nor does a trailing '.'.
-fn has_fraction(text: &str) -> bool {
-    text.trim()
-        .split_once('.')
-        .is_some_and(|(_, f)| f.chars().next().is_some_and(|c| c.is_ascii_digit()))
-}
-
 /// What a labelled time on the layout means. LiveSplit panes carry a row of
 /// reference times under the timer — the streamer's own record-keeping, which
 /// is more authoritative than anything in our config.
@@ -728,29 +716,13 @@ struct PaneReadings {
     refs: Vec<(RefKind, i64, RelRect)>,
 }
 
-/// Group boxes into lines by vertical centre, each line sorted left to right.
-fn into_lines(mut boxes: Vec<(R, String)>) -> Vec<Vec<(R, String)>> {
-    let cy = |r: R| r.1 as i64 + r.3 as i64 / 2;
-    boxes.sort_by_key(|(r, _)| cy(*r));
-    let mut lines: Vec<Vec<(R, String)>> = Vec::new();
-    for b in boxes {
-        match lines.last_mut() {
-            Some(line) if (cy(line[0].0) - cy(b.0)).abs() <= (b.0 .3 as i64 / 2).max(6) => {
-                line.push(b)
-            }
-            _ => lines.push(vec![b]),
-        }
-    }
-    for line in &mut lines {
-        line.sort_by_key(|(r, _)| r.0);
-    }
-    lines
-}
-
-/// Read the pane's own words: the game title above the split rows, and the
-/// labelled reference times below the timer. A line may hold several
-/// label/value pairs ("Today: 11:48.8  2026: 11:35.1  PB: 11:33.9"), so each
-/// time takes the words between it and the previous time on its line.
+/// Read the pane's own words: the game title above the split rows
+/// (`board::title_lines`, shared with the board reader so the two agree on
+/// the pane's name), and the labelled reference times below the timer. A
+/// line may hold several label/value pairs ("Today: 11:48.8  2026: 11:35.1
+/// PB: 11:33.9"), so each time takes the words between it and the previous
+/// time on its line. `splits_top` (1x) is where the split rows begin;
+/// nothing at or below it is a title line.
 fn pane_readings(
     words: &[ocr::Word],
     letters: &[ocr::Word],
@@ -796,7 +768,7 @@ fn pane_readings(
         .collect();
 
     let mut refs = Vec::new();
-    for line in into_lines(below) {
+    for line in board::into_lines(below) {
         let mut label = String::new();
         for (r, text) in line {
             match parse_time(text.trim_end_matches('.')).filter(|_| time_shaped(&text)) {
@@ -827,80 +799,13 @@ fn pane_readings(
     // Keep the first reading of each kind (leftmost on the topmost line).
     refs.dedup_by_key(|(k, _, _)| *k);
 
-    // Above the split rows: the title lines. Digits-only words there are the
-    // attempt counter, not part of the name.
-    let above: Vec<(R, String)> = letters
-        .iter()
-        .filter(|w| w.conf >= 30.0 && !w.text.trim().is_empty())
-        .map(scaled)
-        .filter(|(r, text)| {
-            (r.1 + r.3) as i64 <= splits_top + 4
-                && in_band(r)
-                && r.3 < timer.3
-                && !text
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || c == ':' || c == '.')
-        })
-        .collect();
-    let title_lines: Vec<String> = into_lines(above)
-        .into_iter()
-        .map(|line| {
-            line.into_iter()
-                .map(|(_, t)| t)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .filter(|s| s.chars().any(|c| c.is_alphabetic()))
-        .collect();
-    // The topmost line is not necessarily the title: themed layouts have
-    // artwork above the pane that OCR turns into stray syllables ("eos",
-    // "sa"). The title is the line with the most letters in it — a game
-    // name — and the category is whatever sits directly under it.
-    let letters_in = |s: &str| s.chars().filter(|c| c.is_alphabetic()).count();
-    let title_idx = title_lines
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| letters_in(s) >= 4)
-        .max_by_key(|(_, s)| letters_in(s))
-        .map(|(i, _)| i);
+    // Above the split rows: the title lines.
+    let (game, category) = board::title_lines(letters, scale, timer, splits_top);
     PaneReadings {
-        game: title_idx.map(|i| title_lines[i].clone()),
-        category: title_idx.and_then(|i| title_lines.get(i + 1).cloned()),
+        game,
+        category,
         refs,
     }
-}
-
-/// Do two game names refer to the same game? Tesseract mangles a character
-/// here and there, so compare on lowercase alphanumerics and accept a small
-/// edit distance relative to length.
-fn game_matches(detected: &str, configured: &str) -> bool {
-    let norm = |s: &str| -> String {
-        s.chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .map(|c| c.to_ascii_lowercase())
-            .collect()
-    };
-    let (a, b) = (norm(detected), norm(configured));
-    if a.is_empty() || b.is_empty() {
-        return false;
-    }
-    if a.contains(&b) || b.contains(&a) {
-        return true;
-    }
-    // Levenshtein, capped: names of different games differ by far more.
-    let (m, n) = (a.len(), b.len());
-    let mut prev: Vec<usize> = (0..=n).collect();
-    let mut cur = vec![0usize; n + 1];
-    for (i, ca) in a.chars().enumerate() {
-        cur[0] = i + 1;
-        for (j, cb) in b.chars().enumerate() {
-            cur[j + 1] = (prev[j] + usize::from(ca != cb))
-                .min(prev[j + 1] + 1)
-                .min(cur[j] + 1);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[n] * 5 <= m.max(n)
 }
 
 /// Derive the pane geometry from the split rows visible above the timer:
@@ -3619,17 +3524,6 @@ mod tests {
         let r = pane_readings(&[], &letters, 2, timer, 300);
         assert_eq!(r.game.as_deref(), Some("Ninja Gaiden (NES)"));
         assert_eq!(r.category.as_deref(), Some("Any%"));
-    }
-
-    #[test]
-    fn game_name_matching_tolerates_ocr_damage() {
-        assert!(game_matches("Ninja Gaiden (NES)", "Ninja Gaiden (NES)"));
-        assert!(game_matches("Ninja Gaiden", "Ninja Gaiden (NES)"));
-        assert!(game_matches("Ninja Gaiden (NES}", "Ninja Gaiden (NES)"));
-        assert!(game_matches("Ninia Gaiden (NES)", "Ninja Gaiden (NES)"));
-        assert!(!game_matches("Super Mario Bros.", "Ninja Gaiden (NES)"));
-        assert!(!game_matches("Ninja Gaiden II", "Castlevania"));
-        assert!(!game_matches("", "Ninja Gaiden (NES)"));
     }
 
     #[test]
