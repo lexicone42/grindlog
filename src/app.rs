@@ -29,6 +29,9 @@
 //! A season best read there becomes the record to beat, and with
 //! `game.require_title_match` two consecutive readings of another game's
 //! title suspend recording until the tracked game's title is read again.
+//! The same two passes feed the board reader (`board.rs`), which in shadow
+//! mode (`game.follow_title = "log"`) logs the game it would file the
+//! board under and the rows it read (`shadow_board`).
 //! The splits column is read every `splits.read_every_secs` during a run
 //! (`splits.rs`); the attempt counter every 2 s, while the timer is reading
 //! cleanly, until the run has a number (`counter.rs`). Capture health is
@@ -41,7 +44,7 @@ use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
-use crate::board::{self, game_matches};
+use crate::board::{self, game_matches, Board};
 use crate::config::Config;
 use crate::db::{self, NewRun};
 use crate::ocr::{self, OcrEngine, PreprocessCfg};
@@ -1078,15 +1081,16 @@ fn pane_geometry(
 /// over the same 2x image, one with a digits whitelist (the split rows, the
 /// counter, the times under the timer) and one unrestricted and best-effort
 /// (the row labels and the title). Returns the geometry (`pane_geometry`,
-/// None when it cannot be derived) and the pane's own readings
-/// (`pane_readings`).
+/// None when it cannot be derived), the pane's own readings
+/// (`pane_readings`) and the board (`board::read_board`: every row with
+/// its name and cells, whatever game it belongs to).
 async fn measure_pane(
     ocr_engine: &mut OcrEngine,
     union_img: &GrayImage,
     timer: R,
     acts: u32,
     pre: &PreprocessCfg,
-) -> Result<(Option<PaneGeometry>, PaneReadings)> {
+) -> Result<(Option<PaneGeometry>, PaneReadings, Board)> {
     const UP: u32 = 2;
     let pre2 = PreprocessCfg {
         upscale: UP,
@@ -1125,12 +1129,35 @@ async fn measure_pane(
         );
     }
     let geom = pane_geometry(&words, &letters, UP, timer, acts);
-    // Title lines sit above the split rows; without geometry, above the timer.
-    let splits_top = geom
-        .map(|g| timer.1 as i64 + g.splits.1 as i64)
-        .unwrap_or(timer.1 as i64);
+    let board = board::read_board(&words, &letters, UP, timer);
+    if !board.rows.is_empty() {
+        debug!(
+            "board: {:?} [{:?}], counter {:?}, rows {:?}",
+            board.title,
+            board.subtitle,
+            board.counter,
+            board
+                .rows
+                .iter()
+                .map(|r| format!("y={} {:?} {:?}", r.y, r.name, r.cells))
+                .collect::<Vec<_>>()
+        );
+    }
+    // Title lines sit above the split rows: above the geometry's block when
+    // there is one, and above the first row the board reader found (the
+    // block is anchored from the bottom over `acts` rows, so on a pane with
+    // more rows than acts it starts too low and the rows above it would
+    // pass for title lines). Without either, above the timer.
+    let splits_top = [
+        geom.map(|g| timer.1 as i64 + g.splits.1 as i64),
+        board.rows.first().map(|r| r.y),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(timer.1 as i64);
     let readings = pane_readings(&words, &letters, UP, timer, splits_top);
-    Ok((geom, readings))
+    Ok((geom, readings, board))
 }
 
 /// Reference times the pane advertises, tracked until they are stable enough
@@ -1234,7 +1261,13 @@ fn apply_title(
     };
     let matches = game_matches(name, &cfg.game.name);
     *mismatches = if matches { 0 } else { *mismatches + 1 };
-    if pane_game.as_deref() != Some(name) {
+    // A change of title is a change of what it says, not of how tesseract
+    // spelled it this minute: "(NES" and "(NES)" flipping every read filled
+    // the session's event list (thousands of "title" events a day against
+    // its cap of 400). The first read of a session always records.
+    let changed = pane_game.as_deref().map(board::normalise_title).as_deref()
+        != Some(board::normalise_title(name).as_str());
+    if changed {
         info!(
             "layout title: {name:?}{}{}",
             readings
@@ -1275,6 +1308,45 @@ fn apply_title(
         );
         *pane_game_ok = ok;
     }
+}
+
+/// Shadow mode of the board reader (`game.follow_title = "log"`): say what
+/// it would do with the board — the (game, category) its runs would be
+/// filed under (`board::canonical_key`) and the rows it read — once per
+/// distinct board, as a `layout snapshot:` log line and a `layout` session
+/// event. Two boards are the same when their snapshots agree in normalised
+/// form (`board::Snapshot::normalised`: the key and the legible names), so
+/// the once-a-minute re-reads of one pane record one event; the running
+/// row losing its label, a "???" row read differently, the counter ticking
+/// over do not. Nothing recorded changes.
+fn shadow_board(
+    board: &Board,
+    cfg: &Config,
+    last: &mut Option<String>,
+    health: &mut db::SessionHealth,
+    at_ms: i64,
+) {
+    if !board::Snapshot::wanted(board, cfg) {
+        return;
+    }
+    let snap = board::Snapshot::of(board, cfg);
+    let norm = snap.normalised();
+    if last.as_deref() == Some(norm.as_str()) {
+        return;
+    }
+    info!(
+        "layout snapshot: {:?} -> would track {:?}; {}{}",
+        board.title,
+        snap.key,
+        snap.describe(),
+        board
+            .counter
+            .as_deref()
+            .map(|c| format!("; counter {c}"))
+            .unwrap_or_default()
+    );
+    health.event(at_ms, "layout", snap.json());
+    *last = Some(norm);
 }
 
 /// Persist a confirmed reference time and, for the season best, adopt it as
@@ -1718,6 +1790,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut pane_game: Option<String> = None;
     let mut pane_game_ok = true;
     let mut title_mismatches: u32 = 0;
+    // The board reader's last snapshot (normalised), in shadow mode.
+    let mut last_board_snapshot: Option<String> = None;
 
     // Recorded sources (vod/file) may decode much faster than realtime, so
     // the state machine is ticked by frame index instead of wall clock —
@@ -2269,7 +2343,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     )
                     .await
                     {
-                        Ok((geom, readings)) => {
+                        Ok((geom, readings, board)) => {
                             let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
                             // What the pane says it is timing. Only gates
                             // recording when the operator asked it to.
@@ -2279,6 +2353,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 &mut pane_game,
                                 &mut pane_game_ok,
                                 &mut title_mismatches,
+                                &mut health,
+                                at_ms,
+                            );
+                            shadow_board(
+                                &board,
+                                &cfg,
+                                &mut last_board_snapshot,
                                 &mut health,
                                 at_ms,
                             );
@@ -2917,7 +2998,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             )
             .await
             {
-                Ok((geom, readings)) => {
+                Ok((geom, readings, board)) => {
                     if let Some(g) = geom {
                         // Nothing new: the pane in force, read again (a lost
                         // counter — covered, or its row unread — is not
@@ -2953,6 +3034,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         &mut health,
                         at_ms,
                     );
+                    shadow_board(&board, &cfg, &mut last_board_snapshot, &mut health, at_ms);
                     for (kind, ms, _) in &readings.refs {
                         if sane_reference(*kind, *ms, &refs, &cfg) && refs.observe(*kind, *ms) {
                             record_reference(
@@ -3524,6 +3606,116 @@ mod tests {
         let r = pane_readings(&[], &letters, 2, timer, 300);
         assert_eq!(r.game.as_deref(), Some("Ninja Gaiden (NES)"));
         assert_eq!(r.category.as_deref(), Some("Any%"));
+    }
+
+    #[test]
+    fn title_events_record_a_change_of_title_not_of_spelling() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        let (mut game, mut ok, mut miss) = (None, true, 0u32);
+        let mut health = db::SessionHealth::default();
+        let titled = |s: &str| PaneReadings {
+            game: Some(s.into()),
+            category: None,
+            refs: Vec::new(),
+        };
+        let titles = |h: &db::SessionHealth| {
+            h.events
+                .iter()
+                .filter(|e| e["k"] == "title")
+                .map(|e| e["d"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        // The first read of a session records; the minute-by-minute flip of
+        // a closing bracket does not.
+        for s in [
+            "Ninja Gaiden (NES",
+            "Ninja Gaiden (NES)",
+            "Ninja Gaiden (NES",
+            "NINJA GAIDEN (NES)",
+        ] {
+            apply_title(
+                &titled(s),
+                &cfg,
+                &mut game,
+                &mut ok,
+                &mut miss,
+                &mut health,
+                0,
+            );
+        }
+        assert_eq!(titles(&health), ["Ninja Gaiden (NES"]);
+        // A real change does, and so does the way back.
+        apply_title(
+            &titled("Astyanax"),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        apply_title(
+            &titled("Ninja Gaiden (NES)"),
+            &cfg,
+            &mut game,
+            &mut ok,
+            &mut miss,
+            &mut health,
+            0,
+        );
+        assert_eq!(
+            titles(&health),
+            ["Ninja Gaiden (NES", "Astyanax", "Ninja Gaiden (NES)"]
+        );
+    }
+
+    #[test]
+    fn shadow_board_speaks_once_per_distinct_board_and_only_in_log_mode() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        let row = |n: &str| board::BoardRow {
+            name: Some(n.into()),
+            cells: vec!["0:47.5".into(), "0:47.5".into()],
+            y: 10,
+        };
+        let mut b = Board {
+            title: Some("Ninja Gaiden (NES".into()),
+            subtitle: Some("Any%".into()),
+            counter: Some("96326".into()),
+            rows: vec![row("Act 1"), row("Act 2")],
+        };
+        let mut last = None;
+        let mut health = db::SessionHealth::default();
+        // Off: nothing.
+        shadow_board(&b, &cfg, &mut last, &mut health, 0);
+        assert!(health.events.is_empty() && last.is_none());
+        cfg.game.follow_title = crate::config::FollowTitle::Log;
+        shadow_board(&b, &cfg, &mut last, &mut health, 0);
+        assert_eq!(health.events.len(), 1);
+        assert_eq!(health.events[0]["k"], "layout");
+        assert_eq!(
+            health.events[0]["d"],
+            r#"{"key":["Ninja Gaiden (NES)","Any%"],"names":["Act 1","Act 2"],"rows":2}"#
+        );
+        // The same pane a minute later, spelled differently, counter moved on.
+        b.title = Some("Ninja Gaiden (NES)".into());
+        b.counter = Some("96327".into());
+        shadow_board(&b, &cfg, &mut last, &mut health, 60_000);
+        assert_eq!(health.events.len(), 1);
+        // A row whose name reads like the others', or like nothing: the
+        // same board. A new name on the board: another snapshot.
+        b.rows.push(row("Act 3"));
+        b.rows.push(row("22?"));
+        shadow_board(&b, &cfg, &mut last, &mut health, 90_000);
+        assert_eq!(health.events.len(), 1);
+        b.rows.push(row("Bonus"));
+        shadow_board(&b, &cfg, &mut last, &mut health, 120_000);
+        assert_eq!(health.events.len(), 2);
+        // An unreadable pane says nothing and forgets nothing.
+        shadow_board(&Board::default(), &cfg, &mut last, &mut health, 180_000);
+        shadow_board(&b, &cfg, &mut last, &mut health, 240_000);
+        assert_eq!(health.events.len(), 2);
     }
 
     #[test]

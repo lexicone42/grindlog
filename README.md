@@ -447,6 +447,28 @@ rectangles span is decoded, so the `lifetime_sob` rectangle has to cover
 those rows; when the pass cannot label any of them, that rectangle is still
 read on its own as the Sum of Best.
 
+**Board reader (shadow mode).** The same two passes also read the pane as a
+board (`src/board.rs`): the title lines, the attempt counter and every
+split row above the timer with its name and its time cells — whatever game
+the rows belong to, six acts of one game or the ten games of a marathon
+with `???` for the ones not drawn yet and `-` where a time is missing. With
+`game.follow_title = "log"` the bot says, at each pane pass, which game it
+would file the board under and what rows it saw: a `layout snapshot: "Ninja
+Gaiden (NES)" -> would track Some(("Ninja Gaiden (NES)", "Any%")); 6 rows:
+Act 1, …` line in the log and a session event of kind `layout` whose detail
+is `{"key":[game,category],"rows":n,"names":[…]}`, once per distinct board:
+a board is its key and the names legible on it (case and punctuation
+ignored; the `???` rows of a marathon board read differently every minute
+and do not count), so the once-a-minute re-reads of one pane record one
+event and a game drawn onto the board records another. The key is the
+configured `game.name` when
+the title fuzzy-matches it, else the `[[games]]` entry whose `match` string
+the normalised title contains (`name = "Arcathlon"`, `match = ["arcath"]`,
+optional `category`), else the title itself with the subtitle as category.
+Nothing acts on it yet: runs, splits and counters are recorded as before,
+and `follow_title` is exclusive with `require_title_match`. The page's copy
+of the report drops the `title` events (`build-site.sh`) and keeps these.
+
 **Splits, run numbers and golds.** LiveSplit shows the comparison time in
 rows not yet reached and the actual time in completed ones, so a split is
 detected by *change*: the column is read every `splits.read_every_secs` (5)

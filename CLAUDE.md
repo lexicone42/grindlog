@@ -126,6 +126,14 @@ install and the in-process build).
   `/api/v1/` only add fields; a change of meaning is a new version path. The
   feed does not name the streamer (the page does not either); that is the
   owner's call, not a default to flip.
+- The board reader (`src/board.rs`) runs on the pane passes but only speaks
+  with `game.follow_title = "log"`: `layout snapshot:` lines and `layout`
+  session events, one per distinct board, naming the `[[games]]` alias or
+  the title it would file the board under. Shadow mode: it changes nothing
+  that is recorded. Its fixtures (`tests/fixtures/board/`) are real panes
+  with ground truth; a change to the reader must keep them passing.
+  `build-site.sh` strips only the `title` events from the page's copy of
+  the report; `layout` events stay (a handful per session).
 - `pkill -f`/`pgrep -f` patterns must not appear literally in the same
   command line (`ngtwitchtimer --config live.toml ru[n]`), or they match the
   shell running them.

@@ -42,7 +42,8 @@ pub struct BoardRow {
     /// placeholder for a time it has not got. A bare "-" in the delta
     /// column is not a cell.
     pub cells: Vec<String>,
-    /// The row's vertical centre in 1x crop pixels.
+    /// The top of the row's cells (of its name for a row without any) in
+    /// 1x crop pixels.
     pub y: i64,
 }
 
@@ -487,13 +488,15 @@ pub fn read_board(words: &[ocr::Word], letters: &[ocr::Word], scale: u32, timer:
             BoardRow {
                 name: (!name.is_empty()).then(|| name.join(" ")),
                 cells: r.cells.iter().map(|c| c.text.clone()).collect(),
-                y: r.cy / sc,
+                y: r.top / sc,
             }
         })
         .collect();
 
-    // Above the rows: the title lines and the attempt counter (a bare
-    // integer of three digits or more, the lowest one).
+    // Above the rows: the title lines (bounded by the first row's top — the
+    // same boundary `measure_pane` hands `pane_readings`, so the two read
+    // one title; its centre would let the row's own words in) and the
+    // attempt counter (a bare integer of three digits or more, the lowest).
     let rows_top = rows.first().map(|r| r.top).unwrap_or(tm.y);
     let (title, subtitle) = title_lines(letters, scale, timer, rows_top / sc);
     let counter = words
@@ -612,10 +615,23 @@ pub fn canonical_key(board: &Board, cfg: &Config) -> Option<(String, String)> {
     Some((cased, category))
 }
 
+/// The alphabetic words of a name, normalised, when they amount to three
+/// letters or more: "King Kong 2 424" is "king kong", "Act 1" is "act",
+/// and "22?", "a 22?", "ex" are nothing — placeholders and fragments.
+fn legible_name(name: &str) -> Option<String> {
+    let n = normalise_title(name);
+    let words: Vec<&str> = n
+        .split(' ')
+        .filter(|w| w.chars().any(char::is_alphabetic))
+        .collect();
+    let joined = words.join(" ");
+    (joined.chars().filter(|c| c.is_alphabetic()).count() >= 3).then_some(joined)
+}
+
 /// What shadow mode records about a board: the key its runs would be filed
-/// under and the rows it saw. Compared in normalised form, so the once-a-
-/// minute reads of one and the same pane — "(NES" one minute, "(NES)" the
-/// next — record one event, not hundreds.
+/// under and the rows it saw. Compared in normalised form (`normalised`),
+/// so the once-a-minute reads of one and the same pane — "(NES" one
+/// minute, "(NES)" the next — record one event, not hundreds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     pub key: Option<(String, String)>,
@@ -637,18 +653,28 @@ impl Snapshot {
             && (board.title.is_some() || !board.rows.is_empty())
     }
 
-    /// The form two snapshots are compared in.
+    /// The form two snapshots are compared in: the key, and the names that
+    /// are legible on the board — their alphabetic words, three letters at
+    /// least, sorted. Not the row count, and not what OCR made of the
+    /// "???" placeholders and the highlight bar this minute: at 480p a
+    /// marathon board's undrawn rows read "22?", "229", "a 22?", "ex" from
+    /// one pass to the next and one of them drops out now and then, and
+    /// every such variation would be an event. A game drawn onto the board
+    /// is a new name, and that is a new board.
     pub fn normalised(&self) -> String {
         let key = match &self.key {
             Some((g, c)) => format!("{}|{}", normalise_title(g), normalise_title(c)),
             None => String::new(),
         };
-        let names: Vec<String> = self
+        let mut names: Vec<String> = self
             .names
             .iter()
-            .map(|n| n.as_deref().map(normalise_title).unwrap_or_default())
+            .flatten()
+            .filter_map(|n| legible_name(n))
             .collect();
-        format!("{key}#{}#{}", self.names.len(), names.join("/"))
+        names.sort();
+        names.dedup();
+        format!("{key}#{}", names.join("/"))
     }
 
     /// The session event's detail: `{"key":[game,category],"rows":n,"names":[...]}`.
@@ -735,7 +761,7 @@ mod tests {
         assert_eq!(b.rows.len(), 3);
         assert_eq!(b.rows[1].name.as_deref(), Some("Act"));
         assert_eq!(b.rows[1].cells, ["1:53.8", "2:41.4"]);
-        assert_eq!(b.rows[1].y, (100 + 40 + 10) / 2);
+        assert_eq!(b.rows[1].y, (100 + 40) / 2, "row top in 1x pixels");
         assert!(b.rows.windows(2).all(|p| p[0].y < p[1].y));
     }
 
@@ -969,11 +995,36 @@ mod tests {
             r#"{"key":["Ninja Gaiden (NES)","Any%"],"names":["Act 1",null],"rows":2}"#
         );
         assert_eq!(sa.describe(), "2 rows: Act 1, ?");
-        // Another row count is another snapshot; so is another key.
+        // Neither the row count nor what OCR made of a placeholder row is a
+        // new board: the undrawn rows of a marathon board read differently
+        // every minute. A legible name is, and so is another key.
         b.rows.pop();
+        assert_eq!(sa.normalised(), Snapshot::of(&b, &cfg).normalised());
+        for junk in ["22?", "229", "a 22?", "ex", "as\" 222"] {
+            b.rows.push(BoardRow {
+                name: Some(junk.into()),
+                cells: vec![],
+                y: 50,
+            });
+            assert_eq!(
+                sa.normalised(),
+                Snapshot::of(&b, &cfg).normalised(),
+                "{junk:?}"
+            );
+        }
+        b.rows[0].name = Some("Act 1 424".into());
+        assert_eq!(sa.normalised(), Snapshot::of(&b, &cfg).normalised());
+        b.rows[0].name = Some("Batman: ROTJ".into());
         assert_ne!(sa.normalised(), Snapshot::of(&b, &cfg).normalised());
         let c = titled("Randomized Arcathlon", None);
         assert_ne!(sa.normalised(), Snapshot::of(&c, &cfg).normalised());
+        assert_eq!(legible_name("King Kong 2 424"), Some("king kong".into()));
+        assert_eq!(
+            legible_name("SMB3 (Warpless)"),
+            Some("smb3 warpless".into())
+        );
+        assert_eq!(legible_name("???"), None);
+        assert_eq!(legible_name("eo 22?"), None);
         assert_eq!(
             Snapshot::of(&Board::default(), &cfg).json(),
             r#"{"key":null,"names":[],"rows":0}"#
