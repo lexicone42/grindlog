@@ -870,28 +870,6 @@ pub async fn local_today(pool: &SqlitePool) -> Result<String> {
     Ok(day)
 }
 
-/// Start times shared by more than one run of a game/category, with how many
-/// share each. The feed keys runs by `started_at_ms` (the one field the VOD
-/// importer preserves across re-imports), so this must be empty.
-pub async fn duplicate_start_times(
-    pool: &SqlitePool,
-    game: &str,
-    category: &str,
-) -> Result<Vec<(i64, i64)>> {
-    let rows = sqlx::query(
-        "SELECT started_at_ms, COUNT(*) AS n FROM runs WHERE game = ? AND category = ? \
-         GROUP BY started_at_ms HAVING n > 1 ORDER BY started_at_ms",
-    )
-    .bind(game)
-    .bind(category)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| (r.get("started_at_ms"), r.get("n")))
-        .collect())
-}
-
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TransitionRow {
     pub at_ms: i64,

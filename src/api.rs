@@ -10,20 +10,28 @@
 //! within a version fields are only added. Day files carry no timestamp and
 //! their rows are sorted, so a closed day's bytes do not change between
 //! builds unless its database rows did — that is what lets the deploy cache
-//! them as immutable and a reader trust the manifest's sha256. Nothing here
-//! names the streamer: sessions lose their `label` (a channel name or a file
-//! path) and keep their VOD id only where the config publishes VOD links.
+//! them long at the edge and a reader trust the manifest's sha256. Rows of a
+//! closed day do change now and then (a VOD import replaces the day and
+//! renumbers attempt_number across the database; run numbers get filled in
+//! later), so the sha256 is the only truth about a file. Nothing here names
+//! the streamer: sessions lose their `label` (a channel name or a file path)
+//! and keep their VOD id only where the config publishes VOD links.
+//!
+//! The build never fails on the data: two runs sharing a start time get
+//! distinct ids (see `Run::id`) with a warning, and a run whose session row
+//! is gone gets a null `session_id`, so the site build can rely on it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use chrono::SecondsFormat;
 use schemars::JsonSchema;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
+use tracing::warn;
 
 use crate::config::Config;
 use crate::{db, util};
@@ -71,13 +79,16 @@ pub struct DayFile {
     /// The streamer's local day, YYYY-MM-DD.
     pub day: String,
     /// The day is behind today and every session in it has ended. A closed
-    /// file's bytes only change when the database rows behind it are edited
-    /// (a VOD re-import, a corrected time); compare `sha256` in the manifest.
+    /// file's bytes change rarely, but they do change: whenever the rows
+    /// behind it are edited — a VOD import of the day (which also renumbers
+    /// `attempt_number` across the whole database), run numbers filled in
+    /// later, a corrected time. The manifest's `sha256` is the only truth.
     pub closed: bool,
+    /// The day's counts, computed from `runs`.
     pub stats: DayStats,
     /// Sessions that started on this day or recorded a run on it, oldest
-    /// first, so every `runs[].session_id` resolves within the file. Their
-    /// counts span the whole session, not only this day.
+    /// first, so every non-null `runs[].session_id` resolves within the
+    /// file. Their counts span the whole session, not only this day.
     pub sessions: Vec<Session>,
     /// Every attempt that started on this day, oldest first.
     pub runs: Vec<Run>,
@@ -87,14 +98,17 @@ pub struct DayFile {
 pub struct DayStats {
     /// Attempts the bot captured.
     pub attempts: i64,
+    /// Captured attempts that finished.
     pub finished: i64,
+    /// Captured attempts that were reset.
     pub resets: i64,
     /// The fastest finish, ms; null without one.
     pub best_ms: Option<i64>,
-    /// The runner's own LiveSplit attempt counter at the first and last
-    /// captured run with a number: `last_no - first_no + 1` is how many
-    /// attempts he really made, the honest denominator for `attempts`.
+    /// The runner's own LiveSplit attempt counter at the first captured run
+    /// with a number: `last_no - first_no + 1` is how many attempts he
+    /// really made, the honest denominator for `attempts`.
     pub first_no: Option<i64>,
+    /// The runner's counter at the last captured run with a number.
     pub last_no: Option<i64>,
 }
 
@@ -103,8 +117,9 @@ pub struct Session {
     /// Database id; `runs[].session_id` refers to it. Not stable across
     /// re-imports, unlike a run's `id`.
     pub id: i64,
+    /// When capture of the broadcast started, unix ms.
     pub started_at_ms: i64,
-    /// Null while the broadcast is ongoing.
+    /// When it ended, unix ms; null while the broadcast is ongoing.
     pub ended_at_ms: Option<i64>,
     /// "hls" for live capture, "vod" for a VOD re-analysis.
     pub source: String,
@@ -112,7 +127,9 @@ pub struct Session {
     pub tag: Option<String>,
     /// Runs recorded over the whole session.
     pub attempts: i64,
+    /// Finished runs over the whole session.
     pub finished: i64,
+    /// The session's fastest finish, ms.
     pub best_ms: Option<i64>,
     /// Capture health: frames analysed.
     pub frames: Option<i64>,
@@ -137,8 +154,13 @@ pub struct Session {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Run {
-    /// The run's key: its `started_at_ms`. Unique, and the one field a VOD
-    /// re-import preserves; database ids are not published.
+    /// The run's key: its `started_at_ms`, or `started_at_ms + n` (n = 1,
+    /// 2, …) for the later, by database id, of runs that share a start.
+    /// Unique within the feed. It is stable across re-imports of the same
+    /// VOD (the start time is what the importer preserves; database ids are
+    /// not published), but the replacement of a live-captured day by its
+    /// VOD pass re-keys the day: key your copy on (`day`, `id`) and resync a
+    /// day whose `sha256` changed.
     pub id: i64,
     /// The bot's own count of the runs it saw (the tracked ordinal),
     /// renumbered chronologically by imports. Only a fallback for naming a
@@ -148,7 +170,9 @@ pub struct Run {
     /// the run was in progress: the number he and the site use. Null when it
     /// was not read.
     pub ls_attempt: Option<i64>,
+    /// When the timer started, unix ms.
     pub started_at_ms: i64,
+    /// When the run ended (finish or reset), unix ms.
     pub ended_at_ms: i64,
     /// "finished" or "reset".
     pub outcome: String,
@@ -159,7 +183,9 @@ pub struct Run {
     pub final_time_ms: Option<i64>,
     /// The last timer value seen: where a reset died.
     pub last_timer_ms: Option<i64>,
-    /// The `sessions[].id` the run was recorded in.
+    /// The `sessions[].id` the run was recorded in; null when the run has
+    /// none or its session row no longer exists, so a non-null value always
+    /// resolves within this file.
     pub session_id: Option<i64>,
     /// Per-act splits by cumulative time, in act order, where they were
     /// read; the final act's split is the finish time.
@@ -168,8 +194,11 @@ pub struct Run {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Split {
+    /// Position of the act in the configured act list, from 0.
     pub act_index: i64,
+    /// The act's name as configured.
     pub act_name: String,
+    /// Time on the timer when the act ended, ms.
     pub cumulative_ms: i64,
 }
 
@@ -187,60 +216,80 @@ pub struct History {
 pub struct HistoryDay {
     /// The streamer's local day, YYYY-MM-DD; `days/<day>.json` has the runs.
     pub day: String,
+    /// The day's counts, flattened into this row.
     #[serde(flatten)]
     pub stats: DayStats,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Finish {
+    /// The bot's tracked ordinal of the run (see `Run.attempt_number`).
     pub attempt_number: i64,
+    /// The runner's LiveSplit attempt counter; null when it was not read.
     pub ls_attempt: Option<i64>,
+    /// When the run started, unix ms: also its `id` in the day file.
     pub started_at_ms: i64,
+    /// The finish time, ms.
     pub final_time_ms: i64,
 }
 
 /// `manifest.json`, written last: where a reader starts.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Manifest {
+    /// The feed's schema version (1); a change of meaning bumps it and the
+    /// path.
     pub schema_version: u32,
-    /// When this build ran, unix ms; `generated_at` is the same instant in
-    /// ISO 8601 (UTC).
+    /// When this build ran, unix ms.
     pub generated_at_ms: i64,
+    /// The same instant in ISO 8601 (UTC).
     pub generated_at: String,
     /// Treat the manifest as stale when it is older than this many seconds.
     pub stale_after_s: u32,
-    /// The streamer's local day at build time; that day's file is the live
-    /// one and is never `closed`.
+    /// The streamer's local day at build time. When it has a file (an idle
+    /// day has none) that file is the live one, and it is never `closed`.
     pub today: String,
     /// The local UTC offset in force at build time, minutes. Days are the
     /// streamer's, not the reader's.
     pub day_offset_minutes: i64,
+    /// The game tracked.
     pub game: String,
+    /// The category tracked.
     pub category: String,
     /// What the tracked best is called ("season best").
     pub record_label: String,
+    /// The two attempt numbers, explained.
     pub attempt_numbering: AttemptNumbering,
-    /// The times to beat, each with its scope and where it was read.
+    /// The times to beat the bot itself holds, each with its scope and where
+    /// it was read. Only the layout's and the config's values: not the
+    /// speedrun.com fallbacks the site build merges into report.json.
     pub records: Vec<Record>,
     /// The bot's most recent state-machine transition; null before the first.
     pub last_transition: Option<Transition>,
     /// One entry per day file, sorted by day.
     pub days: Vec<DayEntry>,
+    /// The other files of the feed.
     pub files: Files,
 }
 
 /// The two attempt numbers, explained.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AttemptNumbering {
+    /// What `ls_attempt` is.
     pub livesplit_attempt: String,
+    /// What `attempt_number` is.
     pub tracked_ordinal: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Record {
+    /// The record's name: `record_label` for the season best, else the
+    /// configured or layout label ("WR", "Lifetime PB").
     pub label: String,
+    /// The time, ms.
     pub ms: i64,
+    /// What span the record covers.
     pub scope: Scope,
+    /// Where the value was read.
     pub source: Source,
 }
 
@@ -265,12 +314,17 @@ pub enum Source {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Transition {
+    /// When it happened, unix ms.
     pub at_ms: i64,
+    /// The phase left (IDLE, RUNNING, FINISHED, ...).
     #[serde(rename = "from")]
     pub from_phase: String,
+    /// The phase entered.
     #[serde(rename = "to")]
     pub to_phase: String,
+    /// The game tracked at the time.
     pub game: String,
+    /// The category tracked at the time.
     pub category: String,
     /// Free-form detail, e.g. "final_ms=696810".
     pub detail: Option<String>,
@@ -278,11 +332,14 @@ pub struct Transition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct DayEntry {
+    /// The streamer's local day, YYYY-MM-DD.
     pub day: String,
     /// Relative to the manifest: "days/<day>.json".
     pub path: String,
-    /// See `DayFile.closed`: a closed file is served as immutable.
+    /// See `DayFile.closed`: a closed file is cached long at the edge, and
+    /// changes only when its rows are edited; `sha256` says when.
     pub closed: bool,
+    /// The file's size in bytes.
     pub bytes: u64,
     /// SHA-256 of the file's bytes, lowercase hex.
     pub sha256: String,
@@ -290,14 +347,19 @@ pub struct DayEntry {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Files {
+    /// `history.json`.
     pub history: FileEntry,
+    /// `schema.json`.
     pub schema: FileEntry,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FileEntry {
+    /// Relative to the manifest.
     pub path: String,
+    /// The file's size in bytes.
     pub bytes: u64,
+    /// SHA-256 of the file's bytes, lowercase hex.
     pub sha256: String,
 }
 
@@ -306,8 +368,11 @@ pub struct FileEntry {
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct Documents {
+    /// `manifest.json`.
     pub manifest: Manifest,
+    /// `days/<YYYY-MM-DD>.json`.
     pub day: DayFile,
+    /// `history.json`.
     pub history: History,
 }
 
@@ -452,23 +517,6 @@ pub async fn build(
     today: &str,
     now_ms: i64,
 ) -> Result<Feed> {
-    // The run's published id is its start time; a collision would publish
-    // two runs under one key, so refuse to build rather than pick one.
-    let dups = db::duplicate_start_times(pool, game, category).await?;
-    if !dups.is_empty() {
-        let list: Vec<String> = dups
-            .iter()
-            .take(5)
-            .map(|(ms, n)| format!("{ms} x{n}"))
-            .collect();
-        bail!(
-            "{} started_at_ms value(s) shared by more than one run ({}); the feed keys runs by \
-             started_at_ms and cannot be built",
-            dups.len(),
-            list.join(", ")
-        );
-    }
-
     let mut splits_by_run: HashMap<i64, Vec<Split>> = HashMap::new();
     for (run_id, s) in db::splits_since(pool, game, category, 0).await? {
         splits_by_run.entry(run_id).or_default().push(Split {
@@ -490,17 +538,40 @@ pub async fn build(
         sessions: BTreeSet<i64>,
     }
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
+    // The published id is the start time. Two runs sharing one (rows are
+    // ordered by start, then database id, so they are adjacent) get
+    // start + 1, start + 2, ... in id order: every run is published, the
+    // key stays an integer and unique, and the log says which day to look at.
+    let mut prev_start: Option<i64> = None;
+    let mut collision: i64 = 0;
     for (day, r) in db::runs_with_day(pool, game, category).await? {
+        collision = if prev_start == Some(r.started_at_ms) {
+            collision + 1
+        } else {
+            0
+        };
+        prev_start = Some(r.started_at_ms);
+        let id = r.started_at_ms + collision;
+        if collision > 0 {
+            warn!(
+                "{day}: {} (db id {}) shares started_at_ms {} with an earlier run; published as id {id}",
+                r.run_no(),
+                r.id,
+                r.started_at_ms
+            );
+        }
+        // A session_id must resolve within the file: one whose row is gone
+        // (a day replaced by an import while the run's row was kept) is
+        // published as null rather than dangling.
+        let session_id = r.session_id.filter(|sid| sessions.contains_key(sid));
         let g = groups.entry(day).or_default();
-        if let Some(sid) = r.session_id {
-            if sessions.contains_key(&sid) {
-                g.sessions.insert(sid);
-            }
+        if let Some(sid) = session_id {
+            g.sessions.insert(sid);
         }
         let mut splits = splits_by_run.remove(&r.id).unwrap_or_default();
         splits.sort_by_key(|s| s.act_index);
         g.runs.push(Run {
-            id: r.started_at_ms,
+            id,
             attempt_number: r.attempt_number,
             ls_attempt: r.ls_attempt,
             started_at_ms: r.started_at_ms,
@@ -509,7 +580,7 @@ pub async fn build(
             reset_reason: r.reset_reason,
             final_time_ms: r.final_time_ms,
             last_timer_ms: r.last_timer_ms,
-            session_id: r.session_id,
+            session_id,
             splits,
         });
     }
@@ -523,7 +594,7 @@ pub async fn build(
     let mut history_days = Vec::new();
     let mut finishes = Vec::new();
     for (day, mut g) in groups {
-        g.runs.sort_by_key(|r| r.started_at_ms);
+        g.runs.sort_by_key(|r| r.id);
         let mut day_sessions: Vec<Session> = g
             .sessions
             .iter()
@@ -859,7 +930,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_ids_are_start_times_and_must_be_unique() {
+    async fn colliding_start_times_get_distinct_ids() {
         let (_dir, pool) = test_pool().await;
         fixture(&pool).await;
         let feed = build(&pool, GAME, CAT, &opts(), FAR_FUTURE, 0)
@@ -874,15 +945,53 @@ mod tests {
         }
         let distinct: BTreeSet<i64> = ids.iter().copied().collect();
         assert_eq!(distinct.len(), ids.len());
+        assert_eq!(ids.len(), 3);
 
-        // A second run at an existing start time makes the key ambiguous;
-        // the build refuses rather than publish two runs under one id.
-        add_run(&pool, None, 9, ids[0], None, None).await;
-        let err = build(&pool, GAME, CAT, &opts(), FAR_FUTURE, 0)
+        // Two more runs at the first run's start time, one of them pointing
+        // at a session row that does not exist. Every run is still
+        // published, the later ones (by database id) as start + 1, start +
+        // 2, and the dangling session_id comes out null.
+        let start = ids[0];
+        add_run(&pool, Some(999), 9, start, None, None).await;
+        add_run(&pool, None, 10, start, None, Some(650_000)).await;
+        let feed = build(&pool, GAME, CAT, &opts(), FAR_FUTURE, 0)
             .await
-            .err()
-            .expect("duplicate started_at_ms must fail the build");
-        assert!(err.to_string().contains("started_at_ms"), "{err}");
+            .unwrap();
+        let d15 = parse(&feed.days[0].bytes);
+        let runs = d15["runs"].as_array().unwrap();
+        let at_start: Vec<(i64, i64, &serde_json::Value)> = runs
+            .iter()
+            .filter(|r| r["started_at_ms"] == start)
+            .map(|r| {
+                (
+                    r["id"].as_i64().unwrap(),
+                    r["attempt_number"].as_i64().unwrap(),
+                    &r["session_id"],
+                )
+            })
+            .collect();
+        assert_eq!(at_start.len(), 3);
+        assert_eq!(at_start[0].0, start);
+        assert_eq!(at_start[0].1, 1, "the original keeps the plain start");
+        assert_eq!((at_start[1].0, at_start[1].1), (start + 1, 9));
+        assert_eq!((at_start[2].0, at_start[2].1), (start + 2, 10));
+        assert!(at_start[1].2.is_null(), "session 999 is not in the file");
+        assert!(at_start[0].2.is_i64());
+        assert_eq!(d15["sessions"].as_array().unwrap().len(), 1);
+        let mut all = Vec::new();
+        for d in &feed.days {
+            for r in parse(&d.bytes)["runs"].as_array().unwrap() {
+                all.push(r["id"].as_i64().unwrap());
+            }
+        }
+        assert_eq!(all.len(), 5);
+        assert_eq!(all.iter().copied().collect::<BTreeSet<_>>().len(), 5);
+        // The day's stats count them all, and the finish is in history.
+        assert_eq!(d15["stats"]["attempts"], 4);
+        assert_eq!(
+            parse(&feed.history)["finishes"].as_array().unwrap().len(),
+            2
+        );
     }
 
     #[tokio::test]
