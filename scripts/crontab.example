@@ -17,7 +17,7 @@
 # Grind Log: nightly deploy, then a backup of the database.
 50 23 * * * PATH="/home/bryan/.local/bin:/usr/bin:/bin" /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/deploy-site.sh >> /datar/workspace/claude_code_experiments/ngtwitchtimer/logs/deploy.log 2>&1
 55 23 * * * PATH="/home/bryan/.local/bin:/usr/bin:/bin" /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/backup-db.sh >> /datar/workspace/claude_code_experiments/ngtwitchtimer/logs/backup.log 2>&1
-# Grind Log: dead-man check every ten minutes (supervisor, bot, crash loop, capture, polling, disk); alerts once an hour per signal, all-clear on recovery.
+# Grind Log: dead-man check every ten minutes (supervisor, bot, crash loop, capture, polling, disk, the last deploy); alerts once an hour per signal, all-clear on recovery.
 */10 * * * * PATH="/home/bryan/.local/bin:/usr/bin:/bin" /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/healthcheck.sh >> /datar/workspace/claude_code_experiments/ngtwitchtimer/logs/health.log 2>&1
 # Grind Log: the day's summary just before midnight (attempts, best, resets by act, coverage, imports, alerts).
 58 23 * * * PATH="/home/bryan/.local/bin:/usr/bin:/bin" /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/daily-summary.sh >> /datar/workspace/claude_code_experiments/ngtwitchtimer/logs/summary.log 2>&1
