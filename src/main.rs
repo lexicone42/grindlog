@@ -1,3 +1,4 @@
+mod api;
 mod app;
 mod calibrate;
 mod capture;
@@ -49,6 +50,10 @@ enum Command {
         /// Emit machine-readable JSON
         #[arg(long)]
         json: bool,
+        /// Write the per-day feed here instead: days/<day>.json, history.json,
+        /// schema.json and manifest.json (the site's api/v1 directory)
+        #[arg(long, value_name = "DIR", conflicts_with = "json")]
+        api_dir: Option<std::path::PathBuf>,
     },
     /// Find the LiveSplit pane in a frame (needs the tesseract CLI): prints
     /// crop rectangles as a ready-to-paste [[layouts]] entry and how far it
@@ -159,7 +164,7 @@ async fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Run) {
         Command::Run => app::run(cfg).await,
         Command::Calibrate { full_frame } => calibrate::run(cfg, full_frame).await,
-        Command::Report { json } => report::run(cfg, json).await,
+        Command::Report { json, api_dir } => report::run(cfg, json, api_dir.as_deref()).await,
         Command::Locate { image, frames } => locate::run(cfg, image, frames).await,
         Command::Glyphs { action } => match action {
             GlyphsAction::Train {
