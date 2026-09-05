@@ -1593,6 +1593,9 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut prev_bright: Option<GrayImage> = None;
     let mut last_text = String::new();
     let mut ocr_skipped: u64 = 0;
+    // Wall time of the timer read path per non-static frame, reported every
+    // 600 frames when NG_TIMING is set (a replay is the place to read it).
+    let (mut frame_cost_ns, mut frame_cost_n) = (0u128, 0u32);
     // Frames the glyph reader read, and frames it left to tesseract; the
     // window pair is reset every few hundred frames to notice a theme or
     // font the templates do not cover.
@@ -1742,6 +1745,10 @@ pub async fn run(cfg: Config) -> Result<()> {
     // One sessions row per broadcast: opened on the first frame, closed when
     // the channel goes offline (or on shutdown/end of input).
     let mut session_id: Option<i64> = None;
+    // A live session's VOD is looked up when the session opens; Twitch creates
+    // the archive a little after a stream starts, so a miss is retried at this
+    // frame time, a few times.
+    let mut session_vod_retry: Option<(i64, u32)> = None;
     let session_label = match cfg.stream.source {
         crate::config::SourceKind::Vod => format!("vod {}", cfg.stream.vod_id),
         crate::config::SourceKind::File => cfg.stream.input.clone(),
@@ -1886,7 +1893,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 ocr_skipped += 1;
             } else {
                 let g = image::imageops::crop_imm(&union_bright, r.0, r.1, r.2, r.3).to_image();
-                let mut proc = ocr::preprocess(&g, &pre);
+                let frame_t0 = std::time::Instant::now();
                 // NG_DUMP_TIMER=1: save the raw timer crop every 25 frames (for
                 // threshold tuning against real pixels) and log what Otsu
                 // would have chosen for it. NG_DUMP_TIMER=all: every frame —
@@ -1960,7 +1967,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                     }
                     None => {
                         reader_used = "tess";
-                        ocr_engine.recognize_boxed(&ocr::to_png(&proc)?).await
+                        // The upscaled, thresholded image is tesseract's, and
+                        // is built only when tesseract reads: the glyph reader
+                        // took the raw crop, and the ink edge below is measured
+                        // at the crop's own scale.
+                        ocr_engine
+                            .recognize_boxed(&ocr::to_png(&ocr::preprocess(&g, &pre))?)
+                            .await
                     }
                 };
                 match ocr_result {
@@ -1986,7 +1999,6 @@ pub async fn run(cfg: Config) -> Result<()> {
                                     if parse_timer_text(&t2).is_some() {
                                         text = t2;
                                         bbox = b2;
-                                        proc = proc2;
                                         retry_thr = Some(th);
                                         break;
                                     }
@@ -1998,7 +2010,32 @@ pub async fn run(cfg: Config) -> Result<()> {
                         // short of the other digits' right edge, and at 2 fps the
                         // hundredths digit repeats for many frames, which would
                         // read as a consistent shift. Measure on other digits.
-                        let ext = ink_extent(&proc, bbox.map(|b| b.0), pre.upscale);
+                        // Measured at the crop's own scale: the same threshold
+                        // as tesseract's image without the 4x resample that
+                        // only tesseract needs — sixteen times fewer pixels
+                        // for the one thing computed on every frame. Boxes
+                        // from tesseract are in its upscaled image.
+                        let proc1 = ocr::preprocess(
+                            &g,
+                            &ocr::PreprocessCfg {
+                                upscale: 1,
+                                ..pre.clone()
+                            },
+                        );
+                        let ext = ink_extent(&proc1, bbox.map(|b| b.0 / pre.upscale.max(1)), 1);
+                        frame_cost_ns += frame_t0.elapsed().as_nanos();
+                        frame_cost_n += 1;
+                        if frame_cost_n >= 600 {
+                            if std::env::var_os("NG_TIMING").is_some() {
+                                info!(
+                                    "timer path: {:.2} ms per read frame over {} frames",
+                                    frame_cost_ns as f64 / frame_cost_n as f64 / 1e6,
+                                    frame_cost_n
+                                );
+                            }
+                            frame_cost_ns = 0;
+                            frame_cost_n = 0;
+                        }
                         let legible = parse_timer_text(&text).is_some();
                         if fine_drift && legible && drift_measurable(&text) {
                             ink = ext.map(|e| (e.right, e.cy()));
@@ -2555,17 +2592,46 @@ pub async fn run(cfg: Config) -> Result<()> {
 
         if session_id.is_none() {
             let started = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
+            // The broadcast's VOD: a VOD source knows it; a live session asks
+            // Twitch for the archive of the current stream.
+            let vod: Option<(String, i64)> = match cfg.stream.source {
+                crate::config::SourceKind::Vod => time_base.map(|b| (cfg.stream.vod_id.clone(), b)),
+                crate::config::SourceKind::Hls | crate::config::SourceKind::Streamlink => {
+                    match crate::twitch_hls::live_archive(
+                        &reqwest::Client::new(),
+                        &cfg.stream.channel,
+                    )
+                    .await
+                    {
+                        Ok(Some(v)) => Some(v),
+                        Ok(None) => {
+                            session_vod_retry = Some((t + 120_000, 0));
+                            None
+                        }
+                        Err(e) => {
+                            debug!("archive lookup failed: {e:#}");
+                            session_vod_retry = Some((t + 120_000, 0));
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
             match db::open_session(
                 &pool,
                 started,
                 session_source,
                 &session_label,
                 cfg.stream.session_tag.as_deref(),
+                vod.as_ref().map(|(id, at)| (id.as_str(), *at)),
             )
             .await
             {
                 Ok(id) => {
                     info!("session #{id} opened ({session_source}: {session_label})");
+                    if let Some((vid, _)) = &vod {
+                        info!("broadcast vod: {vid}");
+                    }
                     session_id = Some(id);
                     health = db::SessionHealth::default();
                     last_health_flush_t = t;
@@ -2863,6 +2929,24 @@ pub async fn run(cfg: Config) -> Result<()> {
                     warn!("failed to update session health: {e:#}");
                 }
             }
+            if let Some((at, tries)) = session_vod_retry.filter(|(at, _)| t >= *at) {
+                session_vod_retry = None;
+                match crate::twitch_hls::live_archive(&reqwest::Client::new(), &cfg.stream.channel)
+                    .await
+                {
+                    Ok(Some((vid, created))) => {
+                        if let Err(e) = db::set_session_vod(&pool, id, &vid, created).await {
+                            warn!("failed to record the broadcast vod: {e:#}");
+                        } else {
+                            info!("broadcast vod: {vid}");
+                        }
+                    }
+                    // Up to ten tries over twenty minutes; a broadcast Twitch
+                    // is not archiving has no VOD to find.
+                    _ if tries < 9 => session_vod_retry = Some((at + 120_000, tries + 1)),
+                    _ => debug!("no archive found for this broadcast"),
+                }
+            }
         }
         for ev in events {
             // Splits tracker follows the run lifecycle: fresh baseline per
@@ -3060,11 +3144,9 @@ async fn handle_event(
             )
             .await?;
             let label = &shared.record_label;
-            // His own LiveSplit counter is the run's identity when we have it.
-            let run_no = match run.ls_attempt {
-                Some(n) => format!("run {n}"),
-                None => format!("tracked #{}", run.attempt_number),
-            };
+            // His own LiveSplit counter is the run's identity when we have it;
+            // the chat replies name runs by the same rule.
+            let run_no = db::run_no(run.ls_attempt, run.attempt_number);
             let msg = if is_pb {
                 format!(
                     "Run finished in {} — NEW {label} for {} [{}]! ({run_no})",

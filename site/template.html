@@ -100,6 +100,14 @@
     padding: 4px 9px 3px; border: 1px solid var(--hairline); border-radius: 3px;
     color: var(--ink2); text-transform: uppercase;
   }
+  /* The grind is on: the bot has a stream open and the page is fresh. */
+  .chip.live { color: var(--ink); border-color: var(--behind); }
+  .livedot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--behind); margin-right: 6px; vertical-align: 1px;
+    animation: livepulse 1.6s ease-in-out infinite;
+  }
+  @keyframes livepulse { 50% { opacity: .3; } }
   .tagline { flex-basis: 100%; color: var(--muted); font-size: 13px; margin-top: -6px; }
 
   .eyebrow {
@@ -219,7 +227,7 @@
   footer { margin-top: 36px; color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
   footer .px { font-size: 9px; letter-spacing: .1em; }
   a { color: var(--series); }
-  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 
 <div class="wrap">
@@ -349,6 +357,12 @@ const fmt = ms => {
 const TZ = (D.day_offset_minutes || 0) * 60000;
 const dshort = ms => new Date(ms + TZ).toLocaleDateString(undefined, {month:'short', day:'numeric', timeZone:'UTC'});
 const dtime = ms => new Date(ms + TZ).toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit', timeZone:'UTC'});
+// The streamer's calendar day of an instant, as YYYY-MM-DD. Days are his, so
+// shift into the recording machine's zone and read the date in UTC. Using the
+// reader's own zone would split a broadcast across two days for anyone
+// outside it, and disagree with every figure the database grouped by day.
+const dayKey = ms => { const d = new Date(ms + TZ);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`; };
 // The run's identity is the runner's own LiveSplit counter; our tracked
 // number is only a muted fallback for runs where it wasn't read.
 const runNo = r => r.ls_attempt != null
@@ -361,9 +375,29 @@ const tagPill = r => sessionTag[r.session_id]
 
 /* masthead */
 document.getElementById('chip-cat').textContent = `${D.current_category} · NES`;
-document.getElementById('chip-updated').textContent = `updated ${dshort(D.generated_at_ms)}`;
 document.getElementById('foot-gen').textContent =
   `Generated ${new Date(D.generated_at_ms).toLocaleString()}`;
+// The page's age, ticking, and whether the grind is on right now. An hls
+// session still open in the report means the bot was capturing a live stream
+// when this page was built; a build under 15 minutes old means the live cron
+// (every ten) is still shipping pages. Both together are "live". An open
+// session on an older page is a stalled deploy, or a viewer who left the tab
+// open, and must not be dressed up as live.
+const LIVE_MAX_AGE_MS = 15 * 60000;
+const streaming = (D.sessions || []).some(s => s.source === 'hls' && s.ended_at_ms == null);
+function renderUpdated() {
+  const chip = document.getElementById('chip-updated');
+  const age = Math.max(0, Date.now() - D.generated_at_ms);
+  const min = Math.floor(age / 60000);
+  const when = min < 1 ? 'just now'
+    : min < 60 ? `${min} min ago`
+    : age < 24 * 3.6e6 ? `${Math.floor(age / 3.6e6)} h ago`
+    : dshort(D.generated_at_ms);
+  const live = streaming && age < LIVE_MAX_AGE_MS;
+  chip.innerHTML = (live ? '<span class="livedot"></span>live · ' : '') + `updated ${when}`;
+  chip.classList.toggle('live', live);
+  chip.title = `Built ${new Date(D.generated_at_ms).toLocaleString()}`;
+}
 
 /* hero: PB + tiles */
 const pbRow = D.pb_history[D.pb_history.length - 1];
@@ -403,13 +437,44 @@ const tiles = [
 ];
 // One grid for every stat tile — no orphan rows.
 document.getElementById('tiles2').remove();
-const tiles2 = [
-  ['Today', `${D.today.attempts}`, `${D.today.finished} finished, ${D.today.resets} resets`],
-  ['Best today', fmt(D.today.best_ms), D.today.best_ms && recordMs ? (D.today.best_ms <= recordMs ? `the new ${LABEL}!` : `+${((D.today.best_ms - recordMs)/1000).toFixed(1)}s to ${LABEL}`) : ' '],
-  ['Sum of best', (() => { const g = D.golds; return g.length ? fmt(g.reduce((a,x)=>a+x.gold_ms,0)) : '—'; })(), 'from recorded golds'],
-];
-document.getElementById('tiles').innerHTML = [...tiles, ...tiles2].map(([l, v, sub]) =>
-  `<div class="tile"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`).join('');
+const sobTile = ['Sum of best', (() => { const g = D.golds; return g.length ? fmt(g.reduce((a,x)=>a+x.gold_ms,0)) : '—'; })(), 'from recorded golds'];
+// "Today" is the viewer's now on the streamer's clock, counted from the runs
+// when the page is looked at rather than when it was built: a page built at
+// 23:50 and read the next morning must not still call yesterday today (the
+// report's own `today` block is what the build machine's clock said). With
+// no run yet today the tiles show the last stream instead, dated.
+function todayTiles(nowKey) {
+  const all = D.runs || [];
+  let runs = all.filter(r => dayKey(r.started_at_ms) === nowKey);
+  let label = 'Today', bestLabel = 'Best today';
+  if (!runs.length && all.length) {
+    const last = all.reduce((a, r) => Math.max(a, r.started_at_ms), 0);
+    const key = dayKey(last);
+    runs = all.filter(r => dayKey(r.started_at_ms) === key);
+    label = `Last stream · ${dshort(last)}`;
+    bestLabel = 'Best that day';
+  }
+  const fin = runs.filter(r => r.outcome === 'finished');
+  const best = fin.length ? Math.min(...fin.map(r => r.final_time_ms)) : null;
+  return [
+    [label, `${runs.length}`, `${fin.length} finished, ${runs.length - fin.length} resets`],
+    [bestLabel, fmt(best), best && recordMs ? (best <= recordMs ? `the new ${LABEL}!` : `+${((best - recordMs)/1000).toFixed(1)}s to ${LABEL}`) : ' '],
+  ];
+}
+let tilesFor = null;
+function renderTiles() {
+  tilesFor = dayKey(Date.now());
+  document.getElementById('tiles').innerHTML = [...tiles, ...todayTiles(tilesFor), sobTile].map(([l, v, sub]) =>
+    `<div class="tile"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`).join('');
+}
+// Keep the age honest while the tab sits open; the tiles only when the
+// streamer's day rolls over underneath the viewer.
+function tick() {
+  renderUpdated();
+  if (dayKey(Date.now()) !== tilesFor) renderTiles();
+}
+tick();
+setInterval(tick, 30000);
 
 /* death chart */
 const totalDeaths = D.death_chart.reduce((a, x) => a + x.deaths, 0);
@@ -579,12 +644,8 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   // included), not merely the best run the tracker has seen so far.
   const isPB = r => D.pb_history.some(p => p.attempt_number === r.attempt_number)
     && (D.baseline_best_ms == null || r.final_time_ms < D.baseline_best_ms);
-  // Days are the streamer's, so shift into the recording machine's zone and
-  // read the date in UTC. Using the reader's own zone would split a broadcast
-  // across two chips for anyone outside it, and disagree with every figure
-  // the database grouped by day.
-  const dayKey = ms => { const d = new Date(ms + (D.day_offset_minutes || 0) * 60000);
-    return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`; };
+  // Days are the streamer's (dayKey above), so a broadcast is one chip for
+  // every reader, wherever they are.
   const byDay = new Map();
   for (const r of all) {
     const k = dayKey(r.started_at_ms);
