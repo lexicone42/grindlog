@@ -95,6 +95,9 @@ struct Found {
     below: Vec<(R, String)>,
     sob: Option<R>,
     time_words: Vec<R>,
+    /// The rows as the bot itself reads them, so this command can say what
+    /// kind of board the pane is and how it should be tracked.
+    board: crate::board::Board,
 }
 
 fn bbox(w: &Word, scale: u32) -> R {
@@ -277,12 +280,14 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
         .filter(|r| r.1 >= timer_ink.1 + timer_ink.3)
         .copied()
         .collect();
+    // The unrestricted pass reads the pane's own words: the labels under
+    // the timer, and the row names the board signature is taken from.
+    let letters = engine
+        .recognize_words(&png, None, 11)
+        .await
+        .unwrap_or_default();
     let mut below: Vec<(R, String)> = Vec::new();
     if !below_times.is_empty() {
-        let letters = engine
-            .recognize_words(&png, None, 11)
-            .await
-            .unwrap_or_default();
         for r in below_times {
             let mut label: Vec<(u32, String)> = letters
                 .iter()
@@ -313,6 +318,8 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
         })
         .map(|(r, _)| grow(*r, 14, 8, cw, ch));
 
+    // What the rows say this pane is, read exactly the way the bot reads it.
+    let board = crate::board::read_board(&digits, &letters, UP, timer);
     Ok(Some(Found {
         timer_ink,
         timer,
@@ -323,6 +330,7 @@ async fn analyze(gray: &GrayImage, cfg: &Config, engine: &CliOcr) -> Result<Opti
         below,
         sob,
         time_words: times.iter().map(|(r, _)| *r).collect(),
+        board,
     }))
 }
 
@@ -361,6 +369,26 @@ fn report(f: &Found, gray: &GrayImage, cfg: &Config) -> Result<()> {
     for (r, label) in &f.below {
         println!("  row below timer at y={} labelled {label:?}", r.1);
     }
+
+    // What the rows say this is. The title row is recorded but never asked:
+    // it is the least reliable text on the pane, and the rows carry the
+    // structure.
+    let sig = crate::signature::BoardSignature::of(&f.board);
+    println!("\nWhat the rows say:");
+    println!("  {}", sig.line());
+    let names: Vec<&str> = f
+        .board
+        .rows
+        .iter()
+        .map(|r| r.name.as_deref().unwrap_or("?"))
+        .collect();
+    if !names.is_empty() {
+        println!("  rows: {}", names.join(", "));
+    }
+    if let Some(t) = f.board.title.as_deref() {
+        println!("  the title row says {t:?} (recorded, not used to decide)");
+    }
+    println!("  -> {}", sig.shape().describe());
     match f.sob {
         Some(s) => println!("  sum of best -> crop {}", fmt_rect(s)),
         None => println!("  sum of best: no row labelled \"Sum of Best\" below the timer"),

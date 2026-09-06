@@ -12,6 +12,7 @@ mod locate;
 mod ocr;
 mod report;
 mod sanity;
+mod signature;
 mod splits;
 mod state;
 mod stats;
