@@ -225,7 +225,9 @@ What the rows say:
   rows: Act 1, Act 2, ?, ?, Act 5, ?
   the title row says "Golden (NES)" (recorded, not used to decide)
   -> a run board of 6 segments — the timer resets and each attempt is a run; track it by the timer, with these rows as its acts
-``` Use it to add a new OBS scene as a layout, or to
+```
+
+Use it to add a new OBS scene as a layout, or to
 check whether the streamer moved the window. With `source = "vod"`,
 `stream.start_secs = 7200` seeks two hours in. It always drives the
 `tesseract` CLI (`ocr.tesseract_cmd`), whatever `ocr.engine` says. From a
@@ -485,8 +487,11 @@ and keeps these.
 **Board signature.** What a pane *is* comes from its split rows, not from
 its title. The title is the least reliable text on screen — on one frame of
 this streamer's own pane it read `"Golden (NES)"`, and on his marathon
-board only the first of the title's two words clears the confidence gate —
-while the rows are the part that reads exactly. So `signature.rs` measures
+board only the first of the title's two words clears the confidence gate.
+The rows are not read perfectly either, but their *structure* is: the row
+count, the columns, a running total that climbs, the attempt counter, all
+survive damage that destroys any one name, and the names read well enough
+to group once damage is forgiven. So `signature.rs` measures
 the rows and says what the board is: how many there are, whether their
 labels are one word counting up (`Act 1`…`Act 6`, the segments of one run)
 or different names (`Astyanax`, `King Kong 2`, different games), how many
@@ -496,11 +501,17 @@ them, and whether sequential labels skip a number, which is what LiveSplit
 scrolling a list longer than the pane looks like. From those it reaches a
 verdict: a **run board**, whose timer resets and whose rows are one run's
 acts, or a **marathon board**, whose rows are games completing one after
-another and never resetting. Damage is expected and forgiven: labels are
-grouped by their word rather than their number, since the number is the
-first thing OCR loses (his NES-styled scene returns `Act`, `a` and `Acté`
-for six rows that all read `Act N`), so six damaged labels still collapse
-to one and ten game names still stay ten. `locate` prints the signature and
+another and never resetting. Damage is expected and forgiven, in the three shapes it
+actually takes: the number lost from the end (`Act`, `Acté`), a word of
+gameplay glued to the front (`AE Act 6`), and a label worn down to a
+fragment (`a`). Six damaged labels still collapse to one and ten game names
+still stay ten, and because a whole row's name can come back as junk read
+off the picture behind the pane, two labels in three agreeing is enough.
+Three legible names are the fewest that decide anything: two that collapse
+are as likely to be two games sharing a word — his boards carry `Batman`
+beside `Batman: ROTJ` — as a short run board. A verdict is evidence from
+one frame rather than a fact about the day, so anything acting on it should
+want the same answer from several passes. `locate` prints the signature and
 the verdict for any frame, VOD or live stream, which is how you find out
 what a new scene needs before configuring anything.
 

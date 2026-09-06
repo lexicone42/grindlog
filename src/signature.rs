@@ -37,15 +37,21 @@ pub enum Labels {
 }
 
 /// The verdict, and what it implies for tracking.
+///
+/// The counts are **rows seen on this pane**, not the size of the board.
+/// LiveSplit shows a window of the segments when there are more than fit,
+/// and a row whose name and times were both unreadable is not there to be
+/// counted, so a count is a floor. `partial` says when that is known to
+/// matter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Shape {
     /// Segments of one repeated run: the timer resets, each attempt is a
     /// run, the rows are its acts.
-    Run { acts: usize },
+    Run { acts: usize, partial: bool },
     /// A game per row, played once each: the rows complete one after
     /// another and never reset, so a completed row is a finished run of
     /// that game.
-    Marathon { games: usize },
+    Marathon { games: usize, partial: bool },
     /// Not enough to say. Track nothing on it.
     Unknown,
 }
@@ -53,14 +59,23 @@ pub enum Shape {
 impl Shape {
     /// One line for a human: what this is and what to do with it.
     pub fn describe(&self) -> String {
+        let count = |n: &usize, partial: &bool| {
+            if *partial {
+                format!("at least {n}")
+            } else {
+                n.to_string()
+            }
+        };
         match self {
-            Shape::Run { acts } => format!(
-                "a run board of {acts} segments — the timer resets and each attempt is a run; \
-                 track it by the timer, with these rows as its acts"
+            Shape::Run { acts, partial } => format!(
+                "a run board of {} segments — the timer resets and each attempt is a run; \
+                 track it by the timer, with these rows as its acts",
+                count(acts, partial)
             ),
-            Shape::Marathon { games } => format!(
-                "a marathon board of {games} games — the rows complete one after another and \
-                 nothing resets; track it by board completions, one run per game as its row fills in"
+            Shape::Marathon { games, partial } => format!(
+                "a marathon board of {} games — the rows complete one after another and \
+                 nothing resets; track it by board completions, one run per game as its row fills in",
+                count(games, partial)
             ),
             Shape::Unknown => "not identifiable from the rows alone".to_string(),
         }
@@ -128,30 +143,17 @@ fn stem(name: &str) -> (String, Option<i64>) {
 }
 
 /// Whether a row's name stands in for one not yet known. His marathon board
-/// prints "???" in a slot whose game has not been drawn, and OCR makes
-/// "222", "22?" and worse of it.
+/// prints "???" where a game has not been drawn, and OCR returns that as
+/// "22?", "222", "227", "024", "077", "0?" and worse — never as letters. A
+/// name with no letter in it names nothing.
 fn is_placeholder(name: &str) -> bool {
     let n = name.trim();
-    !n.is_empty()
-        && n.chars()
-            .all(|c| c == '?' || c == '2' || c == '-' || c.is_whitespace())
+    !n.is_empty() && !n.chars().any(|c| c.is_alphabetic())
 }
 
-/// Whether two row labels are the same word damaged differently. The
-/// numbers are the first thing OCR loses on these panes — his NES-themed
-/// scene returns "Act", "a" and "Acté" for rows that all read "Act N" — so
-/// labels are grouped by their word, not by their number: one is a prefix
-/// of the other, or they are within an edit of each other.
-fn same_label(a: &str, b: &str) -> bool {
-    if a.is_empty() || b.is_empty() {
-        return false;
-    }
-    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    if long.starts_with(short) {
-        return true;
-    }
-    let (m, n) = (a.chars().count(), b.chars().count());
-    let allow = (m.max(n) / 5).max(1);
+/// Levenshtein within `allow` edits.
+fn within(a: &str, b: &str, allow: usize) -> bool {
+    let n = b.chars().count();
     let mut prev: Vec<usize> = (0..=n).collect();
     let mut cur = vec![0usize; n + 1];
     for (i, ca) in a.chars().enumerate() {
@@ -166,19 +168,69 @@ fn same_label(a: &str, b: &str) -> bool {
     prev[n] <= allow
 }
 
-/// How many distinct labels a set of row names amounts to, once damage is
-/// forgiven. Six rows of one run collapse to one; ten games stay ten.
-fn distinct_labels(heads: &[String]) -> usize {
-    let mut groups: Vec<&String> = Vec::new();
-    for h in heads {
-        if h.is_empty() {
-            continue;
-        }
-        if !groups.iter().any(|g| same_label(g, h)) {
-            groups.push(h);
+/// Whether two row labels are the same words damaged differently.
+///
+/// Damage on these panes comes in three shapes, and each needs its own
+/// allowance while none may be loose enough to merge two games:
+///
+/// * **Trailing.** "Act" and "Acté" for a row reading "Act 1": within one
+///   edit of each other.
+/// * **Leading.** Gameplay pixels left of the name column become a word, so
+///   one row of six reads "AE Act 6" or "Af Act 5" while its neighbours read
+///   "Act N". Seen on real frames of his own scene, and enough on its own to
+///   flip the verdict, so a label whose words END the other's counts as the
+///   same: "ae act" ends in "act". Two games do not become one this way,
+///   because that test compares whole words — "king kong" and "donkey kong"
+///   differ in their first word and stay apart.
+/// * **A lost fragment.** "a" for "Act". One label being the start of the
+///   other counts only when what remains is a couple of characters or a
+///   number, which is what a truncated label looks like. Anything longer is
+///   a different name: "Batman" is not "Batman: ROTJ", and "SMB2" is not
+///   "SMB3 (Warpless)" — both pairs are on his real boards, and merging them
+///   would turn a marathon into a run.
+fn same_label(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let (short, long) = if a.chars().count() <= b.chars().count() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    // A truncated label: what is missing is a number or a couple of letters.
+    if let Some(rest) = long.strip_prefix(short) {
+        let rest = rest.trim();
+        if rest.chars().all(|c| c.is_ascii_digit()) || rest.chars().count() <= 2 {
+            return true;
         }
     }
-    groups.len()
+    // Junk prepended: the shorter label's words end the longer one's.
+    let words: Vec<&str> = long.split(' ').filter(|w| !w.is_empty()).collect();
+    let tail: Vec<&str> = short.split(' ').filter(|w| !w.is_empty()).collect();
+    if !tail.is_empty() && words.len() > tail.len() && words[words.len() - tail.len()..] == tail[..]
+    {
+        return true;
+    }
+    within(a, b, (a.chars().count().max(b.chars().count()) / 5).max(1))
+}
+
+/// Group a set of row names by label, once damage is forgiven, and return
+/// the size of each group. Six rows of one run collapse to one group of
+/// six; ten games stay ten groups of one. Labels with nothing to compare (a
+/// name OCR reduced to punctuation) are not counted here and are not
+/// counted as names either, so the two agree.
+fn label_groups(heads: &[String]) -> Vec<usize> {
+    let mut groups: Vec<(&String, usize)> = Vec::new();
+    for h in heads.iter().filter(|h| !h.is_empty()) {
+        match groups.iter_mut().find(|(g, _)| same_label(g, h)) {
+            Some((_, n)) => *n += 1,
+            None => groups.push((h, 1)),
+        }
+    }
+    groups.into_iter().map(|(_, n)| n).collect()
 }
 
 impl BoardSignature {
@@ -194,35 +246,68 @@ impl BoardSignature {
             .map(str::trim)
             .filter(|n| !n.is_empty())
             .collect();
-        let placeholders = names.iter().filter(|n| is_placeholder(n)).count()
-            + board
-                .rows
-                .iter()
-                .filter(|r| r.name.is_none() && r.cells.iter().all(|c| c == "-"))
-                .count();
-        let real: Vec<&&str> = names.iter().filter(|n| !is_placeholder(n)).collect();
+        let placeholders_unnamed = board
+            .rows
+            .iter()
+            .filter(|r| r.name.is_none() && r.cells.iter().all(|c| c == "-"))
+            .count();
+        // A name counts only if something is left of it once the trailing
+        // number is stripped. OCR returns "024" and "077" for undrawn "???"
+        // slots, and a name with no word in it identifies nothing — counting
+        // it as legible while it joins no label group is how a marathon with
+        // one drawn game came out looking like a run.
+        let stems: Vec<(String, Option<i64>)> = names
+            .iter()
+            .filter(|n| !is_placeholder(n))
+            .map(|n| stem(n))
+            .filter(|(h, _)| !h.is_empty())
+            .collect();
+        let heads: Vec<String> = stems.iter().map(|(h, _)| h.clone()).collect();
+        let named = stems.len();
+        let placeholders = names.len() - named + placeholders_unnamed;
 
         // Segments of one run carry one label and a number ("Act 1".."Act
         // 6"); different games carry different names. The numbers are what
-        // OCR loses first, so the count of distinct labels decides it, not
-        // the numbers.
-        let stems: Vec<(String, Option<i64>)> = real.iter().map(|n| stem(n)).collect();
-        let heads: Vec<String> = stems.iter().map(|(h, _)| h.clone()).collect();
-        let labels = if real.len() < 2 {
+        // OCR loses first, so what decides it is whether the labels agree.
+        //
+        // Most of them, not all: a row's name can come back as junk read off
+        // the gameplay behind the pane ("im" beside "Act 1" and "Act 3" on a
+        // real frame), and demanding unanimity let one such row turn his own
+        // board into a marathon. Two names in three agreeing is a run board.
+        //
+        // Three labels are the fewest that can decide anything. Two that
+        // collapse are as likely to be two games sharing a word — his own
+        // boards carry "Batman" beside "Batman: ROTJ" and "SMB2" beside
+        // "SMB3 (Warpless)" — as a short run board, and the cost of guessing
+        // wrong is tracking a marathon as a run.
+        //
+        // A verdict is evidence from one frame, not a fact about the day: a
+        // caller acting on it should want the same answer from several
+        // passes, the way the shadow log only speaks when a board changes.
+        let groups = label_groups(&heads);
+        let largest = groups.iter().copied().max().unwrap_or(0);
+        let labels = if named < 3 || groups.is_empty() {
             Labels::Absent
-        } else if distinct_labels(&heads) == 1 {
+        } else if largest * 3 >= named * 2 {
             Labels::Sequential
         } else {
             Labels::Titles
         };
-        // A sequential board whose numbers skip is a window onto a longer
-        // list. Only claim that when every row was named and every name
-        // carried a number: an unread row leaves a hole that looks the
-        // same, and on these panes the highlighted row is unread as a rule.
+        // A board whose labels skip a number is a window onto a longer list.
+        // Three things have to hold before saying so, because a hole in the
+        // numbers is far more often a hole in the reading: every row named
+        // and numbered (an unread row leaves the same gap, and the
+        // highlighted row is unread as a rule), the numbers otherwise
+        // ascending (a lone number read wrong is a misread), and the list
+        // not starting at one (a window scrolled down from the top does not
+        // begin at the first segment).
         let numbered: Vec<i64> = stems.iter().filter_map(|(_, n)| *n).collect();
+        let ascending = numbered.windows(2).all(|w| w[1] > w[0]);
         let label_gap = labels == Labels::Sequential
             && numbered.len() == rows
-            && numbered.windows(2).any(|w| w[1] > w[0] + 1 || w[1] < w[0]);
+            && ascending
+            && numbered.first().is_some_and(|f| *f > 1)
+            && numbered.windows(2).any(|w| w[1] > w[0] + 1);
 
         let columns = {
             let mut c: Vec<usize> = board
@@ -247,7 +332,7 @@ impl BoardSignature {
 
         BoardSignature {
             rows,
-            named: real.len(),
+            named,
             placeholders,
             labels,
             columns,
@@ -267,16 +352,29 @@ impl BoardSignature {
         if self.rows < 2 {
             return Shape::Unknown;
         }
+        // The row count is what this pane showed, which is the whole board
+        // unless the labels say the list is scrolled. An unread *name* does
+        // not make it a floor — the row was still found, by its times — so
+        // only the gap counts here.
+        let partial = self.label_gap;
+        let run = Shape::Run {
+            acts: self.rows,
+            partial,
+        };
+        let marathon = Shape::Marathon {
+            games: self.rows,
+            partial,
+        };
         match self.labels {
-            Labels::Sequential => Shape::Run { acts: self.rows },
-            Labels::Titles if self.named >= 2 => Shape::Marathon { games: self.rows },
-            _ => {
+            Labels::Sequential => run,
+            Labels::Titles => marathon,
+            Labels::Absent => {
                 // Nameless: an attempt counter means a run repeated, and a
                 // total that fits inside an hour agrees with it.
                 let hour = 3_600_000;
                 match (self.counter, self.total_ms) {
-                    (true, Some(t)) if t <= hour => Shape::Run { acts: self.rows },
-                    (false, Some(t)) if t > hour => Shape::Marathon { games: self.rows },
+                    (true, Some(t)) if t <= hour => run,
+                    (false, Some(t)) if t > hour => marathon,
                     _ => Shape::Unknown,
                 }
             }
@@ -384,7 +482,13 @@ mod tests {
         assert!(s.monotonic);
         assert_eq!(s.total_ms, Some(695_100));
         assert!(s.counter && !s.label_gap);
-        assert_eq!(s.shape(), Shape::Run { acts: 6 });
+        assert_eq!(
+            s.shape(),
+            Shape::Run {
+                acts: 6,
+                partial: false
+            }
+        );
         assert!(s.shape().describe().contains("timer"));
     }
 
@@ -412,7 +516,13 @@ mod tests {
         assert_eq!(s.labels, Labels::Titles);
         assert!(s.monotonic && !s.counter);
         assert_eq!(s.total_ms, Some(12_105_000));
-        assert_eq!(s.shape(), Shape::Marathon { games: 10 });
+        assert_eq!(
+            s.shape(),
+            Shape::Marathon {
+                games: 10,
+                partial: false
+            }
+        );
         assert!(s.shape().describe().contains("completions"));
     }
 
@@ -435,7 +545,13 @@ mod tests {
         assert_eq!(s.named, 4);
         assert_eq!(s.placeholders, 6);
         assert_eq!(s.labels, Labels::Titles);
-        assert_eq!(s.shape(), Shape::Marathon { games: 10 });
+        assert_eq!(
+            s.shape(),
+            Shape::Marathon {
+                games: 10,
+                partial: false
+            }
+        );
     }
 
     /// LiveSplit shows a window of the segments when there are more than
@@ -481,11 +597,17 @@ mod tests {
         };
         assert_eq!(
             BoardSignature::of(&board(Some("96318"), short())).shape(),
-            Shape::Run { acts: 6 }
+            Shape::Run {
+                acts: 6,
+                partial: false
+            }
         );
         assert_eq!(
             BoardSignature::of(&board(None, long())).shape(),
-            Shape::Marathon { games: 10 }
+            Shape::Marathon {
+                games: 10,
+                partial: false
+            }
         );
         // A counter over an hours-long total, or neither signal: say nothing.
         assert_eq!(
@@ -518,7 +640,13 @@ mod tests {
         assert!(!s.monotonic, "1:53.5 then 1:22.9 is not a total");
         assert_eq!(s.columns, 1);
         // The labels still identify it; the column only says the read was poor.
-        assert_eq!(s.shape(), Shape::Run { acts: 6 });
+        assert_eq!(
+            s.shape(),
+            Shape::Run {
+                acts: 6,
+                partial: false
+            }
+        );
     }
 
     /// The verdicts that matter: seven real panes, read by the board reader
@@ -582,6 +710,117 @@ mod tests {
             );
             assert_eq!(s.shape().kind(), want, "{name}: {}", s.line());
         }
+    }
+
+    /// Gameplay pixels left of the name column become a word, so one row of
+    /// six comes back "AE Act 6" while its neighbours read "Act N". Seen on
+    /// real 1080p frames of his own scene, where it was enough on its own to
+    /// call his Ninja Gaiden board a marathon of six games.
+    #[test]
+    fn junk_prepended_to_one_row_does_not_change_the_board() {
+        let cum = ["0:47.4", "2:40.9", "4:02.2", "6:14.0", "8:38.6", "11:35.1"];
+        for damaged in ["AE Act 6", "Af Act 6", "a Act 6", "im Act 6"] {
+            let rows = (0..6)
+                .map(|i| {
+                    let name = if i == 5 {
+                        damaged.to_string()
+                    } else {
+                        format!("Act {}", i + 1)
+                    };
+                    row(Some(&name), &["1:00.0", cum[i]])
+                })
+                .collect();
+            let s = BoardSignature::of(&board(Some("96318"), rows));
+            assert_eq!(
+                s.shape(),
+                Shape::Run {
+                    acts: 6,
+                    partial: false
+                },
+                "{damaged}: {}",
+                s.line()
+            );
+        }
+        // The same forgiveness must not merge two games: these pairs are on
+        // his real boards, and merging either would turn a marathon into a
+        // run.
+        assert!(!same_label("batman", "batman rotj"));
+        assert!(!same_label("smb", "smb3 warpless"));
+        assert!(!same_label("king kong", "donkey kong"));
+        assert!(!same_label("mega man", "blaster master"));
+        // …while these are one damaged label.
+        assert!(same_label("act", "ae act") && same_label("act", "acté"));
+        assert!(same_label("a", "act") && same_label("act", "act 12"));
+    }
+
+    /// A marathon early on: one game drawn, the rest still "???", which OCR
+    /// returns as "024" and "22?". Two real frames of the August 28 event
+    /// came out as run boards because a digit-only read counted as a name
+    /// but joined no label group.
+    #[test]
+    fn digit_only_reads_of_undrawn_slots_are_not_names() {
+        let mut rows = vec![
+            row(Some("·"), &["-", "-"]),
+            row(Some("“King Kong 2"), &["4:24", "26:12"]),
+        ];
+        for junk in ["22?", "22?", "22?", "22?", "22?", "024"] {
+            rows.push(row(Some(junk), &["-", "-"]));
+        }
+        let s = BoardSignature::of(&board(None, rows));
+        assert_eq!(s.named, 1, "only the drawn game is a name: {}", s.line());
+        assert_eq!(s.labels, Labels::Absent);
+        // One name is not enough to claim anything, and with no counter and
+        // a total inside the hour the fallback cannot either. Say nothing
+        // rather than call a marathon a run.
+        assert_eq!(s.shape(), Shape::Unknown);
+        assert!(is_placeholder("024") && is_placeholder("077") && is_placeholder("227"));
+        assert!(is_placeholder("0?") && !is_placeholder("SMB2"));
+    }
+
+    /// Two labels that collapse are not a run board. His August 28 board
+    /// carries "Batman" and "Batman: ROTJ"; a frame where only those two
+    /// read would otherwise be one label, and one label used to mean a run.
+    #[test]
+    fn two_names_are_never_enough_to_call_a_board_a_run() {
+        let rows = vec![
+            row(Some("Batman: ROTJ"), &["15:43", "1:45:16"]),
+            row(Some("Batman"), &["12:23", "2:39:08"]),
+        ];
+        let s = BoardSignature::of(&board(None, rows));
+        assert_eq!(s.labels, Labels::Absent, "two names decide nothing");
+        assert_ne!(
+            s.shape(),
+            Shape::Run {
+                acts: 2,
+                partial: false
+            }
+        );
+    }
+
+    /// A hole in the numbers is far more often a hole in the reading. Only
+    /// a fully read, ascending list that does not begin at the first
+    /// segment is a window onto a longer one.
+    #[test]
+    fn a_hole_in_the_reading_is_not_a_scrolling_window() {
+        let named = |ns: &[&str]| -> BoardSignature {
+            BoardSignature::of(&board(
+                Some("96318"),
+                ns.iter()
+                    .enumerate()
+                    .map(|(i, n)| row(Some(n), &["1:00.0", &format!("{}:00.0", i + 1)]))
+                    .collect(),
+            ))
+        };
+        // His own board with one row's number misread, and with one row's
+        // name lost: neither is a window.
+        assert!(!named(&["Act 1", "Act 2", "Act 3", "Act 4", "Act 8", "Act 6"]).label_gap);
+        assert!(!named(&["Act 1", "Act 2", "Act 3", "Act 4", "Act 6"]).label_gap);
+        assert!(!named(&["Act 1", "Act 2", "Act 3", "Act 4", "Act 5", "Act 6"]).label_gap);
+        // A list scrolled down from the top: complete, ascending, and it
+        // does not start at one.
+        assert!(
+            named(&["Level 3", "Level 4", "Level 5", "Level 18", "Level 19", "Level 20"]).label_gap
+        );
     }
 
     #[test]
