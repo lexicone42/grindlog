@@ -36,9 +36,15 @@
 //!   consecutive ten-second passes of one broadcast — so agreement has to be
 //!   spread out to be worth anything. And because a completion is permanent,
 //!   a row that goes back to the value it had never had a completion at all.
-//! - **A row that goes unread shifts every row below it**, so rows are
-//!   matched to slots by name, and positionally only when the pass has the
-//!   whole board.
+//! - **A row that goes unread shifts every row below it** onto somebody
+//!   else's game, and the names are what catch that. Rows are placed by
+//!   position and the names have to bear the placing out; a pass with fewer
+//!   rows than the board has is NOT automatically a shift, because the pane's
+//!   bottom edge picks up the line of text under it now and then and leaves
+//!   the board one row longer than it really is.
+//! - **A row's name is read several ways**, and the pane's edge puts a stray
+//!   letter in front of it more often than not, so the spellings are grouped
+//!   before they are counted and the run is filed under the one they agree on.
 //! - **A completed row keeps its time for the rest of the event**, so a
 //!   completion has to be recorded once and only once. Every slot is recorded
 //!   at most once here, and `seed` re-arms that across a restart from what is
