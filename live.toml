@@ -80,6 +80,13 @@ illegible_reset_count = 360
 [game]
 name = "Ninja Gaiden (NES)"
 category = "Any%"
+# Shadow mode of the board reader: read the whole pane at each pane pass and
+# log which game the board would be filed under, one "layout" session event
+# per distinct board. Nothing acts on it — runs, splits and counters are
+# recorded exactly as before — so this is a week of evidence about what the
+# reader sees on his real days (and on an Arcathlon day, where the board is
+# ten games rather than six acts) before anything is keyed on it.
+follow_title = "log"
 # The tracked best only spans what the bot has seen; his LiveSplit comparison
 # is seasonal, so call it what it is.
 record_label = "season best"
@@ -163,3 +170,13 @@ timer = { crop_x = 265, crop_y = 765, crop_w = 360, crop_h = 100 }
 splits = { crop_x = 515, crop_y = 513, crop_w = 100, crop_h = 252 }
 attempts_counter = { crop_x = 540, crop_y = 487, crop_w = 80, crop_h = 30 }
 lifetime_sob = { crop_x = 505, crop_y = 897, crop_w = 110, crop_h = 34 }
+
+# His marathon days: the pane's title reads "Randomized Arcathlon",
+# "Arcathlon #6" and, when OCR damages it, "Randomized Areathion" or
+# "Arcathton £4". Both words are listed because the second falls under the
+# confidence gate on the 1080p board and only "Randomized" is read. In
+# shadow mode this only decides what the log calls the board.
+[[games]]
+name = "Arcathlon"
+category = "10 games"
+match = ["arcath", "randomized"]
