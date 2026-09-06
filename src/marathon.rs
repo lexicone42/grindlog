@@ -317,12 +317,21 @@ impl Marathon {
             }
         }
         let alignment = self.align(&board.rows);
-        // Rows this pass adds to the board. One is a game drawn or finished;
-        // ten at once is the board itself arriving.
-        let arriving = alignment
+        // Rows this pass adds to the board that already carry a time. One is
+        // a game that has just been finished; ten at once is a numbered
+        // board arriving with its ten comparison times. Rows without a time
+        // do not count either way: a randomized board's first real row comes
+        // in alongside the nine "???" placeholders under it, and counting
+        // those made the tracker read a finished game as a comparison and
+        // lose it for the whole event.
+        let arriving = board
+            .rows
             .iter()
-            .flatten()
-            .filter(|i| **i >= self.slots.len())
+            .zip(alignment.iter())
+            .filter(|(row, slot)| {
+                slot.is_some_and(|i| i >= self.slots.len())
+                    && read_cells(row).cumulative_ms.is_some()
+            })
             .count()
             <= 1;
         for (row, slot_idx) in board.rows.iter().zip(alignment.iter()) {
@@ -414,17 +423,6 @@ impl Marathon {
             if self.slots[i].recorded.is_some() {
                 continue;
             }
-            let Some((cum, vote)) = self.slots[i]
-                .cumulative_votes
-                .iter()
-                .map(|(c, v)| (*c, *v))
-                .max_by_key(|(c, v)| (v.count, *c))
-            else {
-                continue;
-            };
-            if vote.count < AGREE || vote.spread_ms() < AGREE_SPREAD_MS {
-                continue;
-            }
             // The marathon total is what tells a result from a comparison
             // time, so without one there is no verdict to give. Waiting costs
             // nothing: the board keeps a completed row's time for the rest of
@@ -432,16 +430,30 @@ impl Marathon {
             // timer read on 8% of frames, an unchecked candidate recorded a
             // row's comparison time (2:42:48) eight minutes into the day.
             let Some(total) = total_ms else { continue };
-            // A cumulative ahead of the total is a comparison time the runner
-            // has not reached, not a result.
-            if cum > total + AHEAD_OF_TOTAL_MS {
+            // The best of the readings this row could be finished at — not
+            // simply the most-voted one, which the guards would then throw
+            // away, taking the row's real completion down with it: a row
+            // still being played read its segment column as a cumulative
+            // three times before its real cumulative appeared twice.
+            let Some((cum, _)) = self.slots[i]
+                .cumulative_votes
+                .iter()
+                .map(|(c, v)| (*c, *v))
+                .filter(|(c, v)| {
+                    v.count >= AGREE
+                        && v.spread_ms() >= AGREE_SPREAD_MS
+                        // A cumulative ahead of the total is a comparison time
+                        // the runner has not reached, not a result.
+                        && *c <= total + AHEAD_OF_TOTAL_MS
+                        // The board's own arithmetic has to hold: the rows run
+                        // in order down the board and each cumulative includes
+                        // every row above it.
+                        && self.coherent(i, *c)
+                })
+                .max_by_key(|(c, v)| (v.count, *c))
+            else {
                 continue;
-            }
-            // The board's own arithmetic has to hold: a row's segment is part
-            // of its cumulative, and the rows run in order down the board.
-            if !self.coherent(i, cum) {
-                continue;
-            }
+            };
             // Recorded already, by an earlier run of the bot over this
             // broadcast.
             if self.known.contains(&cum) {
@@ -544,24 +556,47 @@ impl Marathon {
 
     /// Which slot each row of this pass belongs to.
     ///
-    /// A board is not scrolled — the ten rows are all on screen — so when the
-    /// pass has the whole board, position is the answer and the names only
-    /// have to not contradict it. When it has fewer rows than the board has,
-    /// one of them went unread and every row below it has moved up, so only
-    /// rows whose name identifies exactly one slot are placed and the rest
-    /// are dropped: the board is cumulative, and a dropped row comes back a
-    /// minute later.
+    /// A board is not scrolled — the ten rows are all on screen — so position
+    /// from the top is the answer whenever the names bear it out, and the
+    /// names are what catch a row that went unread in the MIDDLE, since every
+    /// row under it has moved up one and lands on somebody else's game.
+    ///
+    /// A pass with fewer rows than the board has is therefore not
+    /// automatically a shift: the pane's bottom edge picks up a line of the
+    /// text under it now and then (one pass of a real broadcast returned
+    /// eleven rows, the last of them "all"), and after that every honest
+    /// ten-row pass is one short of the slots. Reading those as name-anchors
+    /// only cost that broadcast six games for two hours, because the "???"
+    /// rows carry no name to anchor. So position is tried either way, and it
+    /// has to be both uncontradicted and positively supported by a row whose
+    /// name is the game its slot has been carrying.
     fn align(&self, rows: &[BoardRow]) -> Vec<Option<usize>> {
         if rows.is_empty() {
             return Vec::new();
         }
-        if rows.len() >= self.slots.len() {
-            let positional: Vec<Option<usize>> = (0..rows.len()).map(Some).collect();
-            if !self.contradicts(rows, &positional) {
-                return positional;
-            }
+        let positional: Vec<Option<usize>> = (0..rows.len()).map(Some).collect();
+        let ok = !self.contradicts(rows, &positional)
+            && (rows.len() >= self.slots.len() || self.supports(rows, &positional));
+        if ok {
+            return positional;
         }
         self.by_name(rows)
+    }
+
+    /// Does a mapping have at least one row on the slot that has been
+    /// carrying that game? Without one, a short pass of unreadable rows would
+    /// be laid over the board on nothing but hope.
+    fn supports(&self, rows: &[BoardRow], mapping: &[Option<usize>]) -> bool {
+        rows.iter().zip(mapping).any(|(row, slot)| {
+            let Some(i) = slot else { return false };
+            let (Some(read), Some(known)) = (
+                row.name.as_deref().and_then(clean_name),
+                self.slots.get(*i).and_then(Slot::name),
+            ) else {
+                return false;
+            };
+            game_matches(&read, known)
+        })
     }
 
     /// Does a positional reading put a row on a slot that has been carrying a
@@ -662,7 +697,13 @@ impl Cells {
 /// pass, so counting from the left is not stable. "-" is LiveSplit's
 /// placeholder for a time it has not got and parses as nothing.
 fn read_cells(row: &BoardRow) -> Cells {
-    let n = row.cells.len();
+    // A signed cell is the delta and never a time column. Taking the last
+    // two cells regardless files the SEGMENT as the cumulative whenever the
+    // delta reads and the cumulative does not — on one broadcast the last
+    // row read "+2:23", "25:16" for three passes running while the game was
+    // still going, and 25:16 outvoted the real cumulative when it came.
+    let cells: Vec<&String> = row.cells.iter().skip_while(|c| is_signed(c)).collect();
+    let n = cells.len();
     if n == 0 {
         return Cells {
             segment_ms: None,
@@ -671,14 +712,23 @@ fn read_cells(row: &BoardRow) -> Cells {
     }
     if n == 1 {
         return Cells {
-            segment_ms: parse_time(&row.cells[0]),
+            segment_ms: parse_time(cells[0]),
             cumulative_ms: None,
         };
     }
     Cells {
-        segment_ms: parse_time(&row.cells[n - 2]),
-        cumulative_ms: parse_time(&row.cells[n - 1]),
+        segment_ms: parse_time(cells[n - 2]),
+        cumulative_ms: parse_time(cells[n - 1]),
     }
+}
+
+/// A cell carrying a sign: "+1:23", "-21.2". LiveSplit's bare "-" placeholder
+/// is not one — it stands for a time the board has not got.
+fn is_signed(cell: &str) -> bool {
+    let t = cell.trim();
+    t.len() > 1
+        && (t.starts_with('+') || t.starts_with('-'))
+        && t[1..].chars().any(|c| c.is_ascii_digit())
 }
 
 /// A row's name with the time column's leftovers taken off it. The delta is
@@ -718,7 +768,14 @@ pub fn clean_name(raw: &str) -> Option<String> {
         }
         break;
     }
-    let name = tokens.join(" ");
+    // The pane's left border and the highlight bar's edge come through as a
+    // stray mark on the first letter ("'King Kong 2"); no game's name opens
+    // with punctuation, and leaving it there splits the row's votes between
+    // two spellings of one name.
+    let name = tokens
+        .join(" ")
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .to_string();
     (name.chars().filter(|c| c.is_alphabetic()).count() >= 3).then_some(name)
 }
 
@@ -1227,6 +1284,175 @@ mod tests {
             classify(&board(Some("Ninja Gaiden (NES"), vec![]), &cfg),
             Verdict::Other
         ));
+    }
+
+    // ---- whole broadcasts, replayed pass by pass -------------------------
+    //
+    // A fixture is every pane pass of one real marathon, as the board reader
+    // read it, with the marathon total the timer last gave within the
+    // previous 30 s — exactly what the run loop hands `observe` — and the
+    // ten games of that day from a hand-verified answer key. Synthetic tests
+    // say what the rules are; these say the rules survive a whole broadcast
+    // of the OCR damage a real board takes.
+
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        name: String,
+        passes: Vec<FPass>,
+        expect: Vec<FGame>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FPass {
+        t_ms: i64,
+        total_ms: Option<i64>,
+        title: Option<String>,
+        rows: Vec<FRow>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FRow {
+        name: Option<String>,
+        cells: Vec<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FGame {
+        order: usize,
+        game: String,
+        segment: String,
+        cumulative: String,
+        ended_s: i64,
+    }
+
+    fn replay(name: &str) -> (Vec<Completion>, Vec<FGame>) {
+        let path = format!(
+            "{}/tests/fixtures/marathon/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let fx: Fixture = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let mut m = Marathon::new("Arcathlon".into());
+        let mut out = Vec::new();
+        for p in &fx.passes {
+            let b = Board {
+                title: p.title.clone(),
+                subtitle: None,
+                counter: None,
+                rows: p
+                    .rows
+                    .iter()
+                    .map(|r| BoardRow {
+                        name: r.name.clone(),
+                        cells: r.cells.clone(),
+                        y: 0,
+                    })
+                    .collect(),
+            };
+            out.extend(m.observe(&b, p.t_ms, p.total_ms));
+        }
+        println!("{}: {}", fx.name, m.describe());
+        (out, fx.expect)
+    }
+
+    /// Every game of the day, with the time the board printed, and no game
+    /// the board never finished. Names are compared the way a person would
+    /// read them — OCR takes a letter off "Little Samson" and writes
+    /// "Litle Samson" — so `game_matches` decides, and the exact spellings
+    /// are printed for a human to look over.
+    fn check(name: &str, want_found: usize, allow_late_s: i64) {
+        let (found, expect) = replay(name);
+        let mut bad: Vec<String> = Vec::new();
+        let mut hits = 0;
+        for g in &expect {
+            let cum = parse_time(&g.cumulative).expect("answer key cumulative");
+            let seg = parse_time(&g.segment).expect("answer key segment");
+            let Some(c) = found.iter().find(|c| c.cumulative_ms == cum) else {
+                println!(
+                    "  {:2}  {:26} NOT RECORDED ({})",
+                    g.order, g.game, g.cumulative
+                );
+                continue;
+            };
+            hits += 1;
+            let late = c.ended_at_ms / 1000 - g.ended_s;
+            println!(
+                "  {:2}  {:26} {:26} {:>9} {:>9}  end {:+5}s{}",
+                g.order,
+                g.game,
+                c.game,
+                g.segment,
+                format_ms_short(c.segment_ms),
+                late,
+                if c.segment_derived {
+                    "  (segment from the cumulatives)"
+                } else {
+                    ""
+                }
+            );
+            if !game_matches(&c.game, &g.game) {
+                bad.push(format!("{} named {:?}, not {:?}", g.order, c.game, g.game));
+            }
+            if c.segment_ms != seg {
+                bad.push(format!(
+                    "{} timed {} ms, the board printed {}",
+                    g.order, c.segment_ms, g.segment
+                ));
+            }
+            if late.abs() > allow_late_s {
+                bad.push(format!("{} recorded {late}s from the answer key", g.order));
+            }
+        }
+        // Nothing recorded that the answer key does not have: a spurious run
+        // is worse than a missing one.
+        for c in &found {
+            if !expect
+                .iter()
+                .any(|g| parse_time(&g.cumulative) == Some(c.cumulative_ms))
+            {
+                bad.push(format!(
+                    "spurious {:?} at cumulative {} ms",
+                    c.game, c.cumulative_ms
+                ));
+            }
+        }
+        assert!(bad.is_empty(), "{name}: {}", bad.join("; "));
+        assert!(
+            hits >= want_found,
+            "{name}: only {hits} of {} games found",
+            expect.len()
+        );
+    }
+
+    fn format_ms_short(ms: i64) -> String {
+        let s = ms / 1000;
+        match s / 3600 {
+            0 => format!("{}:{:02}", s / 60, s % 60),
+            h => format!("{h}:{:02}:{:02}", (s / 60) % 60, s % 60),
+        }
+    }
+
+    /// A randomized day: no comparison times, "???" until each game is drawn,
+    /// and the first row appearing out of nothing with its result in it. All
+    /// ten games, every time exactly as the board printed it, each recorded
+    /// 50-80 s after the answer key's instant — the pane pass runs every
+    /// minute and a completion wants two of them, and the key's own instants
+    /// are good to 30 s.
+    #[test]
+    fn replays_a_whole_randomized_broadcast() {
+        check("rand-2858870362", 10, 120);
+    }
+
+    /// A numbered day: ten comparison times from the first frame, over a
+    /// transparent pane with the game showing through it, which is what makes
+    /// the readings thinner. All ten games and every time exact here too, but
+    /// the worst lag is 310 s (Jurassic Park) where the pane went unreadable
+    /// for a few passes. That is the board's whole virtue: it is cumulative,
+    /// so a stretch it cannot be read through delays a reading rather than
+    /// destroying it.
+    #[test]
+    fn replays_a_whole_numbered_broadcast() {
+        check("num-2830524439", 10, 360);
     }
 
     #[test]
