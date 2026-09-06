@@ -503,7 +503,8 @@ pub struct GameCfg {
     /// (title, every split row with its name and times) at each pane pass
     /// and log which game it would file the board under, recording a
     /// `layout` session event per distinct board. Shadow mode: nothing
-    /// acts on it yet. Exclusive with `require_title_match`.
+    /// acts on it yet, so it pairs with `require_title_match` — watch every
+    /// board, record only this game's.
     #[serde(default)]
     pub follow_title: FollowTitle,
     /// Publish each session's Twitch VOD id (and so a "watch" link for every
@@ -715,13 +716,13 @@ impl Config {
                 self.game.baseline_best
             );
         }
-        if self.game.follow_title != FollowTitle::Off && self.game.require_title_match {
-            bail!(
-                "game.follow_title = {:?} with game.require_title_match = true: \
-                 following the title and suspending on it are exclusive",
-                self.game.follow_title
-            );
-        }
+        // `follow_title = "log"` and `require_title_match` belong together
+        // rather than excluding each other: the first only observes and the
+        // second decides what is recorded, and a deployment that captures
+        // every broadcast wants both — the shadow log to say what each board
+        // is, the title gate to keep another game's timer out of this game's
+        // rows. A future mode that acts on the title will have to reconcile
+        // with the gate, and this is where that argument belongs.
         for g in &self.games {
             if g.name.trim().is_empty() {
                 bail!("a [[games]] entry has no name");
@@ -947,12 +948,14 @@ mod tests {
         let cfg = parse("[stream]\nchannel = \"x\"\n").unwrap();
         assert_eq!(cfg.game.follow_title, FollowTitle::Off);
         assert!(cfg.games.is_empty());
-        // Following the title and suspending on it are exclusive.
-        let err = parse(
+        // Watching the title and suspending on it go together: that is the
+        // configuration for capturing every broadcast.
+        let cfg = parse(
             "[stream]\nchannel = \"x\"\n[game]\nfollow_title = \"log\"\nrequire_title_match = true\n",
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("exclusive"), "{err}");
+        .expect("shadow mode and the title gate are compatible");
+        assert_eq!(cfg.game.follow_title, FollowTitle::Log);
+        assert!(cfg.game.require_title_match);
         // Only the values this version knows.
         assert!(parse("[stream]\nchannel = \"x\"\n[game]\nfollow_title = \"on\"\n").is_err());
         // An alias nothing can match is a mistake.

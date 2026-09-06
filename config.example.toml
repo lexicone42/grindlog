@@ -254,7 +254,9 @@ category = "Any%"
                                 #   name and times) and log which game it would
                                 #   file the board under, with a "layout" session
                                 #   event per distinct board — shadow mode, nothing
-                                #   acts on it. Exclusive with require_title_match
+                                #   acts on it, so it pairs with
+                                #   require_title_match: watch every board the
+                                #   broadcast shows, record only this game's
 # public_vod_links = false      # publish each session's Twitch VOD id in the
                                 #   report and the site, which links every run to
                                 #   its moment in the VOD. A VOD id names the
