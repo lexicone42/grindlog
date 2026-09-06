@@ -215,7 +215,19 @@ time-shaped words: the big timer, the split rows above it, the attempt
 counter, the "Sum of Best" row. It prints a ready-to-paste `[[layouts]]`
 entry, says how far the pane sits from each configured layout (`offset
 +18,+12 px`, `digits CLIPPED`), and draws the boxes into
-`calibration/locate.png`. Use it to add a new OBS scene as a layout, or to
+`calibration/locate.png`. It also reads the rows and says what kind of
+board this is and how it should be tracked (see *Board signature*), which
+is the quickest way to find out what a scene you have never seen needs:
+
+```
+What the rows say:
+  6 rows (3 named, counting up), 2 time column(s), last column climbing to 11:39.2, attempt counter
+  rows: Act 1, Act 2, ?, ?, Act 5, ?
+  the title row says "Golden (NES)" (recorded, not used to decide)
+  -> a run board of 6 segments — the timer resets and each attempt is a run; track it by the timer, with these rows as its acts
+```
+
+Use it to add a new OBS scene as a layout, or to
 check whether the streamer moved the window. With `source = "vod"`,
 `stream.start_secs = 7200` seeks two hours in. It always drives the
 `tesseract` CLI (`ocr.tesseract_cmd`), whatever `ocr.engine` says. From a
@@ -469,12 +481,39 @@ title reads as, letter damage allowed (`name = "Arcathlon"`, `match =
 the event, since one of them can fall under the confidence gate), else the
 title itself with the subtitle as category.
 Nothing acts on it yet: runs, splits and counters are recorded as before.
-Because it only observes, it pairs with `require_title_match`, and the pair
-is how a deployment captures every broadcast safely: drop
-`stream.title_filter` so nothing is skipped, and the title gate keeps
-another game's timer out of this game's rows while the shadow log says what
-each board was. The page's copy of the report drops the `title` events
-(`build-site.sh`) and keeps these.
+The page's copy of the report drops the `title` events (`build-site.sh`)
+and keeps these.
+
+**Board signature.** What a pane *is* comes from its split rows, not from
+its title. The title is the least reliable text on screen — on one frame of
+this streamer's own pane it read `"Golden (NES)"`, and on his marathon
+board only the first of the title's two words clears the confidence gate.
+The rows are not read perfectly either, but their *structure* is: the row
+count, the columns, a running total that climbs, the attempt counter, all
+survive damage that destroys any one name, and the names read well enough
+to group once damage is forgiven. So `signature.rs` measures
+the rows and says what the board is: how many there are, whether their
+labels are one word counting up (`Act 1`…`Act 6`, the segments of one run)
+or different names (`Astyanax`, `King Kong 2`, different games), how many
+time columns they carry, whether the last column climbs the way a running
+total must and how far it reaches, whether an attempt counter sits above
+them, and whether sequential labels skip a number, which is what LiveSplit
+scrolling a list longer than the pane looks like. From those it reaches a
+verdict: a **run board**, whose timer resets and whose rows are one run's
+acts, or a **marathon board**, whose rows are games completing one after
+another and never resetting. Damage is expected and forgiven, in the three shapes it
+actually takes: the number lost from the end (`Act`, `Acté`), a word of
+gameplay glued to the front (`AE Act 6`), and a label worn down to a
+fragment (`a`). Six damaged labels still collapse to one and ten game names
+still stay ten, and because a whole row's name can come back as junk read
+off the picture behind the pane, two labels in three agreeing is enough.
+Three legible names are the fewest that decide anything: two that collapse
+are as likely to be two games sharing a word — his boards carry `Batman`
+beside `Batman: ROTJ` — as a short run board. A verdict is evidence from
+one frame rather than a fact about the day, so anything acting on it should
+want the same answer from several passes. `locate` prints the signature and
+the verdict for any frame, VOD or live stream, which is how you find out
+what a new scene needs before configuring anything.
 
 **Splits, run numbers and golds.** LiveSplit shows the comparison time in
 rows not yet reached and the actual time in completed ones, so a split is
