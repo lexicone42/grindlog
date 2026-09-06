@@ -30,9 +30,12 @@
 //!   slots still to come and "-" in their time columns. There the baseline is
 //!   the absence of a time, and a "???" row gaining a name is a game drawn.
 //! - **OCR damages one row per pass or so.** A cumulative is taken only once
-//!   two passes agree on it; a single-frame digit slip ("1:28:33" for
-//!   "1:29:33") never repeats, because the pane pass re-reads the same static
-//!   text a minute later.
+//!   two passes a good minute apart agree on it. The board is static text,
+//!   and static text misread once is misread the same way again ten seconds
+//!   later off nearly the same pixels — a completed 23:19 read "23:10" on two
+//!   consecutive ten-second passes of one broadcast — so agreement has to be
+//!   spread out to be worth anything. And because a completion is permanent,
+//!   a row that goes back to the value it had never had a completion at all.
 //! - **A row that goes unread shifts every row below it**, so rows are
 //!   matched to slots by name, and positionally only when the pass has the
 //!   whole board.
@@ -55,6 +58,14 @@ use crate::timeparse::{parse_time, time_shaped};
 /// static text re-read once a minute, so a real value repeats and a digit
 /// slip does not.
 const AGREE: u32 = 2;
+
+/// How far apart those readings must lie. The pane pass runs every ten
+/// seconds until the board's geometry settles and every minute afterwards,
+/// and static text misread once is misread the same way again ten seconds
+/// later off nearly the same pixels — measured: a completed row's 23:19 read
+/// "23:10" on two consecutive ten-second passes and on no other pass of the
+/// broadcast. A minute apart the frame is a different frame.
+const AGREE_SPREAD_MS: i64 = 45_000;
 
 /// How far a row's own segment column may sit from the difference between
 /// its cumulative and the previous game's before the reading is held back
@@ -118,6 +129,21 @@ enum Baseline {
     Was(i64),
 }
 
+/// How often a value was read off a row, and over what stretch of the
+/// broadcast.
+#[derive(Debug, Clone, Copy, Default)]
+struct Vote {
+    count: u32,
+    first_ms: i64,
+    last_ms: i64,
+}
+
+impl Vote {
+    fn spread_ms(&self) -> i64 {
+        self.last_ms - self.first_ms
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct Slot {
     /// Every spelling of the row's name that was legible, by how often it was
@@ -127,9 +153,9 @@ struct Slot {
     /// Votes for what the baseline is, until one of them reaches `AGREE`.
     /// `None` stands for "no time in the row's columns".
     baseline_votes: HashMap<Option<i64>, u32>,
-    /// Votes for a cumulative that differs from the baseline: a completion in
-    /// the making.
-    cumulative_votes: HashMap<i64, u32>,
+    /// Readings of a cumulative that differs from the baseline: a completion
+    /// in the making.
+    cumulative_votes: HashMap<i64, Vote>,
     /// Votes for the segment column, per cumulative it was read beside.
     segment_votes: HashMap<(i64, i64), u32>,
     /// Passes spent with a confirmed cumulative whose segment column will not
@@ -307,7 +333,7 @@ impl Marathon {
                 *self.slots[i].names.entry(n).or_insert(0) += 1;
             }
             let cells = read_cells(row);
-            self.vote(i, cells, arriving, total_ms);
+            self.vote(i, cells, arriving, total_ms, at_ms);
         }
         self.harvest(at_ms, total_ms)
     }
@@ -318,7 +344,7 @@ impl Marathon {
     /// `alone` says this pass brought at most one row the board did not have,
     /// which is what tells a game just finished from a board that arrived
     /// with its times already on it.
-    fn vote(&mut self, i: usize, cells: Cells, alone: bool, total_ms: Option<i64>) {
+    fn vote(&mut self, i: usize, cells: Cells, alone: bool, total_ms: Option<i64>, at_ms: i64) {
         if self.slots[i].recorded.is_some() {
             return;
         }
@@ -358,11 +384,23 @@ impl Marathon {
             }
         }
         let Some(cum) = observed else { return };
-        // The row still shows what it always showed.
+        // The row is showing what it always showed. A real completion is
+        // permanent — a completed row keeps its time for the rest of the
+        // event — so whatever else this row read in between was the number
+        // being misread, and none of it counts towards a change.
         if slot.baseline == Baseline::Was(cum) {
+            slot.cumulative_votes.clear();
+            slot.segment_votes.clear();
+            slot.segment_waits = 0;
             return;
         }
-        *slot.cumulative_votes.entry(cum).or_insert(0) += 1;
+        let v = slot.cumulative_votes.entry(cum).or_insert(Vote {
+            count: 0,
+            first_ms: at_ms,
+            last_ms: at_ms,
+        });
+        v.count += 1;
+        v.last_ms = at_ms;
         if let Some(seg) = cells.segment_ms {
             *slot.segment_votes.entry((cum, seg)).or_insert(0) += 1;
         }
@@ -375,20 +413,32 @@ impl Marathon {
             if self.slots[i].recorded.is_some() {
                 continue;
             }
-            let Some((cum, votes)) = self.slots[i]
+            let Some((cum, vote)) = self.slots[i]
                 .cumulative_votes
                 .iter()
-                .map(|(c, n)| (*c, *n))
-                .max_by_key(|(c, n)| (*n, *c))
+                .map(|(c, v)| (*c, *v))
+                .max_by_key(|(c, v)| (v.count, *c))
             else {
                 continue;
             };
-            if votes < AGREE {
+            if vote.count < AGREE || vote.spread_ms() < AGREE_SPREAD_MS {
                 continue;
             }
-            // A cumulative minutes ahead of the marathon total is a
-            // comparison time the runner has not reached, not a result.
-            if total_ms.is_some_and(|t| cum > t + AHEAD_OF_TOTAL_MS) {
+            // The marathon total is what tells a result from a comparison
+            // time, so without one there is no verdict to give. Waiting costs
+            // nothing: the board keeps a completed row's time for the rest of
+            // the event. Measured the hard way — on the one broadcast whose
+            // timer read on 8% of frames, an unchecked candidate recorded a
+            // row's comparison time (2:42:48) eight minutes into the day.
+            let Some(total) = total_ms else { continue };
+            // A cumulative ahead of the total is a comparison time the runner
+            // has not reached, not a result.
+            if cum > total + AHEAD_OF_TOTAL_MS {
+                continue;
+            }
+            // The board's own arithmetic has to hold: a row's segment is part
+            // of its cumulative, and the rows run in order down the board.
+            if !self.coherent(i, cum) {
                 continue;
             }
             // Recorded already, by an earlier run of the bot over this
@@ -430,10 +480,13 @@ impl Marathon {
     /// Returns None while it is worth waiting, and the difference with
     /// `derived` set once it is not.
     fn segment_for(&mut self, i: usize, cum: i64) -> Option<(i64, bool)> {
+        // A segment longer than the cumulative it is part of is not a
+        // reading of this row at all — a real board came back with 46:44
+        // beside a cumulative of 12:45.
         let voted = self.slots[i]
             .segment_votes
             .iter()
-            .filter(|((c, _), _)| *c == cum)
+            .filter(|((c, s), _)| *c == cum && *s <= cum)
             .max_by_key(|((_, s), n)| (*n, *s))
             .map(|((_, s), n)| (*s, *n));
         let expected = self.expected_segment(i, cum);
@@ -458,6 +511,23 @@ impl Marathon {
             }
             (None, None) => None,
         }
+    }
+
+    /// Does a candidate cumulative sit where the board says it must? The
+    /// games run in order down the board and each row's cumulative includes
+    /// every row above it, so a candidate has to fall between the rows
+    /// already recorded either side of it. A reading that does not is cells
+    /// read off the wrong row, or a number damaged past recognition.
+    fn coherent(&self, i: usize, cum: i64) -> bool {
+        !self
+            .slots
+            .iter()
+            .enumerate()
+            .any(|(j, s)| match s.recorded {
+                Some(other) if j < i => other >= cum,
+                Some(other) if j > i => other <= cum,
+                _ => false,
+            })
     }
 
     /// What the row's segment must be if the previous game's cumulative is
@@ -1027,6 +1097,110 @@ mod tests {
         let total = Some(70 * 60_000);
         for t in 0..6 {
             assert!(m.observe(&done, t * 60_000, total).is_empty());
+        }
+    }
+
+    /// A row that was already finished when the board came into view, read
+    /// off VOD 2827296024 pass by pass: its 23:19 comes back "23:10" on two
+    /// consecutive ten-second passes and 23:19 on every other. Two readings
+    /// ten seconds apart are one observation of the same pixels, and a real
+    /// completion never goes back to the value it replaced.
+    #[test]
+    fn a_misread_that_repeats_on_the_next_pass_is_still_a_misread() {
+        let mut m = Marathon::new("Arcathlon".into());
+        let pass = |c: &str| {
+            board(
+                Some("Arcathion #4"),
+                vec![
+                    row("Astyanax", &["23:19", c]),
+                    row("Castlevania II", &["46:59", "1:10:19"]),
+                ],
+            )
+        };
+        // The marathon is well past this row: he is playing game two.
+        let total = Some(31 * 60_000);
+        let seq = [
+            (0, "23:19"),
+            (10_000, "23:19"),
+            (20_000, "23:19"),
+            (30_000, "23:10"),
+            (40_000, "23:10"),
+            (50_000, "23:19"),
+            (60_000, "23:19"),
+            (70_000, "23:19"),
+        ];
+        for (t, c) in seq {
+            assert!(
+                m.observe(&pass(c), t, total).is_empty(),
+                "nothing was finished at {t}"
+            );
+        }
+        // Even if the slip came back much later, the row has shown its real
+        // value in between and the count starts again.
+        for t in 8..14 {
+            assert!(m.observe(&pass("23:19"), t * 60_000, total).is_empty());
+        }
+        assert!(m.observe(&pass("23:10"), 840_000, total).is_empty());
+        assert!(m.observe(&pass("23:19"), 900_000, total).is_empty());
+        assert!(m.observe(&pass("23:10"), 960_000, total).is_empty());
+    }
+
+    /// The marathon total is the whole basis for telling a result from a
+    /// comparison time, so a pass that could not read it records nothing —
+    /// and the pass that can, later, records everything, because the board
+    /// keeps a completed row's time.
+    #[test]
+    fn nothing_is_recorded_without_a_marathon_total() {
+        let mut m = Marathon::new("Arcathlon".into());
+        let pass = |c: &[&str]| {
+            board(
+                Some("Arcathlon #4"),
+                vec![
+                    row("Astyanax", &["23:19", "23:19"]),
+                    row("Castlevania II", c),
+                ],
+            )
+        };
+        m.observe(&pass(&["46:59", "1:10:19"]), 0, None);
+        m.observe(&pass(&["46:59", "1:10:19"]), 60_000, None);
+        // The row changes, over and over, with no total to judge it by.
+        for t in 2..8 {
+            assert!(m
+                .observe(&pass(&["47:10", "1:10:30"]), t * 60_000, None)
+                .is_empty());
+        }
+        // The timer comes back, standing where the board says the game ended.
+        let total = Some(70 * 60_000 + 30_000);
+        let seen = m.observe(&pass(&["47:10", "1:10:30"]), 480_000, total);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].game, "Castlevania II");
+    }
+
+    /// Rows run in order down the board, so a cumulative that would land
+    /// above a row already recorded above it is cells read off the wrong row.
+    #[test]
+    fn a_cumulative_out_of_order_with_the_recorded_rows_is_refused() {
+        let mut m = Marathon::new("Arcathlon".into());
+        let pass = |first: &[&str], second: &[&str]| {
+            board(
+                Some("Randomized Arcathlon"),
+                vec![row("Astyanax", first), row("King Kong 2", second)],
+            )
+        };
+        m.observe(&pass(&[], &[]), 0, Some(0));
+        m.observe(&pass(&[], &[]), 60_000, Some(60_000));
+        let after_one = Some(21 * 60_000 + 48_000);
+        m.observe(&pass(&["21:48", "21:48"], &[]), 120_000, after_one);
+        assert_eq!(
+            m.observe(&pass(&["21:48", "21:48"], &[]), 180_000, after_one)
+                .len(),
+            1
+        );
+        // Row 1 reads a cumulative EARLIER than the row above it, which the
+        // board's own ordering rules out.
+        let bad = pass(&["21:48", "21:48"], &["4:24", "12:45"]);
+        for t in 4..10 {
+            assert!(m.observe(&bad, t * 60_000, Some(1_400_000)).is_empty());
         }
     }
 

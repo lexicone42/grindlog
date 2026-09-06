@@ -6,7 +6,7 @@
 /// format produces systematically: the hundredths are drawn in a smaller
 /// font, and at stream resolution their decimal point is a couple of pixels
 /// that thresholding erases. "4.76" then reads as "476", "45.71" as "4571",
-/// and "3:06.12" as "3:06 12". Every run starts in that sub-ten-second
+/// "3:06.12" as "3:06 12" and "34:37.95" as "34:3795". Every run starts in that sub-ten-second
 /// range, so without this repair the first seconds of every attempt are
 /// illegible and a quick reset is never seen at all. Two bare digits are NOT
 /// repaired: they are the hundredths alone, which is also what a mid-run
@@ -30,6 +30,22 @@ pub fn parse_timer_text(raw: &str) -> Option<i64> {
             && head.chars().any(|c| c.is_ascii_digit())
         {
             return parse_time(&format!("{head}.{tail}"));
+        }
+    }
+    // "34:3795" / "2:52:2609": the same erased point, with nothing left in
+    // its place. The CLI OCR engine leaves the gap repaired above; the
+    // in-process engine joins the two runs of digits. After a colon LiveSplit
+    // always pads the seconds to two digits and always draws two hundredths,
+    // so exactly four digits behind the last colon is that field pair and
+    // nothing else. `parse_time` still has to accept the result, which is
+    // what rejects "34:9995".
+    if let Some((head, tail)) = t.rsplit_once(':') {
+        if tail.len() == 4
+            && tail.chars().all(|c| c.is_ascii_digit())
+            && !head.is_empty()
+            && head.chars().all(|c| c.is_ascii_digit() || c == ':')
+        {
+            return parse_time(&format!("{head}:{}.{}", &tail[..2], &tail[2..]));
         }
     }
     // Bare digits with no separator at all: seconds and hundredths. Three or
@@ -293,5 +309,26 @@ mod timer_text_tests {
         assert_eq!(parse_timer_text("4a6"), None);
         assert_eq!(parse_timer_text("1.2 34"), Some(1_234));
         assert_eq!(parse_timer_text(""), None);
+    }
+
+    /// The same erased point with no gap left behind, which is what the
+    /// in-process OCR engine returns where the CLI leaves a space. Measured
+    /// on a marathon board, whose total reads "34:3795" on nine frames in
+    /// ten: without this the timer parsed on 8% of that broadcast.
+    #[test]
+    fn repairs_the_erased_point_with_no_gap_after_a_colon() {
+        assert_eq!(parse_timer_text("34:3795"), Some(2_077_950));
+        assert_eq!(parse_timer_text("2:52:2609"), Some(10_346_090));
+        assert_eq!(parse_timer_text("1:0547"), Some(65_470));
+        // Only four digits behind the last colon: after a colon LiveSplit
+        // pads the seconds to two and always draws two hundredths, so three
+        // or five digits there is a misread, not a lost point.
+        assert_eq!(parse_timer_text("34:379"), None);
+        assert_eq!(parse_timer_text("34:37955"), None);
+        // The repair still has to produce a real time.
+        assert_eq!(parse_timer_text("34:9995"), None);
+        assert_eq!(parse_timer_text("34:6012"), None);
+        // A value that already carries its point is never re-cut.
+        assert_eq!(parse_timer_text("1:23:45.67"), Some(5_025_670));
     }
 }
