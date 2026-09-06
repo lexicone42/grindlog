@@ -166,18 +166,47 @@ struct Slot {
 }
 
 impl Slot {
-    /// The name to file this row's run under: the spelling read most often,
-    /// longest first on a tie so a truncated read never wins over the whole
-    /// name, then alphabetically so the choice is deterministic.
+    /// The name to file this row's run under.
+    ///
+    /// The spellings are grouped before they are counted. The pane's left
+    /// border and the highlight bar's edge come through as a letter or two in
+    /// front of the name, and they do it often: on one broadcast "a Batman:
+    /// ROTJ" outnumbered "Batman: ROTJ" 62 readings to 49, with "s", "e",
+    /// "es", "4" and "sa" in front of the rest. So a spelling that is another
+    /// with a token or two ahead of it is the same name, and its readings
+    /// count towards the shorter one — which "SMB3 (Warpless)" and
+    /// "(Warpless)" are not, four characters apart being a lost word rather
+    /// than a smudge.
+    ///
+    /// Then the most read wins; on a tie the longer spelling, so a truncated
+    /// reading never beats the whole name, and then alphabetically so the
+    /// choice does not depend on the order of a hash map.
     fn name(&self) -> Option<&str> {
-        self.names
-            .iter()
+        let mut tally: Vec<(&str, u32)> = Vec::new();
+        for (spelling, count) in &self.names {
+            let core = self
+                .names
+                .keys()
+                .filter(|m| {
+                    spelling.ends_with(m.as_str())
+                        && spelling.chars().count() > m.chars().count()
+                        && spelling.chars().count() - m.chars().count() <= 3
+                })
+                .min_by_key(|m| m.chars().count())
+                .map_or(spelling.as_str(), String::as_str);
+            match tally.iter_mut().find(|(t, _)| *t == core) {
+                Some((_, votes)) => *votes += count,
+                None => tally.push((core, *count)),
+            }
+        }
+        tally
+            .into_iter()
             .max_by(|a, b| {
-                a.1.cmp(b.1)
+                a.1.cmp(&b.1)
                     .then_with(|| a.0.chars().count().cmp(&b.0.chars().count()))
                     .then_with(|| b.0.cmp(a.0))
             })
-            .map(|(n, _)| n.as_str())
+            .map(|(n, _)| n)
     }
 
     /// The cumulative this row ended at, if this tracker watched it end.
@@ -1453,6 +1482,49 @@ mod tests {
     #[test]
     fn replays_a_whole_numbered_broadcast() {
         check("num-2830524439", 10, 360);
+    }
+
+    /// The pane's edge reads as a letter in front of the name more often than
+    /// it does not, so the readings of one row have to be grouped before they
+    /// are counted — but only where the difference is a smudge, not a word.
+    #[test]
+    fn a_letter_in_front_of_the_name_does_not_win_the_vote() {
+        let mut m = Marathon::new("Arcathlon".into());
+        // The real counts from VOD 2826325488's second row.
+        let mut pass = |name: &str, times: usize| {
+            for t in 0..times {
+                m.observe(
+                    &board(Some("Arcathion #3"), vec![row(name, &["17:07", "32:09"])]),
+                    t as i64 * 60_000,
+                    Some(0),
+                );
+            }
+        };
+        pass("a Batman: ROTJ", 62);
+        pass("Batman: ROTJ", 49);
+        pass("s Batman: ROTJ", 5);
+        assert!(m.describe().contains("Batman: ROTJ"));
+        assert!(!m.describe().contains("a Batman: ROTJ"));
+        // A whole word in front is a different reading, not a smudge: the
+        // board really does print "SMB3 (Warpless)", and a pass that lost
+        // "SMB3" must not rename the game.
+        let mut m2 = Marathon::new("Arcathlon".into());
+        for t in 0..10 {
+            let n = if t % 3 == 0 {
+                "(Warpless)"
+            } else {
+                "SMB3 (Warpless)"
+            };
+            m2.observe(
+                &board(
+                    Some("Randomized Arcathion"),
+                    vec![row(n, &["1:03:20", "1:29:33"])],
+                ),
+                t * 60_000,
+                Some(0),
+            );
+        }
+        assert!(m2.describe().contains("SMB3 (Warpless)"));
     }
 
     #[test]
