@@ -480,9 +480,11 @@ title reads as, letter damage allowed (`name = "Arcathlon"`, `match =
 ["arcath", "randomized"]`, optional `category` — list every word that names
 the event, since one of them can fall under the confidence gate), else the
 title itself with the subtitle as category.
-Nothing acts on it yet: runs, splits and counters are recorded as before.
-The page's copy of the report drops the `title` events (`build-site.sh`)
-and keeps these.
+In shadow mode nothing acts on it: runs, splits and counters are recorded as
+before. The page's copy of the report drops the `title` events
+(`build-site.sh`) and keeps these. `debug.board_log` writes the board itself,
+one JSON line per pane pass, which is what explains after the fact what the
+reader saw on a board that went unreadable for a while.
 
 **Board signature.** What a pane *is* comes from its split rows, not from
 its title. The title is the least reliable text on screen — on one frame of
@@ -514,6 +516,56 @@ one frame rather than a fact about the day, so anything acting on it should
 want the same answer from several passes. `locate` prints the signature and
 the verdict for any frame, VOD or live stream, which is how you find out
 what a new scene needs before configuring anything.
+
+**Marathon days (`mode = "board"`).** The streamer also runs "Arcathlon"
+days: ten NES games back to back, one split row per game. The pane's big
+timer is then the event's running TOTAL — it pauses between games and never
+resets — so the run state machine has nothing to read, and a `[[games]]`
+entry with `mode = "board"` says to track that board by its rows instead
+(`src/marathon.rs`):
+
+```toml
+[[games]]
+name = "Arcathlon"
+category = "10 games"
+match = ["arcath", "randomized"]
+mode = "board"          # default "runs"
+```
+
+A marathon has no resets — he plays each game to the end — so every row
+completes exactly once, and when it does the board prints the authoritative
+time. Each completed row is recorded as one finished run: `game` is the
+row's own name as the board prints it (`Astyanax`, `SMB3 (Warpless)`), so
+his times for a game accumulate across events in the `runs.game` every
+report and chat query already groups by; `category` is the entry's `name`
+(`Arcathlon`), and its `category` field then describes the board rather than
+the runs; `final_time_ms` is the row's segment time; `last_timer_ms` is the
+marathon total the row ended at; `ended_at_ms` is the pane pass that saw it
+and `started_at_ms` that minus the segment. The session is tagged with the
+event and its number when the title prints one (`Arcathlon #6`). While such
+a board is on screen nothing else is recorded from the timer, and a
+`[[games]]` entry in board mode may not name `game.name` — that would put
+the tracked game's own board into completion tracking.
+
+What it takes to read a board rather than a timer: a cumulative counts only
+once two pane passes agree on it, since a single-frame digit slip does not
+repeat in static text re-read a minute later; rows are matched to slots by
+name, so a row that goes unread does not shift the ones below it into each
+other's games; a numbered event prints its comparison times from the first
+frame, so a row is finished when its cumulative *changes* from the one it
+first showed, which on one measured board was a difference of five seconds;
+a randomized event instead reveals each game as it is drawn, and its first
+row appears out of nothing with its result already in it, so a row arriving
+alone with the marathon total standing at its cumulative is a game that has
+just finished, while a whole board arriving at once is comparison times. The
+row's own segment column is the run's time, checked against the difference
+between its cumulative and the previous game's and replaced by that
+difference when the column will not agree (the log says so). A completion is
+recorded once and only once: within a session by its slot, and across a
+restart mid-event by reconciling `last_timer_ms` against the database. Games
+finished before the bot first read the board are not recorded — nothing says
+when they happened — so a marathon has to be watched from its start. Replay
+one with `scripts/replay-arcathlon.sh <vod_id>`.
 
 **Splits, run numbers and golds.** LiveSplit shows the comparison time in
 rows not yet reached and the actual time in completed ones, so a split is
@@ -556,6 +608,7 @@ best (tracked)" next to the runner's own Sum of Best row read off the layout
 | `scripts/obs-accuracy.sh <obs.jsonl>` | the label-free misread check over an observation log: consecutive running frames must advance by one frame interval within ±60 ms (`TOL_MS`); resets, frozen timers, values under 10 s, event frames and the frames after a lock are excluded and counted by reason. Prints the rate per pair and per frame, per reader, and the worst frames with the readings around them |
 | `scripts/obs-diff.sh [-q] <a.jsonl> <b.jsonl>` | join two observation logs of the same window on the frame number and list the frames where OCR text, parsed value, phase, layout offset or events differ; summary line first, exit status like `diff`. Warns when the logs are not frame-aligned |
 | `scripts/backfill-vods.sh <vod_id>...` | analyze Twitch VODs one after another straight from Twitch (no download), one database each in `backfill-db/vod-<id>.db` with its obs log in `backfill-logs/`; run several chains in parallel. It does not read `live.toml`: it writes its own config per VOD with the reference deployment baked in (channel, layouts, acts, 480p30, 2 fps, the glyph reader, `min_final_ms`, the AppImage `tessdata_path`), so edit the heredoc for another streamer. Workers run under `nice`; a rerun replaces an earlier pass over the same VOD |
+| `scripts/replay-arcathlon.sh <vod_id>...` | replay marathon broadcasts, one database each in `arcathlon-db/vod-<id>.db` beside its board log, obs log and bot log; run several chains in parallel. It writes its own config per VOD — the marathon total as the timer (its own crop and threshold, the offset search off, tesseract rather than the glyph templates), the pane crop raised to include the title row, and the `[[games]]` entry in `mode = "board"` — so every completed row lands as a run of its own game under category `Arcathlon`, and the base `[game]` is title-gated so the timer records nothing. `ARCA_OUT`, `ARCA_FPS`, `ARCA_BIN`, `ARCA_START` and `ARCA_NICE` override the output directory, frame rate, binary, starting second and worker priority; a rerun replaces an earlier pass. Start it at second 0: a row already carrying its time when the board first comes into view is not recorded |
 | `scripts/import-vod.sh <vod_id> [--deploy] [--force]` | replace one broadcast day in the live database from its completed VOD database (refuses a VOD whose sessions are not all closed); one transaction, safe while the bot is running, held under the site build's lock (`.build-site.lock`, up to 120 s) so it cannot commit in the middle of a feed build; normalises finished runs' final-act split to the finish time, renumbers attempts chronologically and runs `fill-run-numbers.sh`. Before replacing it compares the incoming day with the one in the live database (runs, numbered runs, session span) and refuses with exit 3 when the new pass holds under 90% of either count, so a pass that died partway cannot overwrite a fuller day; `--force` replaces anyway. `LIVE=copy.db` targets another database for a dry run |
 | `scripts/import-when-done.sh <vod_id>...` | detached: import each VOD as its chain finishes and redeploy the site. A VOD the import gate refuses is left unmarked and reported; it is retried only when its database changes, and the final line names the refused ids (exit 3) |
 | `scripts/list-vods.sh <channel> [--game <substring>]` | list a channel's archived VODs newest first (`id  date  hours  title`) from Twitch's GraphQL endpoint with `curl` + `jq`, so a backfill can be assembled without guessing ids; `--game` filters titles case-insensitively; falls back to `yt-dlp` (no dates) when GraphQL declines. `TWITCH_CLIENT_ID` overrides the web client-id |

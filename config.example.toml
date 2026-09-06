@@ -273,10 +273,24 @@ category = "Any%"
 # confidence gate and only the other is read. Without a matching entry the
 # title itself is the name. One entry per game; the category is optional
 # ("unknown" without it).
+#
+# `mode` says how a board this entry names is tracked. "runs", the default,
+# is every board the bot has read until now: one game, a timer that resets,
+# the state machine turning each attempt into a run. "board" is for a
+# marathon pane — ten different games back to back, one split row each, and a
+# big timer that is the event's total, pausing between games and never
+# resetting. There the rows are what completes: a row that gains a time is a
+# finished run of THAT game, recorded under the row's own name with this
+# entry's `name` as its category (so the `category` below describes the
+# board, not the runs), and while such a board is on screen nothing is
+# recorded from the timer at all. A board-mode entry may not name the game in
+# [game] — that would put the tracked game's own board into completion
+# tracking. See the README, "Marathon days".
 [[games]]
 name = "Arcathlon"
 category = "10 games"
 match = ["arcath", "randomized"]
+# mode = "runs"
 
 [database]
 # path = "ngtimer.db"
@@ -302,3 +316,10 @@ match = ["arcath", "randomized"]
                                   # source = "vod"/"file". With NG_DUMP_TIMER set,
                                   # timer crops go to calibration/ beside this file
                                   # (the corpus for `glyphs train`; see README)
+# board_log = "boards.jsonl"      # appended: one JSON line per PANE pass — the
+                                  # board as read, title, subtitle, counter and
+                                  # every row with its name and time cells, empty
+                                  # boards included. A pane pass happens about once
+                                  # a minute, so the file stays small; it is what
+                                  # explains afterwards what the board reader saw
+                                  # on a pane that went unreadable for a while

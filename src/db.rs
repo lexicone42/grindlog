@@ -223,6 +223,36 @@ pub async fn set_session_vod(
     Ok(())
 }
 
+/// Name the broadcast, once the pane says what it is: the marathon tracker
+/// tags a session with the event whose board it is following, so a marathon
+/// day is identifiable without joining through its runs.
+pub async fn set_session_tag(pool: &SqlitePool, id: i64, tag: &str) -> Result<()> {
+    sqlx::query("UPDATE sessions SET tag = ? WHERE id = ?")
+        .bind(tag)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// The cumulative times a marathon event already has runs for, over the
+/// window a broadcast can span. A board completion is recorded with the
+/// marathon total it happened at in `last_timer_ms`, and within one event
+/// that column is strictly increasing, so it identifies a completion exactly
+/// — which is what lets a bot restarted mid-event pick the board up again
+/// without recording the finished games a second time.
+pub async fn marathon_totals(pool: &SqlitePool, category: &str, since_ms: i64) -> Result<Vec<i64>> {
+    let v = sqlx::query_scalar::<_, i64>(
+        "SELECT last_timer_ms FROM runs WHERE category = ? AND ended_at_ms >= ? \
+         AND last_timer_ms IS NOT NULL",
+    )
+    .bind(category)
+    .bind(since_ms)
+    .fetch_all(pool)
+    .await?;
+    Ok(v)
+}
+
 /// Forget an attempt number that turned out to be a misread, wherever it was
 /// recorded in this session (fill-run-numbers infers it again from its
 /// neighbours). Returns how many rows were cleared.

@@ -40,6 +40,9 @@ nohup.out
 # Replay-window work files (configs, dbs, obs logs per replay)
 /replays/
 
+# Marathon replay working set (scripts/replay-arcathlon.sh)
+/arcathlon-db/
+
 # Database backups (scripts/backup-db.sh) and retired copies
 /backups/
 

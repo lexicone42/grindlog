@@ -1000,6 +1000,7 @@ mod tests {
             // "Randomized" is read, so an alias on "arcath" alone would
             // miss the very frames the board reader was built for.
             r#match: vec!["arcath".into(), "randomized".into()],
+            mode: crate::config::GameMode::Runs,
         }];
         cfg
     }
