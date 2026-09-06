@@ -180,10 +180,11 @@ impl Slot {
             .map(|(n, _)| n.as_str())
     }
 
-    /// The cumulative this row ended at, when it is settled: what it was
-    /// recorded with, or a numbered event's comparison time for a row that
-    /// was already run before the bot looked. Used only to derive the next
-    /// row's segment.
+    /// The cumulative this row ended at, if this tracker watched it end.
+    /// Used only to derive the next row's segment, so it is deliberately not
+    /// a baseline value: on a numbered board a baseline is a comparison time,
+    /// and on a randomized one it is a game that finished before the bot
+    /// looked, which is a time but not one this row was seen to reach.
     fn settled_cumulative(&self) -> Option<i64> {
         self.recorded
     }

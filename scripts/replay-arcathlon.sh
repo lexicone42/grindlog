@@ -29,13 +29,16 @@
 # ARCA_BIN (default target/release/ngtwitchtimer), ARCA_START (seconds into
 # the VOD; a marathon has to be watched from its start, because a row that
 # already carries its time when the board first comes into view was finished
-# before the bot looked and is not recorded).
+# before the bot looked and is not recorded), ARCA_NICE (default 15, so the
+# live bot keeps the box; lower it when nothing is live and the run has to
+# finish, raise it never).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 out=${ARCA_OUT:-arcathlon-db}
 fps=${ARCA_FPS:-1}
 bin=${ARCA_BIN:-./target/release/ngtwitchtimer}
 start=${ARCA_START:-0}
+prio=${ARCA_NICE:-15}
 mkdir -p "$out"
 # One OpenMP thread per worker: tesseract's threads only spin-wait on crops
 # this small, and several workers on one box otherwise starve each other.
@@ -152,7 +155,7 @@ EOF
   echo "=== Arcathlon VOD $id — $(date -Is) ==="
   rm -f "$out/vod-$id.db" "$out/vod-$id.db-wal" "$out/vod-$id.db-shm" \
         "$out/obs-$id.jsonl" "$out/boards-$id.jsonl" "$out/log-$id.txt"
-  if nice -n 15 "$bin" --config "$cfg" run > "$out/log-$id.txt" 2>&1; then
+  if nice -n "$prio" "$bin" --config "$cfg" run > "$out/log-$id.txt" 2>&1; then
     sed -i 's/\x1b\[[0-9;]*m//g' "$out/log-$id.txt"
     grep -c 'marathon row' "$out/log-$id.txt" | sed "s/^/VOD $id: /;s/$/ completed rows recorded/"
   else
