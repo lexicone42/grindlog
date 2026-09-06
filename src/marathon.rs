@@ -411,10 +411,16 @@ impl Marathon {
             // game finished before the bot looked is minutes behind it. Only
             // for a row that arrived on its own: a numbered board arrives all
             // at once, ten comparison times together, and those are baselines.
-            if slot.baseline_votes.is_empty()
-                && alone
-                && observed.is_some_and(|c| just_now(c, total_ms))
-            {
+            //
+            // Any reading while the baseline is still unsettled, not just the
+            // row's first: a baseline is what the row showed BEFORE anything
+            // happened to it, and a reading standing where the total stands is
+            // not that. One real row's 15:52 came back "18:52" on every other
+            // pass, and taking the first sighting alone let the misreading
+            // settle as the baseline and held the game up for eighteen
+            // minutes — the misreading is minutes ahead of the total, and this
+            // is exactly the test that tells them apart.
+            if alone && observed.is_some_and(|c| just_now(c, total_ms)) {
                 slot.baseline = Baseline::Empty;
             } else {
                 let v = slot.baseline_votes.entry(observed).or_insert(0);
@@ -602,15 +608,15 @@ impl Marathon {
     /// eleven rows, the last of them "all"), and after that every honest
     /// ten-row pass is one short of the slots. Reading those as name-anchors
     /// only cost that broadcast six games for two hours, because the "???"
-    /// rows carry no name to anchor. So position is tried either way, and it
-    /// has to be both uncontradicted and positively supported by a row whose
-    /// name is the game its slot has been carrying.
+    /// rows carry no name to anchor. So position is tried either way, and
+    /// where the pass is short it has to be positively supported by a row
+    /// whose name is the game its slot has been carrying.
     fn align(&self, rows: &[BoardRow]) -> Vec<Option<usize>> {
         if rows.is_empty() {
             return Vec::new();
         }
         let positional: Vec<Option<usize>> = (0..rows.len()).map(Some).collect();
-        let ok = !self.contradicts(rows, &positional)
+        let ok = !self.shifted(rows)
             && (rows.len() >= self.slots.len() || self.supports(rows, &positional));
         if ok {
             return positional;
@@ -618,10 +624,52 @@ impl Marathon {
         self.by_name(rows)
     }
 
+    /// Have the rows moved up — a row unread higher in the pane pushing every
+    /// one under it onto the next game — or is a row simply sitting on a slot
+    /// whose name was never read properly?
+    ///
+    /// A shift says so itself: the row that does not match its own slot
+    /// matches one FURTHER DOWN, because that is where its game sits. A slot
+    /// that took a bad name off one early pass ("Previous Segment" and worse
+    /// come through where the pane's footer meets the last row) also fails to
+    /// match, and vetoing the whole pass for it is a trap with no way out —
+    /// the row is never placed, so the slot never learns the real name, so
+    /// the row is never placed. That cost one broadcast its last three games.
+    fn shifted(&self, rows: &[BoardRow]) -> bool {
+        rows.iter().enumerate().any(|(i, row)| {
+            let Some(read) = row.name.as_deref().and_then(clean_name) else {
+                return false;
+            };
+            let mismatched = self
+                .slots
+                .get(i)
+                .and_then(Slot::name)
+                .is_some_and(|here| !game_matches(&read, here));
+            mismatched
+                && self
+                    .slots
+                    .iter()
+                    .skip(i + 1)
+                    .filter_map(Slot::name)
+                    .any(|below| game_matches(&read, below))
+        })
+    }
+
     /// Does a mapping have at least one row on the slot that has been
     /// carrying that game? Without one, a short pass of unreadable rows would
     /// be laid over the board on nothing but hope.
+    ///
+    /// Unless no slot has a name at all, which is where a randomized day
+    /// starts: he opens one broadcast with the previous event's splits still
+    /// loaded, ten rows of "???" over last week's times, and the pane then
+    /// shows only the row he is playing. There is nothing to support a
+    /// placing with and nothing to contradict it either, and the rows a
+    /// short pass does return are the ones that have times, which on this
+    /// board are the ones at the top.
     fn supports(&self, rows: &[BoardRow], mapping: &[Option<usize>]) -> bool {
+        if self.slots.iter().all(|s| s.name().is_none()) {
+            return true;
+        }
         rows.iter().zip(mapping).any(|(row, slot)| {
             let Some(i) = slot else { return false };
             let (Some(read), Some(known)) = (
@@ -631,23 +679,6 @@ impl Marathon {
                 return false;
             };
             game_matches(&read, known)
-        })
-    }
-
-    /// Does a positional reading put a row on a slot that has been carrying a
-    /// different game's name? One such row means the board is not the board
-    /// we think it is, or a row above went unread on a pass that still
-    /// returned ten rows.
-    fn contradicts(&self, rows: &[BoardRow], mapping: &[Option<usize>]) -> bool {
-        rows.iter().zip(mapping).any(|(row, slot)| {
-            let Some(i) = slot else { return false };
-            let (Some(read), Some(known)) = (
-                row.name.as_deref().and_then(clean_name),
-                self.slots.get(*i).and_then(Slot::name),
-            ) else {
-                return false;
-            };
-            !game_matches(&read, known)
         })
     }
 
@@ -1476,6 +1507,20 @@ mod tests {
     #[test]
     fn replays_a_whole_randomized_broadcast() {
         check("rand-2858870362", 10, 120);
+    }
+
+    /// The hardest of the three, and the one that pays for the other two.
+    /// He opens this broadcast with the PREVIOUS event's splits still loaded
+    /// — ten rows of "???" over last week's times — so every slot starts with
+    /// a baseline and a nameless row; the pane then shows only the row he is
+    /// playing, so passes come back with one row where the board has ten; one
+    /// row's 15:52 reads "18:52" on every other pass; and the pane's footer
+    /// leaks in as an eleventh row often enough to leave a slot carrying junk
+    /// for a name. All ten games, every time exact, the worst 490 s late
+    /// where the pane went thin.
+    #[test]
+    fn replays_a_whole_broadcast_that_starts_on_the_last_one() {
+        check("rand-2833684629", 10, 600);
     }
 
     /// A numbered day: ten comparison times from the first frame, over a
