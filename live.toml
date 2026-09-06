@@ -24,13 +24,28 @@ quality = "480p30"
 # the run number is caught on far more of the short ones (measured: 23 -> 27
 # of 27 numbered on one window). Cheap with the in-process OCR engine.
 fps = 2
-# Only capture his Ninja Gaiden days — Arcathlon and other streams are
-# skipped (the bot keeps polling in case he switches mid-day).
-title_filter = "ninja gaiden"
+# No title_filter: capture every broadcast, not only the Ninja Gaiden days.
+# He runs marathons of ten NES games and is doing twenty different games, and
+# a day that is never captured leaves no session, no capture health, no
+# observation log and no board snapshots to learn from.
+#
+# Nothing of another game reaches this game's rows, because nothing on those
+# days locks: the marathon scene puts its pane where no configured layout
+# looks, and four replayed windows of one read 0% of frames and never
+# locked, so no timer is read and no run is written. That is a property of
+# the layouts, not a guarantee, and the guarantee is being built where it
+# belongs — in the split rows. Six rows labelled Act 1 to Act 6 against a
+# comparison column totalling about 11:35 is his Ninja Gaiden pane; ten rows
+# named after games with times in the tens of minutes is a marathon. The
+# board says which, at every pane pass, and it reads far more reliably than
+# the title row (which comes back "Ninja (NES", or with only its first word
+# above the confidence gate). game.require_title_match stays off: a title
+# string is the wrong thing to gate recording on.
 # He goes live ~09:59 local. Poll every minute from 09:40 (the bot starts
 # frequent polling ten minutes before the window start) until 20:30; outside
 # that window check only every 30 minutes, cut short so a quiet sleep never
-# runs past 09:40 (graceful on Twitch).
+# runs past 09:40 (graceful on Twitch). Marathon days have run to 7.6 h from
+# a 10:00 start, so they finish inside the window.
 active_hours = ["09:50", "20:30"]
 offline_poll_secs = 60
 quiet_poll_secs = 1800
