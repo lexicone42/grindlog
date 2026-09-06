@@ -468,9 +468,13 @@ title reads as, letter damage allowed (`name = "Arcathlon"`, `match =
 ["arcath", "randomized"]`, optional `category` — list every word that names
 the event, since one of them can fall under the confidence gate), else the
 title itself with the subtitle as category.
-Nothing acts on it yet: runs, splits and counters are recorded as before,
-and `follow_title` is exclusive with `require_title_match`. The page's copy
-of the report drops the `title` events (`build-site.sh`) and keeps these.
+Nothing acts on it yet: runs, splits and counters are recorded as before.
+Because it only observes, it pairs with `require_title_match`, and the pair
+is how a deployment captures every broadcast safely: drop
+`stream.title_filter` so nothing is skipped, and the title gate keeps
+another game's timer out of this game's rows while the shadow log says what
+each board was. The page's copy of the report drops the `title` events
+(`build-site.sh`) and keeps these.
 
 **Splits, run numbers and golds.** LiveSplit shows the comparison time in
 rows not yet reached and the actual time in completed ones, so a split is
