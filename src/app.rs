@@ -47,6 +47,7 @@ use tracing::{debug, error, info, warn};
 use crate::board::{self, game_matches, Board};
 use crate::config::Config;
 use crate::db::{self, NewRun};
+use crate::marathon;
 use crate::ocr::{self, OcrEngine, PreprocessCfg};
 use crate::state::{Event, Obs, Tracker};
 use crate::timeparse::{format_ms, has_fraction, parse_time, parse_timer_text, time_shaped};
@@ -1357,6 +1358,211 @@ fn shadow_board(
     *last = Some(snap);
 }
 
+/// The marathon total for a pane pass: the timer as last read, when it was
+/// read in the last half minute. Only ever used to reject a cumulative time
+/// the runner has not reached yet, so a stale or missing reading costs
+/// nothing but the check.
+fn marathon_total(last: Option<(i64, i64)>, t: i64) -> Option<i64> {
+    last.filter(|(_, seen)| t - seen <= 30_000).map(|(v, _)| v)
+}
+
+/// Append the board as read to `debug.board_log`: one line per pane pass,
+/// empty boards included. A pane pass happens about once a minute, so this
+/// stays small, and it is the record that says what the tracker saw on a
+/// board that went unreadable for a while.
+fn log_board(path: &Option<String>, board: &Board, t_ms: i64, at_ms: i64) {
+    let Some(path) = path else { return };
+    let line = serde_json::json!({
+        "t_ms": t_ms,
+        "at_ms": at_ms,
+        "title": board.title,
+        "subtitle": board.subtitle,
+        "counter": board.counter,
+        "rows": board.rows.iter().map(|r| serde_json::json!({
+            "name": r.name,
+            "cells": r.cells,
+            "y": r.y,
+        })).collect::<Vec<_>>(),
+    });
+    if let Err(e) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            writeln!(f, "{line}")
+        })
+    {
+        debug!("board log write failed: {e:#}");
+    }
+}
+
+/// Consecutive pane passes reading somebody else's board before a marathon
+/// is let go. One garbled title must not end an event; a scene the runner
+/// switched to for good will read the same way every minute.
+pub(crate) const MARATHON_LET_GO: u32 = 3;
+
+/// Consecutive pane passes reading a marathon board before an event is
+/// taken up, the mirror of [`MARATHON_LET_GO`] and for the same reason: a
+/// verdict is evidence from one frame, not a fact about the day. His own
+/// Ninja Gaiden board measures like a marathon board whenever three of its
+/// labels come back damaged into words of their own — 13 passes of it over
+/// the eight marathon broadcasts, never more than two in a row — and an
+/// event started on one of those suspends the timer and files his acts as
+/// games. A real marathon board reads as one for hours.
+pub(crate) const MARATHON_TAKE_UP: u32 = 3;
+
+/// How far back a restarted bot looks for the completions it already
+/// recorded of the event it is picking up. Longer than his longest marathon
+/// (5h20m) and shorter than the gap to the next day's.
+const MARATHON_RECONCILE_MS: i64 = 8 * 60 * 60 * 1000;
+
+/// Track a board whose `[[games]]` entry asks for `mode = "board"`: the rows
+/// are different games run back to back, and a row that gains a time is a
+/// finished run of that game (see [`crate::marathon`]). Returns whether a
+/// marathon board is in force, which is what stops the run state machine
+/// being driven by a timer that is a marathon total.
+#[allow(clippy::too_many_arguments)]
+async fn track_marathon(
+    board: &Board,
+    cfg: &Config,
+    pool: &SqlitePool,
+    state: &mut Option<marathon::Marathon>,
+    tag: &mut Option<String>,
+    misses: &mut u32,
+    hits: &mut u32,
+    session_id: Option<i64>,
+    health: &mut db::SessionHealth,
+    at_ms: i64,
+    total_ms: Option<i64>,
+) -> bool {
+    match marathon::classify(board, cfg, state.as_ref()) {
+        marathon::Verdict::Silent => {}
+        marathon::Verdict::Other => {
+            *misses += 1;
+            *hits = 0;
+            // Somebody else's board, but not yet often enough to believe it.
+            // The marathon stays in force — and with it the suspension of the
+            // timer — while this board's rows are left alone.
+            if *misses < MARATHON_LET_GO {
+                return state.is_some();
+            }
+            if let Some(m) = state.take() {
+                info!("marathon over: {}", m.describe());
+                health.event(at_ms, "marathon", format!("{} ended", m.category()));
+            }
+            // The tag stays: it names the BROADCAST, and the event ending
+            // does not unname it. What clears it is the broadcast ending
+            // (the `StreamOffline` arm), where the next session wants its
+            // own. Keeping it is also what stops a tracker rebuilt over the
+            // same day — which happens when a stretch of another board reads
+            // as a marathon — from writing "Arcathlon" over "Arcathlon #2".
+            return false;
+        }
+        marathon::Verdict::Board(alias) => {
+            *misses = 0;
+            if state.as_ref().is_none_or(|m| m.category() != alias.name) {
+                // An event is taken up on several passes agreeing, the way
+                // it is let go. One pass of a run board whose labels came
+                // back damaged reads as a marathon board, and starting an
+                // event on it suspends the timer and files acts as games.
+                *hits += 1;
+                if *hits < MARATHON_TAKE_UP {
+                    return state.is_some();
+                }
+                let mut m = marathon::Marathon::new(alias.name.clone());
+                // What a previous run of the bot over this same broadcast
+                // already recorded, so a restart mid-event does not record
+                // the finished games again.
+                match db::marathon_totals(pool, &alias.name, at_ms - MARATHON_RECONCILE_MS).await {
+                    Ok(seen) => {
+                        if !seen.is_empty() {
+                            info!(
+                                "marathon {:?}: {} completion(s) already recorded for this broadcast",
+                                alias.name,
+                                seen.len()
+                            );
+                        }
+                        m.seed(&seen);
+                    }
+                    Err(e) => warn!(
+                        "could not reconcile {:?} against the database: {e:#}",
+                        alias.name
+                    ),
+                }
+                info!(
+                    "marathon board: {:?} -> tracking every row as a run of its own game, category {:?}",
+                    board.title, alias.name
+                );
+                health.event(at_ms, "marathon", format!("{} started", alias.name));
+                *state = Some(m);
+            }
+        }
+    }
+    let Some(m) = state.as_mut() else {
+        return false;
+    };
+    let completions = m.observe(board, at_ms, total_ms);
+    // Name the broadcast after the event it turned out to be.
+    if let Some(id) = session_id {
+        let want = m.tag();
+        // A tracker that has not read the event's number yet must not take
+        // it off the session: "Arcathlon" over "Arcathlon #2" loses which
+        // event the broadcast was, and only a rebuilt tracker ever asks for
+        // the shorter name.
+        let loses_the_number = tag
+            .as_deref()
+            .is_some_and(|t| t.len() > want.len() && t.starts_with(&want));
+        if !loses_the_number && tag.as_deref() != Some(want.as_str()) {
+            match db::set_session_tag(pool, id, &want).await {
+                Ok(()) => *tag = Some(want),
+                Err(e) => warn!("could not tag session #{id}: {e:#}"),
+            }
+        }
+    }
+    for c in completions {
+        let number = db::next_attempt_number(pool, &c.game, &c.category)
+            .await
+            .unwrap_or(1);
+        let run = NewRun {
+            game: &c.game,
+            category: &c.category,
+            attempt_number: number,
+            started_at_ms: c.started_at_ms,
+            ended_at_ms: c.ended_at_ms,
+            outcome: db::OUTCOME_FINISHED,
+            reset_reason: None,
+            final_time_ms: Some(c.segment_ms),
+            // The marathon total this row ended at: the completion's identity
+            // when a restart has to reconcile against what is recorded.
+            last_timer_ms: Some(c.cumulative_ms),
+            session_id,
+            ls_attempt: None,
+        };
+        match db::insert_run(pool, run).await {
+            Ok(_) => info!(
+                "marathon row {}: {} finished in {}{} (total {})",
+                c.slot + 1,
+                c.game,
+                format_ms(c.segment_ms),
+                if c.segment_derived {
+                    ", from the cumulative column (its own segment column disagreed)"
+                } else {
+                    ""
+                },
+                format_ms(c.cumulative_ms)
+            ),
+            Err(e) => warn!("failed to record {:?}: {e:#}", c.game),
+        }
+        health.event(
+            at_ms,
+            "marathon",
+            format!("{} {}", c.game, format_ms(c.segment_ms)),
+        );
+    }
+    true
+}
+
 /// Persist a confirmed reference time and, for the season best, adopt it as
 /// the record to beat.
 async fn record_reference(
@@ -1800,6 +2006,27 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut title_mismatches: u32 = 0;
     // The board reader's last snapshot, in shadow mode.
     let mut last_board_snapshot: Option<board::Snapshot> = None;
+    // The marathon in progress, when the board is one a `[[games]]` entry
+    // asks to track by completions, the tag its session was given, and how
+    // many consecutive pane passes read a board belonging to another game.
+    // The title goes unread on plenty of passes and that is not evidence of a
+    // change, so only a board that reads as somebody else ends a marathon.
+    let mut marathon: Option<marathon::Marathon> = None;
+    let mut marathon_tag: Option<String> = None;
+    let mut not_marathon: u32 = 0;
+    // And how many consecutive passes have read the board of an event not
+    // yet being tracked: an event is taken up on several agreeing, the way
+    // it is let go.
+    let mut marathon_hits: u32 = 0;
+    // While a marathon board is up the timer is the event's running total: it
+    // never resets and finishing a game does not happen to it, so the run
+    // state machine is fed nothing and records nothing. The board does the
+    // recording.
+    let mut marathon_active = false;
+    // The marathon total as last read, and when: the completion cross-check
+    // wants the timer itself, since the state machine is fed nothing while a
+    // marathon board is up and its smoothed clock stops.
+    let mut last_timer_seen: Option<(i64, i64)> = None;
 
     // Recorded sources (vod/file) may decode much faster than realtime, so
     // the state machine is ticked by frame index instead of wall clock —
@@ -1851,6 +2078,16 @@ pub async fn run(cfg: Config) -> Result<()> {
         )),
         None => None,
     };
+    // Not a buffered writer: a pane pass is a once-a-minute event and the
+    // point of the file is to be readable while the bot runs.
+    let board_log = cfg.debug.board_log.clone();
+    if let Some(path) = &board_log {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("opening debug.board_log {path}"))?;
+    }
 
     // One sessions row per broadcast: opened on the first frame, closed when
     // the channel goes offline (or on shutdown/end of input).
@@ -1935,6 +2172,23 @@ pub async fn run(cfg: Config) -> Result<()> {
                     }
                     tracker = Tracker::new(cfg.detection.clone());
                 }
+                // A marathon belongs to the broadcast it was run in. Left in
+                // force it outlives the stream, and since it suspends the
+                // timer the NEXT broadcast records nothing until three pane
+                // passes read somebody else's board — minutes of a Ninja
+                // Gaiden morning thrown away, and if the next day is another
+                // marathon its slots, names and baselines are laid over the
+                // new board. A stream that only blipped re-establishes the
+                // event from `db::marathon_totals` when the board comes back,
+                // which is what that reconcile is for, and the new session
+                // gets its own tag.
+                if let Some(m) = marathon.take() {
+                    info!("marathon set aside with the broadcast: {}", m.describe());
+                }
+                marathon_tag = None;
+                not_marathon = 0;
+                marathon_hits = 0;
+                marathon_active = false;
                 if let Some(id) = session_id.take() {
                     if let Err(e) = db::update_session_health(&pool, id, &health).await {
                         warn!("failed to update session health: {e:#}");
@@ -2371,6 +2625,21 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 &mut health,
                                 at_ms,
                             );
+                            log_board(&board_log, &board, t, at_ms);
+                            marathon_active = track_marathon(
+                                &board,
+                                &cfg,
+                                &pool,
+                                &mut marathon,
+                                &mut marathon_tag,
+                                &mut not_marathon,
+                                &mut marathon_hits,
+                                session_id,
+                                &mut health,
+                                at_ms,
+                                marathon_total(last_timer_seen, t),
+                            )
+                            .await;
                             // Reference times printed under the timer.
                             for (kind, ms, _) in &readings.refs {
                                 if sane_reference(*kind, *ms, &refs, &cfg)
@@ -2512,6 +2781,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                     .smoothed_now(t)
                     .is_none_or(|s| (v - s).abs() <= cfg.detection.max_jump_ms)
         });
+        if let Some(v) = parsed {
+            last_timer_seen = Some((v, t));
+        }
         // Resume probing after a dark stretch on the active position: either
         // the scene changed or the LiveSplit window was nudged.
         if cands.len() > 1 {
@@ -2715,7 +2987,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         // The layout is timing a different game (a marathon broadcast moving
         // on to the next one): read on so the title is re-checked at the next
         // lock, but record nothing.
-        let obs = if pane_game_ok {
+        let obs = if pane_game_ok && !marathon_active {
             parsed.map(Obs::Time).unwrap_or(Obs::Illegible)
         } else {
             Obs::Illegible
@@ -2784,6 +3056,17 @@ pub async fn run(cfg: Config) -> Result<()> {
             tracker.phase_name()
         );
         let events = tracker.observe(t, obs);
+        // A marathon board is up. The timer is the event's running total, the
+        // state machine has been fed nothing since the board was recognised,
+        // and the only event it has left in it is the tail of whatever was on
+        // screen before — an attempt he abandoned by switching scenes. Drop
+        // it, and the run with it: the board records this broadcast.
+        let events = if marathon_active {
+            current = None;
+            Vec::new()
+        } else {
+            events
+        };
 
         // Splits panel pass: only while a run is in progress, on a slow
         // cadence (splits change at most once per act).
@@ -3043,6 +3326,21 @@ pub async fn run(cfg: Config) -> Result<()> {
                         at_ms,
                     );
                     shadow_board(&board, &cfg, &mut last_board_snapshot, &mut health, at_ms);
+                    log_board(&board_log, &board, t, at_ms);
+                    marathon_active = track_marathon(
+                        &board,
+                        &cfg,
+                        &pool,
+                        &mut marathon,
+                        &mut marathon_tag,
+                        &mut not_marathon,
+                        &mut marathon_hits,
+                        session_id,
+                        &mut health,
+                        at_ms,
+                        marathon_total(last_timer_seen, t),
+                    )
+                    .await;
                     for (kind, ms, _) in &readings.refs {
                         if sane_reference(*kind, *ms, &refs, &cfg) && refs.observe(*kind, *ms) {
                             record_reference(

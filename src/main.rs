@@ -9,6 +9,7 @@ mod counter;
 mod db;
 mod glyph;
 mod locate;
+mod marathon;
 mod ocr;
 mod report;
 mod sanity;

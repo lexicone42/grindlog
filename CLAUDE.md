@@ -22,6 +22,10 @@ Layout of `src/`:
   `counter.rs` — which attempt number to believe; `splits.rs` — per-act
   splits by change against the comparison column; `timeparse.rs` — timer
   text to milliseconds.
+- `board.rs` — the pane read as a board (title, rows, time cells) and which
+  game a title files under; `marathon.rs` — a board whose rows are ten
+  different games, tracked by which of them have completed rather than by
+  the timer (`[[games]] mode = "board"`).
 - `capture.rs` / `twitch_hls.rs` — stream and VOD decoding via ffmpeg;
   `config.rs` — the TOML config (every field documented in
   `config.example.toml`); `db.rs`, `stats.rs`, `report.rs` — persistence and
@@ -81,6 +85,19 @@ Validate on recorded footage before the live stream ever sees it:
    finish, values under 10 s and the frames after a lock, reports the rate
    per reader and prints the worst frames with their neighbours.
 4. Only then `scripts/rollout.sh`.
+
+A marathon day is a different scene and a different tracker, so it has its
+own replay: `scripts/replay-arcathlon.sh <vod_id>` writes the whole
+broadcast into `arcathlon-db/vod-<id>.db` with its board log beside it, and
+every completed row of the board lands as a run of its own game under
+category `Arcathlon`. It bakes its own config (the marathon total as the
+timer, the pane crop raised to take in the title row, `[[games]] mode =
+"board"`), so it needs no live config and cannot touch the live database.
+Start it at second 0: a row that already carries its time when the board
+first comes into view was finished before the bot looked and is not
+recorded. `debug.board_log` is what to read when a game is missing — the
+board is cumulative, so an unreadable stretch delays a reading, it does not
+destroy it.
 
 The unit tests run without ffmpeg or tesseract. Anything that needs video
 needs `ffmpeg`; anything that reads splits, the counter or a fallback timer

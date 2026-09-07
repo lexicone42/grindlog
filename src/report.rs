@@ -49,8 +49,11 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
             .push(serde_json::to_value(&split)?);
     }
     let daily = db::daily_stats(&pool, &game, &category).await?;
-    // Every session: the site needs tags and capture health per day.
-    let sessions = db::recent_sessions(&pool, 100_000).await?;
+    // Every session: the site needs tags and capture health per day. Its
+    // attempts, finishes and best are this game's, so a broadcast that also
+    // recorded other games (a marathon day) still reads as what it did for
+    // the game this page is about.
+    let sessions = db::recent_sessions(&pool, &game, &category, 100_000).await?;
     // The whole JSON is embedded in a public page: a session's label is a
     // channel name for live capture but a local file path for source =
     // "file", which has no business being published.

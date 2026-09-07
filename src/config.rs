@@ -55,7 +55,9 @@ pub struct Config {
     /// Other games the layout's title row may name (`[[games]]`), for the
     /// board reader (`game.follow_title`): a title that fuzzy-matches none
     /// of `game.name` is looked up here by substring, so "Randomized
-    /// Arcathlon" and "Arcathlon #6" file under one name.
+    /// Arcathlon" and "Arcathlon #6" file under one name. An entry's `mode`
+    /// also says how that board is tracked — by the timer, or by its rows
+    /// completing (`crate::marathon`).
     #[serde(default)]
     pub games: Vec<GameAlias>,
 }
@@ -73,6 +75,19 @@ pub enum FollowTitle {
     Log,
 }
 
+/// How a board this entry names is tracked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GameMode {
+    /// By the timer, as every board is: the run state machine watches it
+    /// start, run and reset. The default, and what a one-game board wants.
+    #[default]
+    Runs,
+    /// By completions: the rows are different games run back to back and the
+    /// board prints each one's time when it is done. See [`crate::marathon`].
+    Board,
+}
+
 /// A `[[games]]` entry: the name (and category) a title is filed under
 /// when the normalised title contains one of the `match` strings.
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +100,15 @@ pub struct GameAlias {
     /// single spaces) that identify the game; any one matching is enough.
     #[serde(rename = "match", default)]
     pub r#match: Vec<String>,
+    /// "runs" (default) or "board". With "board" a matching board is tracked
+    /// by its completed rows instead of by the timer: each row is a different
+    /// game, and a row that gains a time is a finished run of that game,
+    /// recorded under the row's own name with this entry's `name` as the
+    /// category. `category` then describes the board itself and no run is
+    /// filed under it. Nothing else on the broadcast is recorded while such a
+    /// board is on screen: the timer is a marathon total, not a run.
+    #[serde(default)]
+    pub mode: GameMode,
 }
 
 /// Tolerance for the streamer nudging the LiveSplit window a few pixels.
@@ -232,6 +256,13 @@ pub struct DebugCfg {
     /// saved beside this file under calibration/timer-<frame>.png; log and
     /// crops together are a corpus for `glyphs train` and `glyphs test`.
     pub obs_log: Option<String>,
+    /// Append one JSON line per pane pass to this file: the board as read
+    /// (title, subtitle, attempt counter, every row with its name and time
+    /// cells), the frame time and the wall clock. A pane pass happens about
+    /// once a minute, so this is a small file, and it is the record that
+    /// explains what the marathon tracker did or did not see on a board that
+    /// went unreadable for a while.
+    pub board_log: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -739,6 +770,18 @@ impl Config {
                     g.name
                 );
             }
+            // The tracked game is matched before any alias, so an alias of
+            // that name is never reached — and if it were, it would put the
+            // tracked game's own board into completion tracking and stop it
+            // recording runs.
+            if g.mode == GameMode::Board && crate::board::game_matches(&g.name, &self.game.name) {
+                bail!(
+                    "[[games]] entry {:?} has mode = \"board\" but names the tracked game (game.name = {:?}); \
+                     a board-mode entry must name a different board",
+                    g.name,
+                    self.game.name
+                );
+            }
         }
         for (name, c) in [
             ("attempts_counter", &self.attempts_counter),
@@ -963,6 +1006,45 @@ mod tests {
         assert!(
             parse("[stream]\nchannel = \"x\"\n[[games]]\nname = \"\"\nmatch = [\"a\"]\n").is_err()
         );
+    }
+
+    #[test]
+    fn board_mode_is_opt_in_and_may_not_name_the_tracked_game() {
+        // Every alias is tracked by the timer unless it says otherwise, so a
+        // configuration written before this field means exactly what it did.
+        let cfg =
+            parse("[stream]\nchannel = \"x\"\n[[games]]\nname = \"A\"\nmatch = [\"a\"]\n").unwrap();
+        assert_eq!(cfg.games[0].mode, GameMode::Runs);
+        let cfg = parse(
+            "[stream]\nchannel = \"x\"\n[game]\nname = \"Ninja Gaiden (NES)\"\n\
+             [[games]]\nname = \"Arcathlon\"\nmatch = [\"arcath\"]\nmode = \"board\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.games[0].mode, GameMode::Board);
+        assert!(parse("[stream]\nchannel = \"x\"\n[[games]]\nname = \"A\"\nmatch = [\"a\"]\nmode = \"rows\"\n").is_err());
+        // The tracked game is matched before any alias, so an alias of its
+        // name is unreachable — and would put its own board into completion
+        // tracking if it were reached.
+        let err = parse(
+            "[stream]\nchannel = \"x\"\n[game]\nname = \"Arcathlon\"\n\
+             [[games]]\nname = \"Arcathlon\"\nmatch = [\"arcath\"]\nmode = \"board\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("names the tracked game"));
+        // In the default mode the same pair is fine: it is how the shadow log
+        // files the tracked game's own board.
+        assert!(parse(
+            "[stream]\nchannel = \"x\"\n[game]\nname = \"Arcathlon\"\n\
+             [[games]]\nname = \"Arcathlon\"\nmatch = [\"arcath\"]\n",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn board_log_is_a_separate_debug_file() {
+        let cfg = parse("[stream]\nchannel = \"x\"\n[debug]\nboard_log = \"b.jsonl\"\n").unwrap();
+        assert_eq!(cfg.debug.board_log.as_deref(), Some("b.jsonl"));
+        assert_eq!(cfg.debug.obs_log, None);
     }
 
     #[test]

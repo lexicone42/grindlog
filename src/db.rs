@@ -223,6 +223,36 @@ pub async fn set_session_vod(
     Ok(())
 }
 
+/// Name the broadcast, once the pane says what it is: the marathon tracker
+/// tags a session with the event whose board it is following, so a marathon
+/// day is identifiable without joining through its runs.
+pub async fn set_session_tag(pool: &SqlitePool, id: i64, tag: &str) -> Result<()> {
+    sqlx::query("UPDATE sessions SET tag = ? WHERE id = ?")
+        .bind(tag)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// The cumulative times a marathon event already has runs for, over the
+/// window a broadcast can span. A board completion is recorded with the
+/// marathon total it happened at in `last_timer_ms`, and within one event
+/// that column is strictly increasing, so it identifies a completion exactly
+/// — which is what lets a bot restarted mid-event pick the board up again
+/// without recording the finished games a second time.
+pub async fn marathon_totals(pool: &SqlitePool, category: &str, since_ms: i64) -> Result<Vec<i64>> {
+    let v = sqlx::query_scalar::<_, i64>(
+        "SELECT last_timer_ms FROM runs WHERE category = ? AND ended_at_ms >= ? \
+         AND last_timer_ms IS NOT NULL",
+    )
+    .bind(category)
+    .bind(since_ms)
+    .fetch_all(pool)
+    .await?;
+    Ok(v)
+}
+
 /// Forget an attempt number that turned out to be a misread, wherever it was
 /// recorded in this session (fill-run-numbers infers it again from its
 /// neighbours). Returns how many rows were cleared.
@@ -322,7 +352,21 @@ pub struct SessionSummary {
     pub vod_created_at_ms: Option<i64>,
 }
 
-pub async fn recent_sessions(pool: &SqlitePool, limit: i64) -> Result<Vec<SessionSummary>> {
+/// Every session, with what the tracked game did in it.
+///
+/// `attempts`, `finished` and `best_ms` count runs of `game`/`category`
+/// ONLY. A broadcast can hold runs of other games — a marathon day records
+/// one run per game of the event, all under the live session — and counting
+/// those here would change what the report's and the feed's session numbers
+/// mean: "attempts" is this game's attempts, and a session's `best_ms` is
+/// its best finish OF THIS GAME, not the shortest game of somebody's
+/// ten-game day.
+pub async fn recent_sessions(
+    pool: &SqlitePool,
+    game: &str,
+    category: &str,
+    limit: i64,
+) -> Result<Vec<SessionSummary>> {
     let rows = sqlx::query(
         "SELECT s.id, s.started_at_ms, s.ended_at_ms, s.source, s.label, s.tag, \
          s.frames, s.parsed, s.probing, s.relocks, s.counter_reads, s.events, \
@@ -330,9 +374,12 @@ pub async fn recent_sessions(pool: &SqlitePool, limit: i64) -> Result<Vec<Sessio
          COUNT(r.id) AS attempts, \
          COALESCE(SUM(CASE WHEN r.outcome = 'finished' THEN 1 ELSE 0 END), 0) AS finished, \
          MIN(CASE WHEN r.outcome = 'finished' THEN r.final_time_ms END) AS best_ms \
-         FROM sessions s LEFT JOIN runs r ON r.session_id = s.id \
+         FROM sessions s LEFT JOIN runs r \
+           ON r.session_id = s.id AND r.game = ? AND r.category = ? \
          GROUP BY s.id ORDER BY s.id DESC LIMIT ?",
     )
+    .bind(game)
+    .bind(category)
     .bind(limit)
     .fetch_all(pool)
     .await?;
@@ -1063,9 +1110,16 @@ mod tests {
         r.session_id = Some(sid);
         insert_run(&pool, r).await.unwrap();
         insert_run(&pool, run("smb", 2, 3000, None)).await.unwrap(); // no session
+
+        // Another game finished in the same broadcast, in less time: a
+        // marathon day records one run per game of the event against the
+        // live session. It is not this game's attempt and not its best.
+        let mut other = run("king kong 2", 1, 4000, Some(264_000));
+        other.session_id = Some(sid);
+        insert_run(&pool, other).await.unwrap();
         close_session(&pool, sid, 10_000).await.unwrap();
 
-        let s = recent_sessions(&pool, 5).await.unwrap();
+        let s = recent_sessions(&pool, "smb", "Any%", 5).await.unwrap();
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].id, sid);
         assert_eq!(s[0].ended_at_ms, Some(10_000));
@@ -1073,6 +1127,12 @@ mod tests {
         assert_eq!(s[0].finished, 1);
         assert_eq!(s[0].best_ms, Some(300_000));
         assert_eq!(s[0].label, "somechannel");
+        // The other game's session, counted as its own.
+        let s = recent_sessions(&pool, "king kong 2", "Any%", 5)
+            .await
+            .unwrap();
+        assert_eq!(s[0].attempts, 1);
+        assert_eq!(s[0].best_ms, Some(264_000));
     }
 
     #[tokio::test]
