@@ -58,6 +58,7 @@ use std::collections::HashMap;
 
 use crate::board::{game_matches, Board, BoardRow};
 use crate::config::{Config, GameAlias, GameMode};
+use crate::signature::{BoardSignature, Shape};
 use crate::timeparse::{parse_time, time_shaped};
 
 /// Passes that must agree before a cumulative time is believed. The board is
@@ -238,28 +239,51 @@ pub enum Verdict<'a> {
     Other,
 }
 
-/// Which `[[games]]` entry a board's title names, and whether that entry asks
-/// for completion tracking.
+/// What kind of board this is, and which `[[games]]` entry it belongs to.
 ///
-/// A key `canonical_key` minted from a title nothing claims is `Silent`, not
-/// `Other`. On the marathon board the title row goes unread often enough that
-/// the reader takes the first game's name for it — a real pass over a real
-/// Arcathlon board came back titled "'King Kong" — and a marathon must not
-/// end because one pass called the board by the name of a row.
+/// The **rows** decide what it is, not the title. A marathon board is
+/// different games over a running total; a run board is one game's segments
+/// counting up. That is what [`crate::signature::BoardSignature`] measures,
+/// and it survives damage that destroys the title outright: a pass over a
+/// real Arcathlon board came back titled "'King Kong", because the title
+/// row went unread and the reader took the first game's name for it, and a
+/// marathon must not end because one pass called the board by the name of
+/// one of its rows.
+///
+/// The **title** only says which event it is, so the runs are filed under
+/// the right category. When it names no configured entry — unread, or read
+/// as a game's name — and exactly one entry tracks boards, that entry is
+/// used anyway: there is nothing to be ambiguous about.
+///
+/// An unreadable board is [`Verdict::Silent`] and changes nothing, which is
+/// the safe answer: a marathon in force stays in force, and none is
+/// started. Only a board that reads clearly as one game's segments ends a
+/// marathon.
 pub fn classify<'a>(board: &Board, cfg: &'a Config) -> Verdict<'a> {
-    let Some((name, _)) = crate::board::canonical_key(board, cfg) else {
-        return Verdict::Silent;
-    };
-    if let Some(a) = cfg.games.iter().find(|a| a.name == name) {
-        return match a.mode {
-            GameMode::Board => Verdict::Board(a),
-            GameMode::Runs => Verdict::Other,
-        };
+    let boards: Vec<&GameAlias> = cfg
+        .games
+        .iter()
+        .filter(|a| a.mode == GameMode::Board)
+        .collect();
+    match BoardSignature::of(board).shape() {
+        Shape::Marathon { .. } => {
+            // Which event? The title, when it names one of them; else the
+            // only entry that tracks boards, if there is exactly one.
+            if let Some((name, _)) = crate::board::canonical_key(board, cfg) {
+                if let Some(a) = boards.iter().find(|a| a.name == name) {
+                    return Verdict::Board(a);
+                }
+            }
+            match boards.as_slice() {
+                [only] => Verdict::Board(only),
+                _ => Verdict::Silent,
+            }
+        }
+        // One game's segments: whatever this deployment tracks by its timer,
+        // and the thing that ends a marathon when he goes back to it.
+        Shape::Run { .. } => Verdict::Other,
+        Shape::Unknown => Verdict::Silent,
     }
-    if name == cfg.game.name {
-        return Verdict::Other;
-    }
-    Verdict::Silent
 }
 
 /// One marathon in progress: the ten slots of a board and what each has shown.
@@ -1328,11 +1352,12 @@ mod tests {
         }
     }
 
-    /// A pass that calls the board by the name of one of its rows — which a
-    /// real pass did, titling an Arcathlon board "'King Kong" — is not
-    /// evidence that the board changed.
+    /// A marathon board whose title came back as one of its own rows — which
+    /// a real pass did, titling an Arcathlon board "'King Kong" — is still a
+    /// marathon board, because the rows say so and the title is only asked
+    /// which event it is.
     #[test]
-    fn a_title_nothing_claims_does_not_end_a_marathon() {
+    fn the_rows_say_what_the_board_is_when_the_title_cannot() {
         let mut cfg = Config::for_test_with_min_final(660_000);
         cfg.game.name = "Ninja Gaiden (NES)".into();
         cfg.games = vec![GameAlias {
@@ -1341,14 +1366,41 @@ mod tests {
             r#match: vec!["arcath".into(), "randomized".into()],
             mode: GameMode::Board,
         }];
+        let marathon_rows = || {
+            vec![
+                row("Astyanax", &["21:48", "21:48"]),
+                row("King Kong 2", &["4:24", "26:12"]),
+                row("SMB3 (Warpless)", &["1:03:20", "1:29:33"]),
+                row("Batman: ROTJ", &["15:43", "1:45:16"]),
+            ]
+        };
+        // The title is useless; the rows are not.
         assert!(matches!(
-            classify(&board(Some("\u{2018}King Kong"), vec![]), &cfg),
-            Verdict::Silent
+            classify(&board(Some("\u{2018}King Kong"), marathon_rows()), &cfg),
+            Verdict::Board(a) if a.name == "Arcathlon"
         ));
-        // A board the configuration does know still ends it.
+        // No title at all: the same, since only one entry tracks boards.
+        assert!(matches!(
+            classify(&board(None, marathon_rows()), &cfg),
+            Verdict::Board(a) if a.name == "Arcathlon"
+        ));
+        // One game's segments end it, whatever the title says.
+        let acts: Vec<BoardRow> = (0..6)
+            .map(|i| {
+                row(
+                    &format!("Act {}", i + 1),
+                    &["1:00.0", &format!("{}:00.0", (i + 1) * 2)],
+                )
+            })
+            .collect();
+        assert!(matches!(
+            classify(&board(Some("\u{2018}King Kong"), acts), &cfg),
+            Verdict::Other
+        ));
+        // A board with nothing readable changes nothing.
         assert!(matches!(
             classify(&board(Some("Ninja Gaiden (NES"), vec![]), &cfg),
-            Verdict::Other
+            Verdict::Silent
         ));
     }
 
@@ -1653,18 +1705,38 @@ mod tests {
             r#match: vec!["arcath".into()],
             mode: GameMode::Board,
         }];
-        let marathon = board(Some("Randomized Arcathion"), vec![]);
-        assert!(matches!(classify(&marathon, &cfg), Verdict::Board(a) if a.name == "Arcathlon"));
+        let marathon = || {
+            board(
+                Some("Randomized Arcathion"),
+                vec![
+                    row("Astyanax", &["21:48", "21:48"]),
+                    row("King Kong 2", &["4:24", "26:12"]),
+                    row("Hebereke", &["28:19", "54:31"]),
+                ],
+            )
+        };
+        assert!(matches!(classify(&marathon(), &cfg), Verdict::Board(a) if a.name == "Arcathlon"));
+        // One game's segments are somebody else's board.
+        let acts: Vec<BoardRow> = (0..6)
+            .map(|i| {
+                row(
+                    &format!("Act {}", i + 1),
+                    &["1:00.0", &format!("{}:00.0", (i + 1) * 2)],
+                )
+            })
+            .collect();
         assert!(matches!(
-            classify(&board(Some("Ninja Gaiden (NES)"), vec![]), &cfg),
+            classify(&board(Some("Ninja Gaiden (NES)"), acts), &cfg),
             Verdict::Other
         ));
         assert!(matches!(
             classify(&board(None, vec![]), &cfg),
             Verdict::Silent
         ));
-        // The default mode leaves the board alone.
+        // With no entry asking for completion tracking there is nothing to
+        // track a marathon board with, so it changes nothing — rather than
+        // ending a marathon that could never have started.
         cfg.games[0].mode = GameMode::Runs;
-        assert!(matches!(classify(&marathon, &cfg), Verdict::Other));
+        assert!(matches!(classify(&marathon(), &cfg), Verdict::Silent));
     }
 }
