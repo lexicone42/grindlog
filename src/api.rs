@@ -125,11 +125,13 @@ pub struct Session {
     pub source: String,
     /// A marathon or event tag, when the operator set one.
     pub tag: Option<String>,
-    /// Runs recorded over the whole session.
+    /// Runs of THIS FEED'S game recorded over the whole session. A
+    /// broadcast can hold runs of other games — a marathon day records one
+    /// per game of the event — and they are not counted here.
     pub attempts: i64,
-    /// Finished runs over the whole session.
+    /// Finished runs of this feed's game over the whole session.
     pub finished: i64,
-    /// The session's fastest finish, ms.
+    /// The session's fastest finish of this feed's game, ms.
     pub best_ms: Option<i64>,
     /// Capture health: frames analysed.
     pub frames: Option<i64>,
@@ -525,11 +527,15 @@ pub async fn build(
             cumulative_ms: s.cumulative_ms,
         });
     }
-    let sessions: HashMap<i64, db::SessionSummary> = db::recent_sessions(pool, 100_000)
-        .await?
-        .into_iter()
-        .map(|s| (s.id, s))
-        .collect();
+    // Scoped to this feed's game: `Session.attempts`, `.finished` and
+    // `.best_ms` are documented as this game's, and a broadcast may hold
+    // runs of others (a marathon day records one per game of the event).
+    let sessions: HashMap<i64, db::SessionSummary> =
+        db::recent_sessions(pool, game, category, 100_000)
+            .await?
+            .into_iter()
+            .map(|s| (s.id, s))
+            .collect();
 
     // Group by the local day SQLite names, exactly as daily_stats does.
     #[derive(Default)]

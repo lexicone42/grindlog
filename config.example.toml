@@ -274,9 +274,9 @@ category = "Any%"
 # title itself is the name. One entry per game; the category is optional
 # ("unknown" without it).
 #
-# `mode` says how a board this entry names is tracked. "runs", the default,
-# is every board the bot has read until now: one game, a timer that resets,
-# the state machine turning each attempt into a run. "board" is for a
+# `mode` says how a marathon board is tracked once one is seen. "runs", the
+# default, is every board the bot has read until now: one game, a timer that
+# resets, the state machine turning each attempt into a run. "board" is for a
 # marathon pane — ten different games back to back, one split row each, and a
 # big timer that is the event's total, pausing between games and never
 # resetting. There the rows are what completes: a row that gains a time is a
@@ -285,7 +285,28 @@ category = "Any%"
 # board, not the runs), and while such a board is on screen nothing is
 # recorded from the timer at all. A board-mode entry may not name the game in
 # [game] — that would put the tracked game's own board into completion
-# tracking. See the README, "Marathon days".
+# tracking.
+#
+# What decides that a board is tracked that way is the board's SIGNATURE —
+# what its rows measure like — and not this entry's match strings. The title
+# chooses among board-mode entries, and with exactly one of them it is not
+# consulted for that at all. It is still heard on two things: a board whose
+# rows cannot yet say what it is may be STARTED by a title naming an entry,
+# and a marathon-shaped board is NOT one when the title names a game tracked
+# some other way ([game] included), which is what keeps a run board whose
+# labels came back damaged out of completion tracking — as does taking an
+# event up only once three consecutive pane passes read its board. So the
+# match list is a disambiguator between events, not a gate: with board mode
+# on, every
+# marathon-shaped pane the bot sees that is not titled as another of its
+# games is tracked this way, and its rows are filed under this entry's name.
+#
+# Two limits worth knowing before turning it on: a game finished before the
+# bot first read the board is not recorded (nothing says when it happened),
+# and the name a run is filed under is the OCR reading of the row, grouped
+# within the event but not across events — one day's "TMNT III" and another's
+# "TMNT Ill" are two histories of one game until they are merged by hand.
+# See the README, "Marathon days".
 [[games]]
 name = "Arcathlon"
 category = "10 games"

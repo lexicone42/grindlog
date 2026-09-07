@@ -521,7 +521,7 @@ what a new scene needs before configuring anything.
 days: ten NES games back to back, one split row per game. The pane's big
 timer is then the event's running TOTAL — it pauses between games and never
 resets — so the run state machine has nothing to read, and a `[[games]]`
-entry with `mode = "board"` says to track that board by its rows instead
+entry with `mode = "board"` turns on tracking a board by its rows instead
 (`src/marathon.rs`):
 
 ```toml
@@ -532,12 +532,42 @@ match = ["arcath", "randomized"]
 mode = "board"          # default "runs"
 ```
 
+**What decides that a board is tracked this way is the board's own
+signature, not this entry's `match`.** The rows say what a board is —
+different games over a running total, or one game's segments counting up —
+and the title is the least reliable text on the pane, so the title's job is
+to say WHICH board-mode entry an event belongs to. With exactly one such
+entry there is nothing to be ambiguous about and it is not consulted for
+that at all. It is still heard on two things, one in each direction: a board
+the rows cannot yet measure — the first game of a randomized day is alone on
+the board when it finishes, the others still "???" — is tracked when the
+title names a board-mode entry, and a board whose rows measure like a
+marathon is NOT one when the title names a game this configuration tracks
+some other way, `[game]` included. That second rule is what keeps a run
+board out of completion tracking when its labels come back damaged: six
+"Act" rows with three of them misread are ten different games as far as the
+signature can tell. Belt and braces, an event is taken up only once three
+consecutive pane passes read its board, the way it is let go only after
+three read somebody else's — a marathon board reads as one for hours, and a
+damaged run board never did so more than twice in a row over eight measured
+broadcasts. A run-shaped board never starts a marathon, and a board still
+carrying the marathon's own rows never ends one.
+
+So `match` disambiguates between events; it does not gate the feature.
+Turning board mode on means every marathon-shaped board the bot sees whose
+title does not name another of its games is tracked that way, and its rows
+recorded under that entry's name — a one-off multi-game block, a guest
+layout, a charity relay included. For a multi-game day that is not this
+event, give it its own `[[games]]` entry in board mode (the title then picks
+between them), or leave board mode off while it runs.
+
 A marathon has no resets — he plays each game to the end — so every row
 completes exactly once, and when it does the board prints the authoritative
 time. Each completed row is recorded as one finished run: `game` is the
 row's own name as the board prints it (`Astyanax`, `SMB3 (Warpless)`), so
 his times for a game accumulate across events in the `runs.game` every
-report and chat query already groups by; `category` is the entry's `name`
+report and chat query already groups by — **as far as the spelling holds**
+(see below); `category` is the entry's `name`
 (`Arcathlon`), and its `category` field then describes the board rather than
 the runs; `final_time_ms` is the row's segment time; `last_timer_ms` is the
 marathon total the row ended at; `ended_at_ms` is the pane pass that saw it
@@ -566,6 +596,17 @@ restart mid-event by reconciling `last_timer_ms` against the database. Games
 finished before the bot first read the board are not recorded — nothing says
 when they happened — so a marathon has to be watched from its start. Replay
 one with `scripts/replay-arcathlon.sh <vod_id>`.
+
+**A known limitation: the name is the OCR reading, and it is not
+canonicalised across events.** Within one event a row's spellings are
+grouped and the run is filed under the one they agree on, but nothing spans
+events, and `runs.game` groups by exact string. If one day's board settles
+on `TMNT III` and another's on `TMNT Ill`, the reports, the chat queries and
+the feed show two histories of one game, and nothing in the log says so —
+and games do recur: across the eight surveyed events eighteen of them do.
+Until a board-name-to-game mapping lands, expect to check new marathon names
+against the ones already in `runs` (`SELECT DISTINCT game FROM runs WHERE
+category = 'Arcathlon'`) and merge split spellings by hand with an `UPDATE`.
 
 **Splits, run numbers and golds.** LiveSplit shows the comparison time in
 rows not yet reached and the actual time in completed ones, so a split is

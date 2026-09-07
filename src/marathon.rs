@@ -226,6 +226,18 @@ impl Slot {
     }
 }
 
+/// What the board's own arithmetic says a candidate cumulative's segment
+/// must be. The three answers are different evidence and are kept apart:
+/// "the difference is this", "the previous game ended after this one, so the
+/// candidate is not a reading of this row", and "there is no settled row
+/// above to check against".
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Expect {
+    Segment(i64),
+    Impossible,
+    Unanchored,
+}
+
 /// What a board is, as far as this configuration is concerned.
 pub enum Verdict<'a> {
     /// The board named nothing this configuration knows — no title was read,
@@ -253,26 +265,77 @@ pub enum Verdict<'a> {
 /// The **title** only says which event it is, so the runs are filed under
 /// the right category. When it names no configured entry — unread, or read
 /// as a game's name — and exactly one entry tracks boards, that entry is
-/// used anyway: there is nothing to be ambiguous about.
+/// used anyway: there is nothing to be ambiguous about. It is also allowed
+/// to START a marathon on its own, when the rows cannot yet speak: the
+/// first game of a randomized day is on the board ALONE when it completes
+/// (the board reader finds rows by their times, and the rest are "???"), so
+/// there are not three names to measure, and a board that reads as nothing
+/// while its title names the event is that event.
+///
+/// What the title names, it names for both sides. A title that names THIS
+/// deployment's own game is the one thing that can outweigh a marathon
+/// reading of the rows, because a run board really can measure like a
+/// marathon: his six "Act" rows plus "Previous Segment" and "Sum of Best
+/// Segments" come back with two or three of the labels damaged into words
+/// of their own, the group of matching labels falls under two in three, and
+/// the board reads as different games. Measured on the eight marathon
+/// broadcasts: on two of them, passes of his NINJA GAIDEN board after the
+/// event read as a marathon board, and one of them recorded "ct) A" — Act 1
+/// — as a finished game of 47.4 s. So a marathon-shaped board whose title
+/// names a game this configuration tracks some other way is that game's.
+///
+/// `current` is the marathon in force, and it is what a run-shaped reading
+/// is checked against. Two of his games can be spelled close enough to
+/// collapse into one label — "Ninja Gaiden III" and "Ninja Gaiden Il" on one
+/// real board — and three named rows then measure as one game's segments,
+/// for twenty passes running on the broadcast that has both. A board that
+/// still names the event's own games cannot be somebody else's board,
+/// whatever it measures like, so it is [`Verdict::Silent`] and the marathon
+/// stands. Only a board that names none of them may end one.
 ///
 /// An unreadable board is [`Verdict::Silent`] and changes nothing, which is
-/// the safe answer: a marathon in force stays in force, and none is
-/// started. Only a board that reads clearly as one game's segments ends a
-/// marathon.
-pub fn classify<'a>(board: &Board, cfg: &'a Config) -> Verdict<'a> {
+/// the safe answer: a marathon in force stays in force, and none is started
+/// unless the title says which. Only a board that reads clearly as one
+/// game's segments ends a marathon.
+pub fn classify<'a>(board: &Board, cfg: &'a Config, current: Option<&Marathon>) -> Verdict<'a> {
     let boards: Vec<&GameAlias> = cfg
         .games
         .iter()
         .filter(|a| a.mode == GameMode::Board)
         .collect();
+    // What the title names, when it names anything this configuration knows:
+    // `canonical_key` falls back to the title itself, which names nothing.
+    let named = crate::board::canonical_key(board, cfg).map(|(n, _)| n);
+    let titled = || -> Option<&'a GameAlias> {
+        let name = named.as_deref()?;
+        boards.iter().find(|a| a.name == name).copied()
+    };
+    // The title names a game this deployment tracks some other way: its own
+    // game, or an alias left in the default "runs" mode.
+    let titled_elsewhere = || -> bool {
+        named.as_deref().is_some_and(|n| {
+            n == cfg.game.name
+                || cfg
+                    .games
+                    .iter()
+                    .any(|a| a.name == n && a.mode != GameMode::Board)
+        })
+    };
+    // Somebody else's board — unless the marathon in force still has its
+    // rows on it, in which case this pass says nothing at all.
+    let somebody_else = || match current {
+        Some(m) if m.claims(board) => Verdict::Silent,
+        _ => Verdict::Other,
+    };
     match BoardSignature::of(board).shape() {
         Shape::Marathon { .. } => {
             // Which event? The title, when it names one of them; else the
             // only entry that tracks boards, if there is exactly one.
-            if let Some((name, _)) = crate::board::canonical_key(board, cfg) {
-                if let Some(a) = boards.iter().find(|a| a.name == name) {
-                    return Verdict::Board(a);
-                }
+            if let Some(a) = titled() {
+                return Verdict::Board(a);
+            }
+            if titled_elsewhere() {
+                return somebody_else();
             }
             match boards.as_slice() {
                 [only] => Verdict::Board(only),
@@ -280,9 +343,16 @@ pub fn classify<'a>(board: &Board, cfg: &'a Config) -> Verdict<'a> {
             }
         }
         // One game's segments: whatever this deployment tracks by its timer,
-        // and the thing that ends a marathon when he goes back to it.
-        Shape::Run { .. } => Verdict::Other,
-        Shape::Unknown => Verdict::Silent,
+        // and the thing that ends a marathon when he goes back to it — but
+        // never while the board still carries the marathon's own rows.
+        Shape::Run { .. } => somebody_else(),
+        // The rows cannot say what this is. The title still can, and it is
+        // positive evidence: it may start a marathon, though it may never
+        // end one — that is the rows' to say.
+        Shape::Unknown => match titled() {
+            Some(a) => Verdict::Board(a),
+            None => Verdict::Silent,
+        },
     }
 }
 
@@ -364,6 +434,27 @@ impl Marathon {
         )
     }
 
+    /// Does this board still carry rows of this marathon? One row named
+    /// after a game the event is running is enough: the board reader damages
+    /// a name or drops a row every pass or so, and a board that names one of
+    /// these games is this board, whatever its rows measure like.
+    ///
+    /// This is what stops a run-shaped reading of the marathon's own board
+    /// from ending the event. Only slots that have settled on a name can
+    /// answer, which is right: a marathon with nothing read off it yet has
+    /// nothing to be mistaken for.
+    pub fn claims(&self, board: &Board) -> bool {
+        board.rows.iter().any(|r| {
+            let Some(read) = r.name.as_deref().and_then(clean_name) else {
+                return false;
+            };
+            self.slots
+                .iter()
+                .filter_map(Slot::name)
+                .any(|known| game_matches(&read, known))
+        })
+    }
+
     /// One pane pass. `total_ms` is the marathon total as last read, when it
     /// was read recently; it decides whether a row that arrives with a time
     /// already in it has just been finished or was finished before the bot
@@ -423,6 +514,11 @@ impl Marathon {
         let Some(observed) = cells.state() else {
             return;
         };
+        // A row already carrying a time an earlier run of the bot recorded.
+        // Nothing else identifies it: the row shows what it always showed
+        // from the moment this tracker starts, so it never reaches
+        // `harvest`, where `known` is otherwise applied.
+        let already = observed.is_some_and(|c| self.known.contains(&c));
         let slot = &mut self.slots[i];
         if slot.baseline == Baseline::Unknown {
             // A randomized event's row does not exist until it has a time:
@@ -454,6 +550,19 @@ impl Marathon {
                         Some(ms) => Baseline::Was(ms),
                         None => Baseline::Empty,
                     };
+                    // A baseline that is a cumulative already in the
+                    // database is a row this bot finished watching before it
+                    // restarted. Marking it recorded here is the only chance
+                    // there is: a completed row keeps its time, so the
+                    // baseline is all this tracker will ever see of it, and
+                    // the only reading that could reach `harvest` is a
+                    // MISREADING of it — which is how a restart mid-event
+                    // recorded a second run of a finished game. It also puts
+                    // the recorded prefix back, which is what the segment
+                    // and coherence cross-checks are made of.
+                    if already {
+                        slot.recorded = observed;
+                    }
                 }
                 return;
             }
@@ -510,6 +619,19 @@ impl Marathon {
                         // A cumulative ahead of the total is a comparison time
                         // the runner has not reached, not a result.
                         && *c <= total + AHEAD_OF_TOTAL_MS
+                        // And one far behind it is a game that ended before
+                        // the bot looked — unless the board's own arithmetic
+                        // vouches for it, which it does when the row above is
+                        // one this tracker recorded and this candidate comes
+                        // after it. Joining an event mid-way is the case that
+                        // needs the bound: nothing above the row is recorded
+                        // there, so nothing else constrains a number read off
+                        // the wrong column. One measured: a row whose leading
+                        // minus sign was lost came back "2.35", "28:03" with
+                        // the marathon total at 3:57:30, and 28:03 — the
+                        // SEGMENT column — was recorded as a cumulative and
+                        // 2.35 s as the game's time.
+                        && (*c + JUST_NOW_MS >= total || self.arithmetic_backs(i, *c))
                         // The board's own arithmetic has to hold: the rows run
                         // in order down the board and each cumulative includes
                         // every row above it.
@@ -569,7 +691,13 @@ impl Marathon {
             .map(|((_, s), n)| (*s, *n));
         let expected = self.expected_segment(i, cum);
         match (voted, expected) {
-            (Some((seg, n)), Some(exp)) => {
+            // The board's arithmetic ruled the candidate out. Never take the
+            // segment column for it: "no previous game to check against" and
+            // "the previous game ended after this one" are opposite answers,
+            // and reading them as one is what let a segment column be
+            // recorded as a cumulative.
+            (_, Expect::Impossible) => None,
+            (Some((seg, n)), Expect::Segment(exp)) => {
                 if (seg - exp).abs() <= SEGMENT_SLACK_MS {
                     Some((seg, false))
                 } else {
@@ -580,15 +708,28 @@ impl Marathon {
             }
             // No previous game to check against: take the column as read,
             // once two passes agree on it.
-            (Some((seg, n)), None) => (n >= AGREE).then_some((seg, false)),
+            (Some((seg, n)), Expect::Unanchored) => (n >= AGREE).then_some((seg, false)),
             // The segment column never read; the cumulatives still say what
             // the run took.
-            (None, Some(exp)) => {
+            (None, Expect::Segment(exp)) => {
                 self.slots[i].segment_waits += 1;
                 (self.slots[i].segment_waits >= SEGMENT_PATIENCE).then_some((exp, true))
             }
-            (None, None) => None,
+            (None, Expect::Unanchored) => None,
         }
+    }
+
+    /// Does the board's own arithmetic vouch for a candidate the marathon
+    /// total has left far behind? It does when the row above this one is one
+    /// THIS tracker watched finish and the candidate comes after it: the
+    /// completion continues a chain the tracker built, which is what a game
+    /// confirmed a few passes late looks like — the pane can go unreadable
+    /// for minutes, and the fixtures hold completions recorded 490 s after
+    /// the fact. A number read off the wrong column has no such chain: on a
+    /// mid-event join nothing above the row is recorded, and that is exactly
+    /// where a segment column was taken for a cumulative.
+    fn arithmetic_backs(&self, i: usize, cum: i64) -> bool {
+        matches!(self.expected_segment(i, cum), Expect::Segment(_))
     }
 
     /// Does a candidate cumulative sit where the board says it must? The
@@ -611,12 +752,18 @@ impl Marathon {
     /// What the row's segment must be if the previous game's cumulative is
     /// settled: the first row's segment is its cumulative, since the marathon
     /// total starts at zero.
-    fn expected_segment(&self, i: usize, cum: i64) -> Option<i64> {
+    fn expected_segment(&self, i: usize, cum: i64) -> Expect {
         let prev = match i {
             0 => 0,
-            _ => self.slots[i - 1].settled_cumulative()?,
+            _ => match self.slots[i - 1].settled_cumulative() {
+                Some(p) => p,
+                None => return Expect::Unanchored,
+            },
         };
-        (cum > prev).then_some(cum - prev)
+        match cum > prev {
+            true => Expect::Segment(cum - prev),
+            false => Expect::Impossible,
+        }
     }
 
     /// Which slot each row of this pass belongs to.
@@ -1358,14 +1505,7 @@ mod tests {
     /// which event it is.
     #[test]
     fn the_rows_say_what_the_board_is_when_the_title_cannot() {
-        let mut cfg = Config::for_test_with_min_final(660_000);
-        cfg.game.name = "Ninja Gaiden (NES)".into();
-        cfg.games = vec![GameAlias {
-            name: "Arcathlon".into(),
-            category: Some("10 games".into()),
-            r#match: vec!["arcath".into(), "randomized".into()],
-            mode: GameMode::Board,
-        }];
+        let cfg = board_config();
         let marathon_rows = || {
             vec![
                 row("Astyanax", &["21:48", "21:48"]),
@@ -1376,12 +1516,12 @@ mod tests {
         };
         // The title is useless; the rows are not.
         assert!(matches!(
-            classify(&board(Some("\u{2018}King Kong"), marathon_rows()), &cfg),
+            classify(&board(Some("\u{2018}King Kong"), marathon_rows()), &cfg, None),
             Verdict::Board(a) if a.name == "Arcathlon"
         ));
         // No title at all: the same, since only one entry tracks boards.
         assert!(matches!(
-            classify(&board(None, marathon_rows()), &cfg),
+            classify(&board(None, marathon_rows()), &cfg, None),
             Verdict::Board(a) if a.name == "Arcathlon"
         ));
         // One game's segments end it, whatever the title says.
@@ -1394,14 +1534,203 @@ mod tests {
             })
             .collect();
         assert!(matches!(
-            classify(&board(Some("\u{2018}King Kong"), acts), &cfg),
+            classify(&board(Some("\u{2018}King Kong"), acts), &cfg, None),
             Verdict::Other
         ));
         // A board with nothing readable changes nothing.
         assert!(matches!(
-            classify(&board(Some("Ninja Gaiden (NES"), vec![]), &cfg),
+            classify(&board(Some("Ninja Gaiden (NES"), vec![]), &cfg, None),
             Verdict::Silent
         ));
+    }
+
+    /// A marathon board can read as a run board, and did for twenty passes
+    /// running. Two of the day's ten games were "Ninja Gaiden III" and
+    /// "Ninja Gaiden II"; two edits apart, the signature groups them as one
+    /// damaged label, and three named rows with two in one group are one
+    /// game's segments. A board still carrying the marathon's own rows may
+    /// not end it, whatever it measures like.
+    #[test]
+    fn a_run_shaped_reading_of_the_marathons_own_board_does_not_end_it() {
+        let cfg = board_config();
+        // VOD 2833684629, t=2950 s, verbatim.
+        let pass = || {
+            let mut rows = vec![
+                row("Ninja Gaiden III", &["15:52", "15:52"]),
+                row("SMB 2", &["11:25", "27:18"]),
+                row("Ninja Gaiden Il", &[]),
+            ];
+            rows.extend((0..7).map(|_| row("22?", &[])));
+            board(Some("Randomized Arcathion"), rows)
+        };
+        assert!(
+            matches!(BoardSignature::of(&pass()).shape(), Shape::Run { .. }),
+            "the signature really does read this marathon board as a run board"
+        );
+        // With no marathon in force, that reading stands: nothing is claimed.
+        assert!(matches!(classify(&pass(), &cfg, None), Verdict::Other));
+        // With one whose rows these are, the board changes nothing — and the
+        // rows are still read, which is how the day's third game gets
+        // recorded at all.
+        let mut m = Marathon::new("Arcathlon".into());
+        m.observe(&pass(), 0, Some(1_278_930));
+        assert!(matches!(classify(&pass(), &cfg, Some(&m)), Verdict::Silent));
+        // The board he really does switch to at the end of the day names
+        // none of them, and that ends it.
+        let acts: Vec<BoardRow> = (0..6)
+            .map(|i| {
+                row(
+                    &format!("Act {}", i + 1),
+                    &["1:00.0", &format!("{}:00.0", (i + 1) * 2)],
+                )
+            })
+            .collect();
+        assert!(matches!(
+            classify(&board(Some("Ninja Gaiden (NES)"), acts), &cfg, Some(&m)),
+            Verdict::Other
+        ));
+    }
+
+    /// The first game of a randomized day finishes while its row is the only
+    /// one on the board — the others are "???" and the board reader finds
+    /// rows by their times — so there are not three names for the signature
+    /// to measure and the rows cannot yet say what the board is. The title
+    /// can, and it is allowed to START a marathon on that evidence. It is
+    /// never allowed to end one: only the rows do that.
+    #[test]
+    fn the_title_starts_a_marathon_the_rows_cannot_speak_for() {
+        let cfg = board_config();
+        let alone = |title: Option<&str>| board(title, vec![row("Astyanax", &["21:48", "21:48"])]);
+        assert!(matches!(
+            BoardSignature::of(&alone(Some("Randomized Arcathion"))).shape(),
+            Shape::Unknown
+        ));
+        assert!(matches!(
+            classify(&alone(Some("Randomized Arcathion")), &cfg, None),
+            Verdict::Board(a) if a.name == "Arcathlon"
+        ));
+        // Without a title naming one, an unreadable board is still no
+        // evidence about anything.
+        assert!(matches!(
+            classify(&alone(None), &cfg, None),
+            Verdict::Silent
+        ));
+        // A run board never starts a marathon, however the title reads.
+        let acts: Vec<BoardRow> = (0..6)
+            .map(|i| {
+                row(
+                    &format!("Act {}", i + 1),
+                    &["1:00.0", &format!("{}:00.0", (i + 1) * 2)],
+                )
+            })
+            .collect();
+        assert!(matches!(
+            classify(&board(Some("Randomized Arcathion"), acts), &cfg, None),
+            Verdict::Other
+        ));
+        // And the point of all this: started in time, the completion is
+        // recognised. Measured on VOD 2858870362, where the row appears at
+        // t=1790 with the marathon total standing at its 21:48.
+        let mut m = Marathon::new("Arcathlon".into());
+        let total = Some(1_309_320);
+        let seen = alone(Some("Randomized Arcathion"));
+        assert!(m.observe(&seen, 1_790_000, total).is_empty());
+        let done = m.observe(&seen, 1_850_000, total);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].game, "Astyanax");
+        assert_eq!(done[0].segment_ms, 1_308_000);
+    }
+
+    /// A restart mid-event: the rows already finished carry their times from
+    /// the first pass this tracker sees, so they never CHANGE and never
+    /// reach the point where what is already in the database is checked.
+    /// The only reading of such a row that can get that far is a misreading
+    /// — VOD 2833684629's row 1 reads "18:52" for 15:52 on every other pass
+    /// — and it lands as a second finished run of a game already recorded,
+    /// at a time the runner never posted.
+    #[test]
+    fn a_restart_does_not_record_a_finished_row_again() {
+        let mut m = Marathon::new("Arcathlon".into());
+        // Ninja Gaiden III, 15:52, recorded before the restart.
+        m.seed(&[952_000]);
+        let pass = |first: &[&str]| {
+            board(
+                Some("Randomized Arcathion"),
+                vec![
+                    row("Ninja Gaiden III", first),
+                    row("SMB 2", &["11:25", "27:18"]),
+                    row("Ninja Gaiden II", &[]),
+                ],
+            )
+        };
+        // He is deep into the third game: the total has left both finished
+        // rows far behind, which is what a restart mid-event looks like.
+        let total = Some(3_600_000);
+        // Two passes settle the row's baseline at its real, recorded value.
+        for t in 0..2 {
+            assert!(m
+                .observe(&pass(&["15:52", "15:52"]), t * 60_000, total)
+                .is_empty());
+        }
+        // The documented misreading, twice, a minute apart — enough votes and
+        // enough spread — and then the pane thins to the row being played and
+        // the row's cells go unread, which does not clear the votes.
+        for t in 2..4 {
+            let seen = m.observe(&pass(&["15:52", "18:52"]), t * 60_000, total);
+            assert!(seen.is_empty(), "at {t}: {seen:?}");
+        }
+        for t in 4..9 {
+            assert!(
+                m.observe(&pass(&[]), t * 60_000, total).is_empty(),
+                "a row already in the database is not recorded again at {t}"
+            );
+        }
+    }
+
+    /// Joining an event mid-way — a crash restart, a rollout, a stream
+    /// reconnect — is the ordinary live case, and there nothing above the
+    /// row being played has been recorded, so nothing constrains a number
+    /// read off the wrong column. VOD 2827296024's Cowboy Kid row prints
+    /// "-2.35", "28:03", "1:38:23"; the pane loses the leading minus on many
+    /// passes, the last two cells become the delta and the SEGMENT, and
+    /// 28:03 was recorded as the cumulative with 2.35 s as the game's time —
+    /// while the marathon total stood at 3:57:30.
+    #[test]
+    fn a_cumulative_hours_behind_the_total_is_not_a_completion() {
+        let mut m = Marathon::new("Arcathlon".into());
+        let pass = |third: &[&str], fourth: &[&str]| {
+            board(
+                Some("Arcathion #4"),
+                vec![
+                    row("Astyanax", &["23:19", "23:19"]),
+                    row("Castlevania II", &["46:59", "1:10:19"]),
+                    row("Cowboy Kid", third),
+                    row("Shadowgate", fourth),
+                ],
+            )
+        };
+        let total = Some(14_250_000);
+        let read = &["-2.35", "28:03", "1:38:23"][..];
+        for t in 0..2 {
+            assert!(m.observe(&pass(read, &[]), t * 60_000, total).is_empty());
+        }
+        // The minus goes, over and over. It is not a change in the row.
+        for t in 2..10 {
+            assert!(
+                m.observe(&pass(&["2.35", "28:03"], &[]), t * 60_000, total)
+                    .is_empty(),
+                "nothing was finished at {t}"
+            );
+        }
+        // The game he is playing still records the moment it ends, which is
+        // what the bound must not cost: its cumulative is AT the total.
+        let done = &["13:32", "4:11:02"][..];
+        let end = Some(15_062_000);
+        assert!(m.observe(&pass(read, done), 600_000, end).is_empty());
+        let seen = m.observe(&pass(read, done), 660_000, end);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].game, "Shadowgate");
+        assert_eq!(seen[0].segment_ms, 812_000);
     }
 
     // ---- whole broadcasts, replayed pass by pass -------------------------
@@ -1438,48 +1767,189 @@ mod tests {
     struct FGame {
         order: usize,
         game: String,
+        /// The spelling the tracker is expected to file the run under, where
+        /// OCR does not give the board's own — "Litle Samson" for "Little
+        /// Samson". Absent means it reads the name exactly. `runs.game` is
+        /// grouped by exact string, so this is checked exactly: a change in
+        /// what a row settles on is a change in where its history goes.
+        #[serde(default)]
+        recorded_as: Option<String>,
         segment: String,
         cumulative: String,
         ended_s: i64,
     }
 
-    fn replay(name: &str) -> (Vec<Completion>, Vec<FGame>) {
+    impl FGame {
+        fn filed_as(&self) -> &str {
+            self.recorded_as.as_deref().unwrap_or(&self.game)
+        }
+    }
+
+    /// A board that is plainly a marathon's: four different games over a
+    /// running total.
+    fn marathon_rows() -> Vec<BoardRow> {
+        vec![
+            row("Astyanax", &["21:48", "21:48"]),
+            row("King Kong 2", &["4:24", "26:12"]),
+            row("SMB3 (Warpless)", &["1:03:20", "1:29:33"]),
+            row("Batman: ROTJ", &["15:43", "1:45:16"]),
+        ]
+    }
+
+    /// The configuration the fixtures are replayed against: one entry that
+    /// tracks boards, which is what a deployment following this streamer has.
+    fn board_config() -> Config {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.games = vec![GameAlias {
+            name: "Arcathlon".into(),
+            category: Some("10 games".into()),
+            r#match: vec!["arcath".into(), "randomized".into()],
+            mode: GameMode::Board,
+        }];
+        cfg
+    }
+
+    /// One pane pass, as the run loop hands it over.
+    struct Pass {
+        at_ms: i64,
+        total_ms: Option<i64>,
+        board: Board,
+    }
+
+    /// Drive passes through the decision sequence `app::track_marathon`
+    /// runs — `classify`, the take-up and let-go counts, the database
+    /// reconcile, then `observe` — rather than straight into `observe`.
+    /// Feeding `observe` directly validates a path the bot does not run: it
+    /// cannot see a marathon that is never started, or one torn down
+    /// mid-event, which is what two of the fixtures do. No database is
+    /// needed; a `Vec<i64>` of the cumulatives recorded so far is exactly
+    /// what `db::marathon_totals` returns.
+    ///
+    /// `restart_at` drops everything the tracker has learned at that pass and
+    /// picks the event up again from the database alone, which is what a
+    /// crash restart, a rollout or a stream reconnect does to the live bot
+    /// mid-event — the ordinary case, and not the one a replay from the
+    /// first pass exercises.
+    fn drive(passes: &[Pass], restart_at: Option<usize>) -> (Vec<Completion>, String) {
+        let cfg = board_config();
+        let mut state: Option<Marathon> = None;
+        let mut misses: u32 = 0;
+        let mut hits: u32 = 0;
+        // The database: every cumulative recorded for this event so far.
+        let mut recorded: Vec<i64> = Vec::new();
+        let mut out = Vec::new();
+        let mut verdicts = [0u32; 3];
+        for (n, p) in passes.iter().enumerate() {
+            if restart_at == Some(n) {
+                // The process goes down and comes back. Everything it had
+                // learned about the board goes with it; the database stays.
+                state = None;
+                misses = 0;
+                hits = 0;
+            }
+            match classify(&p.board, &cfg, state.as_ref()) {
+                // Not evidence of anything: a marathon in force keeps
+                // reading the board, and none is started.
+                Verdict::Silent => verdicts[0] += 1,
+                Verdict::Other => {
+                    verdicts[1] += 1;
+                    misses += 1;
+                    hits = 0;
+                    // Somebody else's board — but the rows are left alone
+                    // until enough passes agree, and then the event is over.
+                    if misses >= crate::app::MARATHON_LET_GO {
+                        state = None;
+                    }
+                    continue;
+                }
+                Verdict::Board(alias) => {
+                    verdicts[2] += 1;
+                    misses = 0;
+                    if state.as_ref().is_none_or(|m| m.category() != alias.name) {
+                        // And an event is taken up on several passes
+                        // agreeing, the way it is let go.
+                        hits += 1;
+                        if hits < crate::app::MARATHON_TAKE_UP {
+                            continue;
+                        }
+                        let mut m = Marathon::new(alias.name.clone());
+                        m.seed(&recorded);
+                        state = Some(m);
+                    }
+                }
+            }
+            let Some(m) = state.as_mut() else { continue };
+            for c in m.observe(&p.board, p.at_ms, p.total_ms) {
+                recorded.push(c.cumulative_ms);
+                out.push(c);
+            }
+        }
+        let summary = format!(
+            "{} passes ({} board, {} silent, {} other){} — {}",
+            passes.len(),
+            verdicts[2],
+            verdicts[0],
+            verdicts[1],
+            match restart_at {
+                Some(n) => format!(", restarted at pass {n}"),
+                None => String::new(),
+            },
+            match &state {
+                Some(m) => m.describe(),
+                None => "no marathon in force at the end".to_string(),
+            }
+        );
+        (out, summary)
+    }
+
+    fn replay_from(name: &str, restart_at: Option<usize>) -> (Vec<Completion>, Vec<FGame>) {
         let path = format!(
             "{}/tests/fixtures/marathon/{name}.json",
             env!("CARGO_MANIFEST_DIR")
         );
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
         let fx: Fixture = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}"));
-        let mut m = Marathon::new("Arcathlon".into());
-        let mut out = Vec::new();
-        for p in &fx.passes {
-            let b = Board {
-                title: p.title.clone(),
-                subtitle: None,
-                counter: None,
-                rows: p
-                    .rows
-                    .iter()
-                    .map(|r| BoardRow {
-                        name: r.name.clone(),
-                        cells: r.cells.clone(),
-                        y: 0,
-                    })
-                    .collect(),
-            };
-            out.extend(m.observe(&b, p.t_ms, p.total_ms));
-        }
-        println!("{}: {}", fx.name, m.describe());
+        let passes: Vec<Pass> = fx
+            .passes
+            .iter()
+            .map(|p| Pass {
+                at_ms: p.t_ms,
+                total_ms: p.total_ms,
+                board: Board {
+                    title: p.title.clone(),
+                    subtitle: None,
+                    counter: None,
+                    rows: p
+                        .rows
+                        .iter()
+                        .map(|r| BoardRow {
+                            name: r.name.clone(),
+                            cells: r.cells.clone(),
+                            y: 0,
+                        })
+                        .collect(),
+                },
+            })
+            .collect();
+        let (out, summary) = drive(&passes, restart_at);
+        println!("{}: {summary}", fx.name);
         (out, fx.expect)
     }
 
     /// Every game of the day, with the time the board printed, and no game
-    /// the board never finished. Names are compared the way a person would
-    /// read them — OCR takes a letter off "Little Samson" and writes
-    /// "Litle Samson" — so `game_matches` decides, and the exact spellings
-    /// are printed for a human to look over.
+    /// the board never finished.
+    ///
+    /// The name is compared EXACTLY, against the spelling the answer key
+    /// says this row settles on. Runs are filed under the row's own name and
+    /// `runs.game` groups by exact string, so a fuzzy comparison here would
+    /// pass a change that silently splits a game's history in two.
     fn check(name: &str, want_found: usize, allow_late_s: i64) {
-        let (found, expect) = replay(name);
+        check_from(name, None, want_found, allow_late_s)
+    }
+
+    fn check_from(name: &str, restart_at: Option<usize>, want_found: usize, allow_late_s: i64) {
+        let (found, expect) = replay_from(name, restart_at);
         let mut bad: Vec<String> = Vec::new();
         let mut hits = 0;
         for g in &expect {
@@ -1508,8 +1978,13 @@ mod tests {
                     ""
                 }
             );
-            if !game_matches(&c.game, &g.game) {
-                bad.push(format!("{} named {:?}, not {:?}", g.order, c.game, g.game));
+            if c.game != g.filed_as() {
+                bad.push(format!(
+                    "{} filed under {:?}, not {:?}",
+                    g.order,
+                    c.game,
+                    g.filed_as()
+                ));
             }
             if c.segment_ms != seg {
                 bad.push(format!(
@@ -1551,14 +2026,25 @@ mod tests {
     }
 
     /// A randomized day: no comparison times, "???" until each game is drawn,
-    /// and the first row appearing out of nothing with its result in it. All
-    /// ten games, every time exactly as the board printed it, each recorded
-    /// 50-80 s after the answer key's instant — the pane pass runs every
-    /// minute and a completion wants two of them, and the key's own instants
-    /// are good to 30 s.
+    /// and the first row appearing out of nothing with its result in it. Every
+    /// time exactly as the board printed it, and every name exactly as the
+    /// runs are filed.
+    ///
+    /// NINE of its ten games, not ten, and the missing one is the point of
+    /// the fixture rather than a fault in it. This capture's pane crop cut
+    /// the title row off, so the board reader took the first game's name for
+    /// the title or read none at all — and Astyanax finishes while its row is
+    /// the ONLY row on the board, before there are three names for the
+    /// signature to measure. The rows cannot say what the board is, the title
+    /// is not there to say it either, so no marathon is in force during the
+    /// nine passes where the total stands at Astyanax's 21:48, and by the
+    /// time three games are drawn the total has moved four minutes past it.
+    /// King Kong 2 is recorded 290 s late for the same reason. Replayed whole
+    /// with the crop `scripts/replay-arcathlon.sh` uses, which takes in the
+    /// title row, this broadcast records all ten.
     #[test]
     fn replays_a_whole_randomized_broadcast() {
-        check("rand-2858870362", 10, 120);
+        check("rand-2858870362", 9, 300);
     }
 
     /// The hardest of the three, and the one that pays for the other two.
@@ -1585,6 +2071,179 @@ mod tests {
     #[test]
     fn replays_a_whole_numbered_broadcast() {
         check("num-2830524439", 10, 360);
+    }
+
+    /// The same broadcast with the bot restarted in the middle of it — a
+    /// crash, a rollout, a stream reconnect, all of which the live bot does
+    /// mid-event and none of which a replay from the first pass exercises.
+    /// The rows already finished when it comes back are marked from the
+    /// database as it reconciles, so the day still records its ten games and
+    /// no eleventh.
+    ///
+    /// Before that reconcile was applied where a restart can see it, row 1's
+    /// documented 15:52 -> "18:52" misread landed as a second, fabricated
+    /// run of a game already in the database: measured on this fixture at
+    /// every restart from pass 70 to pass 210.
+    #[test]
+    fn replays_a_broadcast_the_bot_restarted_in_the_middle_of() {
+        check_from("rand-2833684629", Some(150), 10, 600);
+    }
+
+    /// A run board can measure like a MARATHON board, which is the mirror
+    /// of the case above and the more dangerous one: it starts an event
+    /// where there is none. His Ninja Gaiden board is six "Act" rows over
+    /// "Previous Segment" and "Sum of Best Segments", and when two or three
+    /// of the labels come back damaged into words of their own, the group of
+    /// matching labels falls under two in three and the rows read as
+    /// different games. Two of the eight marathon broadcasts have passes
+    /// like that AFTER the event, and one of them recorded Act 1 as a
+    /// finished game of 47.4 s under the name "ct) A".
+    ///
+    /// What settles it is the title: it names the game this deployment
+    /// tracks by its timer, and that outranks a marathon reading of damaged
+    /// rows.
+    #[test]
+    fn a_run_board_that_measures_like_a_marathon_is_not_one() {
+        let cfg = board_config();
+        // VOD 2833684629, t=17350 s, verbatim.
+        let b = board(
+            Some("Ninje Ga n (NES)"),
+            vec![
+                row("Acti", &["0:47.5", "0:47.5"]),
+                row("", &["1:54.3", "2:41.9"]),
+                row("1 Act 3", &["1:22.6", "4:04.6"]),
+                row("Act 4 19", &["2:11.4", "6:16.0"]),
+                row("REF", &["2:24.7", "8:38.8"]),
+                row("Act6", &["2:58.3", "11:37.2"]),
+                row("5 Previous Segment", &["0.1"]),
+                row("Sum of Best Segments", &["11:32.5"]),
+            ],
+        );
+        assert!(
+            matches!(BoardSignature::of(&b).shape(), Shape::Marathon { .. }),
+            "the signature really does read his run board as a marathon board"
+        );
+        assert!(matches!(classify(&b, &cfg, None), Verdict::Other));
+        // The same board with its title unread is the one this cannot save,
+        // and it is why board mode tracks whatever it is pointed at: with a
+        // single board-mode entry the rows are all there is to go on.
+        let untitled = board(None, b.rows.clone());
+        assert!(matches!(classify(&untitled, &cfg, None), Verdict::Board(_)));
+    }
+
+    /// Two consecutive passes of his run board reading as a marathon board
+    /// is the most the eight broadcasts ever produced, and an event taken up
+    /// on them files acts as games and suspends the timer. So an event is
+    /// taken up the way it is let go: on three passes agreeing.
+    ///
+    /// The five passes are VOD 2830524439 at t=18190..18430 s, verbatim,
+    /// half an hour after the marathon ended and while he was running Ninja
+    /// Gaiden. Three of them read as a marathon board — their labels are
+    /// damaged into words of their own and stop matching each other — and on
+    /// an earlier build they started an event that recorded "Act 1" as a
+    /// finished game of 47.5 s. The two whose titles still read as the
+    /// tracked game are what breaks the run of them.
+    #[test]
+    fn an_event_is_taken_up_only_when_three_passes_agree() {
+        let ng = |title: Option<&str>, rows: Vec<BoardRow>| Pass {
+            at_ms: 0,
+            total_ms: Some(700_000),
+            board: board(title, rows),
+        };
+        let mut passes = vec![
+            ng(
+                Some("Ninja Gaiden (NES)"),
+                vec![
+                    row("", &["-0.1", "0:47.4", "0:47.4"]),
+                    row("Act 2", &["1:54.2", "2:41.6"]),
+                    row("1 Act 3", &["1:30.6", "4:12.2"]),
+                    row("ir ate", &["2:11.5", "6:14.1"]),
+                    row("Act", &["2:24.7", "8:38.8"]),
+                    row("", &["2:58.3", "11:37.2"]),
+                    row("Sum of Best Segments", &["11:32.5"]),
+                ],
+            ),
+            ng(
+                Some("Set ay i ony"),
+                vec![
+                    row("ea", &["0:47.5", "0:47.5"]),
+                    row("Act 2", &["1:53.8", "2:41.3"]),
+                    row("Act 3", &["1:21.1", "4:02.5"]),
+                    row("4", &["2:11.5", "6:14.1"]),
+                    row("act", &["2:24.7", "8:38.8"]),
+                    row("Act 6", &["2:58.3", "11:37.2"]),
+                    row("Previous Segment", &[]),
+                    row("Sum of Best Segments", &["11:32.5"]),
+                ],
+            ),
+            ng(
+                Some("Gesen (NES)"),
+                vec![
+                    row("Act 1", &["0:47.5", "0:47.5"]),
+                    row("Act 2", &["1:53.8", "2:41.3"]),
+                    row("A", &["1:21.1", "4:02.5"]),
+                    row("gy Acts", &["2:11.5", "6:14.1"]),
+                    row("Act", &["2:24.7", "8:38.8"]),
+                    row("Act 8", &["2:58.3", "11:37.2"]),
+                    row("Previous Segment", &[]),
+                    row("Sum of Best Segments", &["11:32.5"]),
+                ],
+            ),
+            ng(
+                Some("Ninja Garden (NES)"),
+                vec![
+                    row("", &["0:47.5", "0:47.5"]),
+                    row("a] Act 2", &["1:53.8", "2:41.3"]),
+                    row("4", &["1:21.1", "4:02.5"]),
+                    row("", &["2:11.5", "6:14.1"]),
+                    row("Act 5", &["2:24.7", "8:38.8"]),
+                    row("a Act6", &["2:58.3", "11:37.2"]),
+                    row("l", &[]),
+                    row("q", &[]),
+                    row("Previous Segment", &[]),
+                    row("Sum of Best Segments", &["11:32.5"]),
+                ],
+            ),
+            ng(
+                Some("Ninge Gan Ge on (NES)"),
+                vec![
+                    row("Act 1", &["0:47.5", "0:47.5"]),
+                    row("", &["1:53.8", "2:41.3"]),
+                    row("Act3", &["1:21.1", "4:02.5"]),
+                    row("", &["2:11.5", "6:14.1"]),
+                    row("Act", &["2:24.7", "8:38.8"]),
+                    row("", &["2:58.3", "11:37.2"]),
+                    row("Previous Segment", &[]),
+                    row("1 Sum of Best Segments", &["11:32.5"]),
+                ],
+            ),
+        ];
+        for (i, p) in passes.iter_mut().enumerate() {
+            p.at_ms = 18_190_000 + i as i64 * 60_000;
+        }
+        // Two of the five read as a marathon board, and they are adjacent.
+        // Three of the five read as a marathon board — two of them
+        // adjacent, which is the longest run the eight broadcasts produced.
+        let verdicts: Vec<bool> = passes
+            .iter()
+            .map(|p| matches!(classify(&p.board, &board_config(), None), Verdict::Board(_)))
+            .collect();
+        assert_eq!(verdicts, [false, true, true, false, true]);
+        let (found, summary) = drive(&passes, None);
+        assert!(found.is_empty(), "nothing was finished here: {found:?}");
+        assert!(
+            summary.contains("no marathon in force"),
+            "no event should have been taken up: {summary}"
+        );
+        // The same passes with a third agreeing between them do take one up,
+        // which is what a real marathon board looks like for hours.
+        passes.insert(2, ng(Some("Randomized Arcathion"), marathon_rows()));
+        passes[2].at_ms = 18_310_000;
+        let (_, summary) = drive(&passes, None);
+        assert!(
+            !summary.contains("no marathon in force"),
+            "three agreeing passes take the event up: {summary}"
+        );
     }
 
     /// The pane's edge reads as a letter in front of the name more often than
@@ -1715,7 +2374,9 @@ mod tests {
                 ],
             )
         };
-        assert!(matches!(classify(&marathon(), &cfg), Verdict::Board(a) if a.name == "Arcathlon"));
+        assert!(
+            matches!(classify(&marathon(), &cfg, None), Verdict::Board(a) if a.name == "Arcathlon")
+        );
         // One game's segments are somebody else's board.
         let acts: Vec<BoardRow> = (0..6)
             .map(|i| {
@@ -1726,17 +2387,26 @@ mod tests {
             })
             .collect();
         assert!(matches!(
-            classify(&board(Some("Ninja Gaiden (NES)"), acts), &cfg),
+            classify(&board(Some("Ninja Gaiden (NES)"), acts), &cfg, None),
             Verdict::Other
         ));
         assert!(matches!(
-            classify(&board(None, vec![]), &cfg),
+            classify(&board(None, vec![]), &cfg, None),
             Verdict::Silent
         ));
-        // With no entry asking for completion tracking there is nothing to
-        // track a marathon board with, so it changes nothing — rather than
-        // ending a marathon that could never have started.
+        // The same board with its entry left in the default mode: the
+        // configuration knows this event and says to track it by the timer,
+        // which is what `Other` means. Nothing can start a marathon here,
+        // and a board nothing claims still changes nothing.
         cfg.games[0].mode = GameMode::Runs;
-        assert!(matches!(classify(&marathon(), &cfg), Verdict::Silent));
+        assert!(matches!(classify(&marathon(), &cfg, None), Verdict::Other));
+        assert!(matches!(
+            classify(
+                &board(Some("Some Other Stream"), marathon().rows),
+                &cfg,
+                None
+            ),
+            Verdict::Silent
+        ));
     }
 }

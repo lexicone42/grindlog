@@ -1400,7 +1400,17 @@ fn log_board(path: &Option<String>, board: &Board, t_ms: i64, at_ms: i64) {
 /// Consecutive pane passes reading somebody else's board before a marathon
 /// is let go. One garbled title must not end an event; a scene the runner
 /// switched to for good will read the same way every minute.
-const MARATHON_LET_GO: u32 = 3;
+pub(crate) const MARATHON_LET_GO: u32 = 3;
+
+/// Consecutive pane passes reading a marathon board before an event is
+/// taken up, the mirror of [`MARATHON_LET_GO`] and for the same reason: a
+/// verdict is evidence from one frame, not a fact about the day. His own
+/// Ninja Gaiden board measures like a marathon board whenever three of its
+/// labels come back damaged into words of their own — 13 passes of it over
+/// the eight marathon broadcasts, never more than two in a row — and an
+/// event started on one of those suspends the timer and files his acts as
+/// games. A real marathon board reads as one for hours.
+pub(crate) const MARATHON_TAKE_UP: u32 = 3;
 
 /// How far back a restarted bot looks for the completions it already
 /// recorded of the event it is picking up. Longer than his longest marathon
@@ -1420,15 +1430,17 @@ async fn track_marathon(
     state: &mut Option<marathon::Marathon>,
     tag: &mut Option<String>,
     misses: &mut u32,
+    hits: &mut u32,
     session_id: Option<i64>,
     health: &mut db::SessionHealth,
     at_ms: i64,
     total_ms: Option<i64>,
 ) -> bool {
-    match marathon::classify(board, cfg) {
+    match marathon::classify(board, cfg, state.as_ref()) {
         marathon::Verdict::Silent => {}
         marathon::Verdict::Other => {
             *misses += 1;
+            *hits = 0;
             // Somebody else's board, but not yet often enough to believe it.
             // The marathon stays in force — and with it the suspension of the
             // timer — while this board's rows are left alone.
@@ -1439,12 +1451,25 @@ async fn track_marathon(
                 info!("marathon over: {}", m.describe());
                 health.event(at_ms, "marathon", format!("{} ended", m.category()));
             }
-            *tag = None;
+            // The tag stays: it names the BROADCAST, and the event ending
+            // does not unname it. What clears it is the broadcast ending
+            // (the `StreamOffline` arm), where the next session wants its
+            // own. Keeping it is also what stops a tracker rebuilt over the
+            // same day — which happens when a stretch of another board reads
+            // as a marathon — from writing "Arcathlon" over "Arcathlon #2".
             return false;
         }
         marathon::Verdict::Board(alias) => {
             *misses = 0;
             if state.as_ref().is_none_or(|m| m.category() != alias.name) {
+                // An event is taken up on several passes agreeing, the way
+                // it is let go. One pass of a run board whose labels came
+                // back damaged reads as a marathon board, and starting an
+                // event on it suspends the timer and files acts as games.
+                *hits += 1;
+                if *hits < MARATHON_TAKE_UP {
+                    return state.is_some();
+                }
                 let mut m = marathon::Marathon::new(alias.name.clone());
                 // What a previous run of the bot over this same broadcast
                 // already recorded, so a restart mid-event does not record
@@ -1481,7 +1506,14 @@ async fn track_marathon(
     // Name the broadcast after the event it turned out to be.
     if let Some(id) = session_id {
         let want = m.tag();
-        if tag.as_deref() != Some(want.as_str()) {
+        // A tracker that has not read the event's number yet must not take
+        // it off the session: "Arcathlon" over "Arcathlon #2" loses which
+        // event the broadcast was, and only a rebuilt tracker ever asks for
+        // the shorter name.
+        let loses_the_number = tag
+            .as_deref()
+            .is_some_and(|t| t.len() > want.len() && t.starts_with(&want));
+        if !loses_the_number && tag.as_deref() != Some(want.as_str()) {
             match db::set_session_tag(pool, id, &want).await {
                 Ok(()) => *tag = Some(want),
                 Err(e) => warn!("could not tag session #{id}: {e:#}"),
@@ -1982,6 +2014,10 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut marathon: Option<marathon::Marathon> = None;
     let mut marathon_tag: Option<String> = None;
     let mut not_marathon: u32 = 0;
+    // And how many consecutive passes have read the board of an event not
+    // yet being tracked: an event is taken up on several agreeing, the way
+    // it is let go.
+    let mut marathon_hits: u32 = 0;
     // While a marathon board is up the timer is the event's running total: it
     // never resets and finishing a game does not happen to it, so the run
     // state machine is fed nothing and records nothing. The board does the
@@ -2136,6 +2172,23 @@ pub async fn run(cfg: Config) -> Result<()> {
                     }
                     tracker = Tracker::new(cfg.detection.clone());
                 }
+                // A marathon belongs to the broadcast it was run in. Left in
+                // force it outlives the stream, and since it suspends the
+                // timer the NEXT broadcast records nothing until three pane
+                // passes read somebody else's board — minutes of a Ninja
+                // Gaiden morning thrown away, and if the next day is another
+                // marathon its slots, names and baselines are laid over the
+                // new board. A stream that only blipped re-establishes the
+                // event from `db::marathon_totals` when the board comes back,
+                // which is what that reconcile is for, and the new session
+                // gets its own tag.
+                if let Some(m) = marathon.take() {
+                    info!("marathon set aside with the broadcast: {}", m.describe());
+                }
+                marathon_tag = None;
+                not_marathon = 0;
+                marathon_hits = 0;
+                marathon_active = false;
                 if let Some(id) = session_id.take() {
                     if let Err(e) = db::update_session_health(&pool, id, &health).await {
                         warn!("failed to update session health: {e:#}");
@@ -2580,6 +2633,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 &mut marathon,
                                 &mut marathon_tag,
                                 &mut not_marathon,
+                                &mut marathon_hits,
                                 session_id,
                                 &mut health,
                                 at_ms,
@@ -3280,6 +3334,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         &mut marathon,
                         &mut marathon_tag,
                         &mut not_marathon,
+                        &mut marathon_hits,
                         session_id,
                         &mut health,
                         at_ms,

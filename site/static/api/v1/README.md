@@ -104,7 +104,9 @@ tracked best, chronological), `streaks`, `golds`, `finishes`
 chronological), `sessions` (`[{id, started_at_ms, ended_at_ms, source,
 tag, attempts, finished, best_ms, frames, parsed, probing, relocks,
 counter_reads}]`, newest first; `source` is `"hls"` for live capture and
-`"vod"` for a VOD re-analysis; `frames`/`parsed` are capture health).
+`"vod"` for a VOD re-analysis; `attempts`/`finished`/`best_ms` count this
+game only, since a broadcast may hold runs of others; `frames`/`parsed` are
+capture health).
 
 ## `report.json`
 
@@ -175,7 +177,8 @@ No timestamp inside: the file is a pure function of the rows.
 - `sessions` — the sessions that started on this day or recorded a run on
   it, oldest first, so every non-null `session_id` resolves within the file:
   `id`, `started_at_ms`, `ended_at_ms` (`null` while ongoing), `source`,
-  `tag`, `attempts`/`finished`/`best_ms` (over the whole session), capture
+  `tag`, `attempts`/`finished`/`best_ms` (over the whole session, counting
+  this feed's game only — a broadcast may hold runs of others), capture
   health `frames`, `parsed`, `probing`, `relocks`, `counter_reads`, and
   `events` (`[{t, k, d}]`, diagnostic). `vod_id` and `vod_created_at_ms`
   appear only where the deployment publishes VOD links and the VOD is known;
