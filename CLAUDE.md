@@ -102,6 +102,15 @@ recorded. `debug.board_log` is what to read when a game is missing — the
 board is cumulative, so an unreadable stretch delays a reading, it does not
 destroy it.
 
+`scripts/import-arcathlon.sh` lands those games in the live database, and it
+is **not** `import-vod.sh`: that one replaces a broadcast *day*, which is
+right for a Ninja Gaiden VOD and destructive here, because he has run Ninja
+Gaiden in the morning and a marathon in the afternoon of the same day (2026
+-07-23 has two VODs and 45 Ninja Gaiden runs the marathon import must not
+touch). The marathon import is additive and scoped to its own VOD by the
+session's `vod_id`, and it re-counts the day's other categories afterwards
+and stops if any went missing. Rehearse it with `LIVE=<a copy>` first.
+
 **And a marathon board is its own answer key**, which is what makes a change
 to it checkable at all. A game he has finished shows his result and one he
 has not reached shows the comparison; in a single frame they are the same
