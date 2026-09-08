@@ -194,7 +194,7 @@ fn within(a: &str, b: &str, allow: usize) -> bool {
 ///   a different name: "Batman" is not "Batman: ROTJ", and "SMB2" is not
 ///   "SMB3 (Warpless)" — both pairs are on his real boards, and merging them
 ///   would turn a marathon into a run.
-fn same_label(a: &str, b: &str) -> bool {
+pub(crate) fn same_label(a: &str, b: &str) -> bool {
     if a.is_empty() || b.is_empty() {
         return false;
     }
