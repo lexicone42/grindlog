@@ -12,10 +12,11 @@
 //! So this module tracks the ROWS. A marathon has no resets — he plays each
 //! game to the end — so every row completes exactly once, and when it does
 //! the board itself prints the authoritative segment and cumulative time.
-//! One completed row is one finished run of that game, filed under the row's
-//! own name (`Astyanax`, `SMB3 (Warpless)`), so his Astyanax times accumulate
-//! across events in the same `runs.game` every stats, report and chat query
-//! already groups by.
+//! One completed row is one finished run of that game, filed under the game's
+//! canonical name — the roster's spelling of it, where a roster is configured
+//! ([`crate::roster`]) — so his Astyanax times accumulate across events in the
+//! same `runs.game` every stats, report and chat query already groups by, and
+//! a pass that read the row "nax" does not start a second history.
 //!
 //! What makes it harder than "a row gained a time":
 //!
@@ -44,7 +45,10 @@
 //!   the board one row longer than it really is.
 //! - **A row's name is read several ways**, and the pane's edge puts a stray
 //!   letter in front of it more often than not, so the spellings are grouped
-//!   before they are counted and the run is filed under the one they agree on.
+//!   before they are counted and the run is filed under the one they agree
+//!   on — and then under the roster's name for that game, because the
+//!   spelling a row agrees on is a reading too, and "nax" and "Astyanax" are
+//!   one game's history or the site shows two.
 //! - **A completed row keeps its time for the rest of the event**, so a
 //!   completion has to be recorded once and only once. Every slot is recorded
 //!   at most once here, and `seed` re-arms that across a restart from what is
@@ -66,9 +70,11 @@
 //! testable against boards copied out of a real broadcast.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::board::{game_matches, Board, BoardRow};
 use crate::config::{Config, GameAlias, GameMode};
+use crate::roster::Rosters;
 use crate::signature::{BoardSignature, Shape};
 use crate::timeparse::{parse_time, time_shaped};
 
@@ -110,8 +116,16 @@ const JUST_NOW_MS: i64 = 180_000;
 pub struct Completion {
     /// Which row of the board (0-based, top down).
     pub slot: usize,
-    /// The row's own name, as the board prints it.
+    /// The name the run is filed under: the roster's spelling of this game
+    /// where the roster knows it, and the row's own name where it does not.
     pub game: String,
+    /// The row's name as the board was read, when that is not what the run is
+    /// filed under. What the roster did to the reading, for the log.
+    pub as_read: Option<String>,
+    /// No roster name fits this row, so the run is filed under the reading.
+    /// Counted in the session's health events: a roster that has gone stale
+    /// must be visible, not silent.
+    pub unmatched: bool,
     /// The event: the `[[games]]` entry's name.
     pub category: String,
     /// The row's segment time — this game's run.
@@ -402,21 +416,41 @@ pub struct Marathon {
     known: Vec<i64>,
     /// Pane passes seen, for the log.
     passes: u32,
+    /// The events this board may be, and the ten games of each. Empty where
+    /// none is configured, and then every row keeps the name as read.
+    rosters: Arc<Rosters>,
+    /// Which of them the rows say this board is, and the names that said so.
+    /// Kept because identifying the board is the expensive part and the names
+    /// stop changing within a few passes of the event starting.
+    roster: Option<usize>,
+    identified_from: Vec<String>,
+    /// Completed rows filed under the name as read because no roster name fit
+    /// them. Reported: a roster gone stale must not fail silently.
+    unmatched: u32,
 }
 
 impl Marathon {
-    pub fn new(category: String) -> Self {
+    pub fn new(category: String, rosters: Arc<Rosters>) -> Self {
         Marathon {
             category,
             slots: Vec::new(),
             numbers: HashMap::new(),
             known: Vec::new(),
             passes: 0,
+            rosters,
+            roster: None,
+            identified_from: Vec::new(),
+            unmatched: 0,
         }
     }
 
     pub fn category(&self) -> &str {
         &self.category
+    }
+
+    /// Completed rows no roster name fit, over the event so far.
+    pub fn unmatched(&self) -> u32 {
+        self.unmatched
     }
 
     /// The cumulative times this event already has runs for. A completion
@@ -445,13 +479,14 @@ impl Marathon {
     }
 
     /// The board's rows as this tracker has settled them, for the log: the
-    /// name of each slot and whether it has been recorded.
+    /// name of each slot, canonicalised where the roster knows it, and
+    /// whether it has been recorded.
     pub fn describe(&self) -> String {
         let names: Vec<String> = self
             .slots
             .iter()
             .map(|s| {
-                let n = s.name().unwrap_or("?");
+                let n = s.name().map_or("?", |n| self.canonical(n).unwrap_or(n));
                 match s.recorded {
                     Some(_) => format!("{n}*"),
                     None => n.to_string(),
@@ -459,12 +494,52 @@ impl Marathon {
             })
             .collect();
         format!(
-            "{} of {} rows recorded over {} passes: {}",
+            "{} of {} rows recorded over {} passes{}{}: {}",
             self.slots.iter().filter(|s| s.recorded.is_some()).count(),
             self.slots.len(),
             self.passes,
+            match self.roster {
+                Some(i) => format!(", roster {}", self.rosters.event_name(i)),
+                None if self.rosters.is_empty() => String::new(),
+                None => ", no roster fits".to_string(),
+            },
+            match self.unmatched {
+                0 => String::new(),
+                n => format!(", {n} unmatched"),
+            },
             names.join(", ")
         )
+    }
+
+    /// The roster's spelling of a row's name, when a roster name fits it.
+    ///
+    /// The board is matched against ONE event's ten games where the rows say
+    /// which event it is, and against the whole pool where they do not — a
+    /// randomized draw crosses every roster, so none of them fits it. See
+    /// [`crate::roster`] for why the difference is the whole point.
+    fn canonical(&self, read: &str) -> Option<&str> {
+        self.rosters.canonical(self.roster, read)
+    }
+
+    /// Work out which roster this board is, from the names its slots have
+    /// settled on. Recomputed only when those names change, which after the
+    /// first few passes of an event they do not.
+    fn identify(&mut self) {
+        if self.rosters.is_empty() {
+            return;
+        }
+        let names: Vec<String> = self
+            .slots
+            .iter()
+            .filter_map(Slot::name)
+            .map(str::to_string)
+            .collect();
+        if names == self.identified_from {
+            return;
+        }
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        self.roster = self.rosters.identify(&borrowed);
+        self.identified_from = names;
     }
 
     /// Does this board still carry rows of this marathon? One row named
@@ -560,6 +635,9 @@ impl Marathon {
             let cells = read_cells(row);
             self.vote(i, cells, arriving, total_ms, at_ms);
         }
+        // Which of the configured events this board is, before anything is
+        // filed under one of its games.
+        self.identify();
         self.harvest(at_ms, total_ms)
     }
 
@@ -708,17 +786,29 @@ impl Marathon {
             }
             // A run has to be filed under a name. A completed row keeps its
             // name for the rest of the event, so waiting costs a pass.
-            let Some(game) = self.slots[i].name().map(str::to_string) else {
+            let Some(read) = self.slots[i].name().map(str::to_string) else {
                 continue;
             };
             let Some((segment_ms, derived)) = self.segment_for(i, cum) else {
                 continue;
             };
+            // The roster's spelling of the game, so a reading missing its
+            // first letter is the same game's history as a clean one. Where
+            // no roster name fits, the reading stands and is counted.
+            let canonical = self.canonical(&read).map(str::to_string);
+            let unmatched = canonical.is_none();
+            if unmatched {
+                self.unmatched += 1;
+            }
+            let game = canonical.unwrap_or_else(|| read.clone());
+            let as_read = (game != read).then_some(read);
             self.slots[i].recorded = Some(cum);
             self.known.push(cum);
             out.push(Completion {
                 slot: i,
                 game,
+                as_read,
+                unmatched,
                 category: self.category.clone(),
                 segment_ms,
                 cumulative_ms: cum,
@@ -1274,11 +1364,19 @@ mod tests {
         }
     }
 
+    /// A tracker with no rosters, so a completion is filed under the row's
+    /// own name. These cases are about what the BOARD says is finished, off
+    /// rows written for the purpose; what a name is folded onto is measured
+    /// on real broadcasts, in the fixtures below and in [`crate::roster`].
+    fn tracker() -> Marathon {
+        Marathon::new("Arcathlon".into(), Arc::default())
+    }
+
     /// A randomized event: undrawn rows print nothing, and a row that gains
     /// times is a finished game. Two passes have to agree before it counts.
     #[test]
     fn randomized_row_gaining_times_is_a_completion() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let undrawn = || row("22?", &[]);
         let pass = |first: &[&str]| {
             board(
@@ -1317,11 +1415,101 @@ mod tests {
         }
     }
 
+    /// A completion is filed under the roster's name for the game, whatever
+    /// the row's own spelling settled on — and a row the roster does not know
+    /// keeps its reading, says so, and is counted.
+    ///
+    /// The board here is his event #4 as OCR left it: three rows short of
+    /// their first letters, one numeral written `Il`, and a fourth row that
+    /// is nothing the rosters have ever seen.
+    #[test]
+    fn a_completion_is_filed_under_the_rosters_name_for_the_game() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/arcathlon-rosters.toml");
+        let mut m = Marathon::new(
+            "Arcathlon".into(),
+            Arc::new(crate::roster::Rosters::load(&path).expect("the shipped rosters")),
+        );
+        let pass = |astyanax: &[&str]| {
+            board(
+                Some("Arcathlon #4"),
+                vec![
+                    row("nax", astyanax),
+                    row("stievania Il", &["46:59", "1:12:45"]),
+                    row("y Kid", &["28:03", "1:40:58"]),
+                    row("oonies Il", &["20:28", "2:01:26"]),
+                    row("Hebereke", &["28:33", "2:29:59"]),
+                    row("tie Samson", &["12:47", "2:42:46"]),
+                    row("anic Restaurant", &["16:49", "2:59:35"]),
+                    row("hadowgate", &["15:02", "3:14:37"]),
+                    row("olstice", &["10:20", "3:24:57"]),
+                    row("Zapper Zone", &["48:54", "4:13:51"]),
+                ],
+            )
+        };
+        assert!(m
+            .observe(&pass(&["23:19", "23:19"]), 1_000, Some(0))
+            .is_empty());
+        assert!(m
+            .observe(&pass(&["23:19", "23:19"]), 61_000, Some(60_000))
+            .is_empty());
+        // Astyanax finishes a second off its comparison time.
+        assert!(m
+            .observe(&pass(&["23:20", "23:20"]), 121_000, Some(1_400_000))
+            .is_empty());
+        let seen = m.observe(&pass(&["23:20", "23:20"]), 181_000, Some(1_400_000));
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].game, "Astyanax");
+        assert_eq!(seen[0].as_read.as_deref(), Some("nax"));
+        assert!(!seen[0].unmatched);
+        assert_eq!(m.unmatched(), 0);
+        // The board describes itself by the roster it turned out to be, and
+        // in that roster's spelling.
+        let said = m.describe();
+        assert!(said.contains("roster #4"), "{said}");
+        assert!(
+            said.contains("Astyanax*, Castlevania II, Cowboy Kid"),
+            "{said}"
+        );
+        // And the row nothing knows is named in it as the board printed it.
+        assert!(said.contains("Zapper Zone"), "{said}");
+    }
+
+    /// A row no roster name fits is still recorded — under the name as read,
+    /// flagged, and counted, so a roster gone stale is visible.
+    #[test]
+    fn a_row_no_roster_knows_is_recorded_as_read_and_counted() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/arcathlon-rosters.toml");
+        let mut m = Marathon::new(
+            "Arcathlon".into(),
+            Arc::new(crate::roster::Rosters::load(&path).expect("the shipped rosters")),
+        );
+        let pass = |cells: &[&str]| {
+            board(
+                Some("Randomized Arcathlon"),
+                vec![row("Zapper Zone", cells), row("22?", &[])],
+            )
+        };
+        assert!(m.observe(&pass(&[]), 1_000, Some(0)).is_empty());
+        assert!(m.observe(&pass(&[]), 61_000, Some(60_000)).is_empty());
+        assert!(m
+            .observe(&pass(&["21:48", "21:48"]), 121_000, Some(1_308_000))
+            .is_empty());
+        let seen = m.observe(&pass(&["21:48", "21:48"]), 181_000, Some(1_308_000));
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].game, "Zapper Zone");
+        assert_eq!(seen[0].as_read, None);
+        assert!(seen[0].unmatched);
+        assert_eq!(m.unmatched(), 1);
+        assert!(m.describe().contains("1 unmatched"), "{}", m.describe());
+    }
+
     /// A numbered event prints comparison times from the first frame; only a
     /// CHANGE is a completion, and it can be five seconds.
     #[test]
     fn numbered_event_records_the_change_not_the_comparison() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let pass = |first: &[&str]| {
             board(
                 Some("Arcathlon #6"),
@@ -1355,7 +1543,7 @@ mod tests {
     /// marathon total; a completion is at it.
     #[test]
     fn a_cumulative_far_ahead_of_the_total_is_not_a_completion() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let pass = |second: &[&str]| {
             board(
                 Some("Arcathlon #6"),
@@ -1387,7 +1575,7 @@ mod tests {
     /// back. Nothing is filed against the wrong game.
     #[test]
     fn a_dropped_row_does_not_shift_the_rest() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let full = board(
             Some("Arcathlon #3"),
             vec![
@@ -1433,7 +1621,7 @@ mod tests {
     /// cumulative slipping a digit. The slip never repeats, so it never wins.
     #[test]
     fn a_single_frame_digit_slip_is_not_recorded() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let pass = |first: &[&str], second: &[&str]| {
             board(
                 Some("Randomized Arcathlon"),
@@ -1464,7 +1652,7 @@ mod tests {
     /// difference between cumulatives is the check, and eventually the answer.
     #[test]
     fn a_segment_that_contradicts_the_cumulatives_is_not_taken() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let pass = |first: &[&str], second: &[&str]| {
             board(
                 Some("Randomized Arcathlon"),
@@ -1494,7 +1682,7 @@ mod tests {
     /// What is already in the database is not recorded again after a restart.
     #[test]
     fn seeded_cumulatives_are_not_recorded_twice() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         m.seed(&[1_308_000]);
         let pass = board(
             Some("Randomized Arcathlon"),
@@ -1517,7 +1705,7 @@ mod tests {
     /// the same slot.
     #[test]
     fn an_undrawn_row_gaining_a_name_keeps_its_slot() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let before = board(
             Some("Randomized Arcathlon"),
             vec![row("Astyanax", &["21:48", "21:48"]), row("22?", &[])],
@@ -1547,7 +1735,7 @@ mod tests {
     /// puts the finish at 1800.
     #[test]
     fn the_first_row_of_a_randomized_day_arrives_with_its_time() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let empty = board(Some("Randomized Arcathion"), vec![]);
         for t in 0..6 {
             assert!(m.observe(&empty, t * 60_000, Some(t * 60_000)).is_empty());
@@ -1569,7 +1757,7 @@ mod tests {
     /// total.
     #[test]
     fn a_whole_board_arriving_at_once_is_comparison_times() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let full = board(
             Some("Arcathlon #3"),
             vec![
@@ -1587,7 +1775,7 @@ mod tests {
     /// finished before the bot looked; it is not this session's to record.
     #[test]
     fn a_row_the_total_has_left_behind_is_not_recorded() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let done = board(
             Some("Randomized Arcathion"),
             vec![row("Astyanax", &["21:48", "21:48"])],
@@ -1606,7 +1794,7 @@ mod tests {
     /// completion never goes back to the value it replaced.
     #[test]
     fn a_misread_that_repeats_on_the_next_pass_is_still_a_misread() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let pass = |c: &str| {
             board(
                 Some("Arcathion #4"),
@@ -1653,7 +1841,7 @@ mod tests {
     /// row's time.
     #[test]
     fn nothing_is_recorded_without_a_marathon_total() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let pass = |c: &[&str]| {
             board(
                 Some("Arcathlon #4"),
@@ -1706,7 +1894,7 @@ mod tests {
         let wreckage = [5_058_i64, 155_888_000, 3_558_020];
         let first_done = Some(2_483_000);
         let run = |totals: [Option<i64>; 2]| -> Vec<Completion> {
-            let mut m = Marathon::new("Arcathlon".into());
+            let mut m = tracker();
             for t in 0..2 {
                 m.observe(
                     &pass(&["34:41", "34:41"], &["8:13", "42:54"]),
@@ -1762,7 +1950,7 @@ mod tests {
         // started, so they are baselines, not measurements. VOD 2827296024's
         // Cowboy Kid row, whose lost minus sign files its SEGMENT as a
         // cumulative, is refused here for ever however well the columns fit.
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let joined = |third: &[&str]| {
             board(
                 Some("Arcathion #4"),
@@ -1790,7 +1978,7 @@ mod tests {
         // game took 8:22, its own segment column says 40 minutes. The board is
         // vouching for nothing, so only the timer could speak, and it is the
         // wreckage a dead timer parses to.
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let pass = |first: &[&str], second: &[&str]| {
             board(
                 Some("Arcathion #5"),
@@ -1821,7 +2009,7 @@ mod tests {
     /// above a row already recorded above it is cells read off the wrong row.
     #[test]
     fn a_cumulative_out_of_order_with_the_recorded_rows_is_refused() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let pass = |first: &[&str], second: &[&str]| {
             board(
                 Some("Randomized Arcathlon"),
@@ -1918,7 +2106,7 @@ mod tests {
         // With one whose rows these are, the board changes nothing — and the
         // rows are still read, which is how the day's third game gets
         // recorded at all.
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         m.observe(&pass(), 0, Some(1_278_930));
         assert!(matches!(classify(&pass(), &cfg, Some(&m)), Verdict::Silent));
         // The board he really does switch to at the end of the day names
@@ -1977,7 +2165,7 @@ mod tests {
         // And the point of all this: started in time, the completion is
         // recognised. Measured on VOD 2858870362, where the row appears at
         // t=1790 with the marathon total standing at its 21:48.
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let total = Some(1_309_320);
         let seen = alone(Some("Randomized Arcathion"));
         assert!(m.observe(&seen, 1_790_000, total).is_empty());
@@ -1996,7 +2184,7 @@ mod tests {
     /// at a time the runner never posted.
     #[test]
     fn a_restart_does_not_record_a_finished_row_again() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         // Ninja Gaiden III, 15:52, recorded before the restart.
         m.seed(&[952_000]);
         let pass = |first: &[&str]| {
@@ -2040,7 +2228,7 @@ mod tests {
     /// row's real value into a change.
     #[test]
     fn a_baseline_needs_the_spread_a_cumulative_needs() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let pass = |first: &[&str], cum: &str| {
             board(
                 Some("Arcathion #4"),
@@ -2088,7 +2276,7 @@ mod tests {
     /// the row above was refused for the rest of the event.
     #[test]
     fn the_panes_footer_on_a_row_is_not_a_row_with_no_time() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let pass = |last: BoardRow| {
             board(
                 Some("Arcathion #9"),
@@ -2123,7 +2311,7 @@ mod tests {
         }
         // A "???" row with no cells is the opposite case and still means
         // what it says: a slot not yet drawn has no time.
-        let mut r = Marathon::new("Arcathlon".into());
+        let mut r = tracker();
         let undrawn = |first: &[&str]| {
             board(
                 Some("Randomized Arcathion"),
@@ -2155,7 +2343,7 @@ mod tests {
     /// so that the board's arithmetic closes the way a real one does.
     #[test]
     fn a_settled_segment_column_refuses_the_cumulative_it_contradicts() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let pass = |second: &[&str], last: &[&str]| {
             board(
                 Some("Arcathion #8"),
@@ -2228,7 +2416,7 @@ mod tests {
         let cmp2 = &["28:27", "3:18:42"][..];
         // River City Ransom finishes at 2:57:42, which the tracker measures.
         let run = |mismatched: bool| -> Vec<Completion> {
-            let mut m = Marathon::new("Arcathlon".into());
+            let mut m = tracker();
             for t in 0..2 {
                 m.observe(&pass(cmp1, cmp2), t * 60_000, Some(2_193_000));
             }
@@ -2279,7 +2467,7 @@ mod tests {
     /// while the marathon total stood at 3:57:30.
     #[test]
     fn a_cumulative_hours_behind_the_total_is_not_a_completion() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         let pass = |third: &[&str], fourth: &[&str]| {
             board(
                 Some("Arcathion #4"),
@@ -2348,14 +2536,17 @@ mod tests {
     #[derive(serde::Deserialize)]
     struct FGame {
         order: usize,
+        /// The game, spelled the way this board prints it.
         game: String,
         /// The spelling the tracker is expected to file the run under, where
-        /// OCR does not give the board's own — "Litle Samson" for "Little
-        /// Samson". Absent means it reads the name exactly. `runs.game` is
-        /// grouped by exact string, so this is checked exactly: a change in
-        /// what a row settles on is a change in where its history goes.
+        /// that is not the board's own: the roster's name for the game, for a
+        /// board that abbreviates it ("Super Mario Bros 2" for "SMB 2"), and
+        /// the reading itself where no roster covers the board at all.
+        /// Absent means the two are the same. `runs.game` is grouped by exact
+        /// string, so this is checked exactly: a change in where a row's
+        /// history goes must not pass unremarked.
         #[serde(default)]
-        recorded_as: Option<String>,
+        filed_as: Option<String>,
         segment: String,
         cumulative: String,
         ended_s: i64,
@@ -2363,7 +2554,7 @@ mod tests {
 
     impl FGame {
         fn filed_as(&self) -> &str {
-            self.recorded_as.as_deref().unwrap_or(&self.game)
+            self.filed_as.as_deref().unwrap_or(&self.game)
         }
     }
 
@@ -2379,15 +2570,22 @@ mod tests {
     }
 
     /// The configuration the fixtures are replayed against: one entry that
-    /// tracks boards, which is what a deployment following this streamer has.
+    /// tracks boards, pointed at the rosters the deployment ships, which is
+    /// what a deployment following this streamer has.
     fn board_config() -> Config {
         let mut cfg = Config::for_test_with_min_final(660_000);
         cfg.game.name = "Ninja Gaiden (NES)".into();
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/arcathlon-rosters.toml");
         cfg.games = vec![GameAlias {
             name: "Arcathlon".into(),
             category: Some("10 games".into()),
             r#match: vec!["arcath".into(), "randomized".into()],
             mode: GameMode::Board,
+            roster: Some(path.display().to_string()),
+            rosters: Arc::new(
+                crate::roster::Rosters::load(&path).expect("assets/arcathlon-rosters.toml"),
+            ),
         }];
         cfg
     }
@@ -2458,7 +2656,7 @@ mod tests {
                         if hits < crate::app::MARATHON_TAKE_UP {
                             continue;
                         }
-                        let mut m = Marathon::new(alias.name.clone());
+                        let mut m = Marathon::new(alias.name.clone(), alias.rosters.clone());
                         m.seed(&recorded);
                         state = Some(m);
                     }
@@ -3282,14 +3480,14 @@ mod tests {
         // `disowns` is not the negation of `claims`: a pass that read no
         // names says nothing either way, and neither does a tracker that has
         // not settled on three names of its own.
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         for n in 0..4 {
             m.observe(&board(None, old(&["31:37", "31:37"])), n * 60_000, Some(0));
         }
         assert!(m.disowns(&board(None, new(&["11:03", "53:36"]))));
         assert!(!m.disowns(&board(None, old(&["31:37", "31:37"]))));
         assert!(!m.disowns(&board(None, vec![])));
-        assert!(!Marathon::new("Arcathlon".into()).disowns(&board(None, new(&[]))));
+        assert!(!tracker().disowns(&board(None, new(&[]))));
     }
 
     /// The pane's edge reads as a letter in front of the name more often than
@@ -3297,7 +3495,7 @@ mod tests {
     /// are counted — but only where the difference is a smudge, not a word.
     #[test]
     fn a_letter_in_front_of_the_name_does_not_win_the_vote() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         // The real counts from VOD 2826325488's second row.
         let mut pass = |name: &str, times: usize| {
             for t in 0..times {
@@ -3316,7 +3514,7 @@ mod tests {
         // A whole word in front is a different reading, not a smudge: the
         // board really does print "SMB3 (Warpless)", and a pass that lost
         // "SMB3" must not rename the game.
-        let mut m2 = Marathon::new("Arcathlon".into());
+        let mut m2 = tracker();
         for t in 0..10 {
             let n = if t % 3 == 0 {
                 "(Warpless)"
@@ -3393,7 +3591,7 @@ mod tests {
 
     #[test]
     fn the_tag_names_the_event_and_its_number() {
-        let mut m = Marathon::new("Arcathlon".into());
+        let mut m = tracker();
         assert_eq!(m.tag(), "Arcathlon");
         let b = board(Some("Arcathion #6"), vec![]);
         m.observe(&b, 0, None);
@@ -3409,6 +3607,8 @@ mod tests {
             category: Some("10 games".into()),
             r#match: vec!["arcath".into()],
             mode: GameMode::Board,
+            roster: None,
+            rosters: Arc::default(),
         }];
         let marathon = || {
             board(

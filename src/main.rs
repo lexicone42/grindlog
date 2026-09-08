@@ -12,6 +12,7 @@ mod locate;
 mod marathon;
 mod ocr;
 mod report;
+mod roster;
 mod sanity;
 mod signature;
 mod splits;

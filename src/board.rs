@@ -1001,6 +1001,8 @@ mod tests {
             // miss the very frames the board reader was built for.
             r#match: vec!["arcath".into(), "randomized".into()],
             mode: crate::config::GameMode::Runs,
+            roster: None,
+            rosters: std::sync::Arc::default(),
         }];
         cfg
     }

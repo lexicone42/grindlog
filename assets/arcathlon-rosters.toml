@@ -1,0 +1,186 @@
+# The rosters of a marathon event, one `[[event]]` per board.
+#
+# A marathon board prints ten game names and the bot records each completed
+# row under the name it read. OCR loses a leading character ("nax" for
+# Astyanax), damages a numeral ("Castlevania Il"), and the runner abbreviates
+# his own board differently on a randomized draw ("Kabuki Q Fighter"), so one
+# game accumulates a history under half a dozen spellings and `runs.game`
+# groups by exact string. This file is the list of names those readings are
+# folded onto: the bot works out which roster a board is from the names it
+# read, then files every row of it under one of that roster's ten.
+#
+# Which is why the rosters, and not just a list of ninety names, are what is
+# needed. "Castlevania" fits three of the ninety, "Duck Tales" two and "Mega
+# Man" six — but each event holds exactly one of each family, so inside one
+# roster there is nothing to confuse and a fragment of a name is enough. A
+# board that fits no roster (a randomized draw crosses all nine) falls back to
+# the whole pool, where a trailing sequel number then has to agree exactly.
+#
+# It is data, not code: correcting a name here needs no rebuild, and another
+# streamer's event is another file. Point a board-mode `[[games]]` entry at
+# one with `roster = "assets/arcathlon-rosters.toml"`.
+#
+# These ninety are read off 38 replayed broadcasts, July 9 to August 28 2026 —
+# four full cycles of his nine numbered events, so each name is a vote across
+# cycles rather than one reading. Names are spelled as the board prints them,
+# abbreviations and all, because that is what a run is filed under. Games are
+# listed in the order the board shows them, which for these events is
+# alphabetical. No randomized draw over those broadcasts produced a game
+# outside this list.
+
+[[event]]
+name = "#1"
+# The board says just "Arcathlon" on this one — no number.
+games = [
+  "Batman",
+  "Castlevania",
+  "Ninja Gaiden",
+  "Ninja Gaiden II",
+  "Ninja Gaiden III",
+  "Super Mario Bros",
+  "Super Mario Bros 2",
+  "Super Mario Bros 3",
+  "Zelda",
+  "Zelda II",
+]
+
+[[event]]
+name = "#2"
+games = [
+  "Battletoads",
+  "Blaster Master",
+  "Contra",
+  "Guerrilla War",
+  "Marble Madness",
+  "Mega Man",
+  "Punch Out",
+  "Robowarrior",
+  "Rygar",
+  "TMNT 1",
+]
+
+[[event]]
+name = "#3"
+games = [
+  "Arkista's Ring",
+  "Batman: ROTJ",
+  "Bionic Commando",
+  "Chip N Dale",
+  "Darkwing Duck",
+  "G.I. Joe: RAH",
+  "Little Nemo",
+  "Mega Man 2",
+  "TMNT 2",
+  "Xexyz",
+]
+
+[[event]]
+name = "#4"
+games = [
+  "Astyanax",
+  "Castlevania II",
+  "Cowboy Kid",
+  "Goonies II",
+  "Hebereke",
+  "Little Samson",
+  "Panic Restaurant",
+  "Shadowgate",
+  "Solstice",
+  "TMNT III",
+]
+
+[[event]]
+name = "#5"
+games = [
+  "Castlevania III",
+  "Duck Tales",
+  "Journey to Silius",
+  "Kabuki Quantum Fighter",
+  "Kirby's Adventure",
+  "Metroid",
+  "Power Blade",
+  "Shadow of the Ninja",
+  "Shatterhand",
+  "Vice: Project Doom",
+]
+
+[[event]]
+name = "#6"
+games = [
+  "Felix the Cat",
+  "Gremlins 2",
+  "Jackal",
+  "Jurassic Park",
+  "Mega Man 3",
+  "NES Open",
+  "Samurai Pizza Cats",
+  "Super C",
+  "Tiny Toon Adventures",
+  "Wacky Races",
+]
+
+[[event]]
+name = "#7"
+games = [
+  "Bucky O'Hare",
+  "Chip 'n Dale 2",
+  "Crystal Palace",
+  "Déjà Vu",
+  "D.S. Indy Heat",
+  "Gimmick!",
+  "Jackie Chan",
+  "LOTW",
+  "Little Mermaid",
+  "Mega Man 4",
+]
+
+[[event]]
+name = "#8"
+games = [
+  "Clash at Demonhead",
+  "Cobra Triangle",
+  "Duck Tales 2",
+  "Faxanadu",
+  "Hatris",
+  "Jaws",
+  "Mega Man 5",
+  "Mighty Final Fight",
+  "Spy vs Spy",
+  "Wizards and Warriors",
+]
+
+[[event]]
+name = "#9"
+games = [
+  "Adventure Island 4",
+  "Hammerin' Harry",
+  "King Kong 2",
+  "M.C. Kids",
+  "Mega Man 6",
+  "Metal Storm",
+  "Monster in My Pocket",
+  "River City Ransom",
+  "Rockin' Kats",
+  "Strider",
+]
+
+# Names worth an eye, and why they are spelled the way they are:
+#
+#   "LOTW" (#7) is Legacy of the Wizard, and the randomized boards write it
+#     "Leg of Wizard" — he abbreviates the same game more than one way. Both
+#     read as initialisms of the full title, which is how they are folded
+#     together.
+#   "Kabuki Quantum Fighter" (#5) becomes "Kabuki Q Fighter" when randomized.
+#   "Duck Tales" (#5) and "Duck Tales 2" (#8) are the two of them; the second
+#     is printed "DuckTales 2" as often as not.
+#   "Chip N Dale" (#3) and "Chip 'n Dale 2" (#7) are the two Rescue Rangers.
+#   "Adventure Island 4" (#9) read poorly on every pass of every broadcast;
+#     the NUMBER IS A GUESS and is the one name here nothing corroborates.
+#   "Crystal Palace" (#7) is exactly what the board prints.
+#   "Jackie Chan" (#7) is Jackie Chan's Action Kung Fu.
+#   "Déjà Vu" (#7) is here because a colour crop found it: every OCR pass
+#     discarded it, the accents leaving no three ASCII letters in a row.
+#   "D.S. Indy Heat" (#7) is the board's own abbreviation of Danny Sullivan's
+#     Indy Heat.
+#   One Mega Man per event: 1 in #2, then 2, 3, 4, 5 and 6 in #3, #6, #7, #8
+#     and #9.

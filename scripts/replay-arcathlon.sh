@@ -9,7 +9,9 @@
 # state machine has nothing to read. The board does. The config below turns
 # on `[[games]] mode = "board"` (see the README, "Marathon days"), and every
 # row that gains a time is recorded as a finished run of that game — game
-# "Astyanax", category "Arcathlon" — in its own database.
+# "Astyanax", category "Arcathlon" — in its own database, under the name
+# assets/arcathlon-rosters.toml gives that game rather than under whatever OCR
+# read off the row.
 #
 # Per VOD it writes, under $ARCA_OUT (default arcathlon-db/):
 #   vod-<id>.db          runs, one per completed row, and the session
@@ -135,6 +137,11 @@ name = "Arcathlon"
 category = "10 games"
 match = ["arcath", "randomized"]
 mode = "board"
+# One canonical name per game. Without it a row is filed under whatever OCR
+# read — "nax" for Astyanax, "Castlevania Il", "SMB2" — and each spelling is
+# its own history in runs.game. Path is from the repo root, which this script
+# has already cd'd to.
+roster = "assets/arcathlon-rosters.toml"
 
 [attempts_counter]
 enabled = false

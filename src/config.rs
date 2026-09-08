@@ -109,6 +109,17 @@ pub struct GameAlias {
     /// board is on screen: the timer is a marathon total, not a run.
     #[serde(default)]
     pub mode: GameMode,
+    /// Path to a roster file (`mode = "board"` only): the events this board
+    /// runs and the ten games of each, which every completed row's name is
+    /// folded onto so one game keeps one history. See
+    /// `assets/arcathlon-rosters.toml` and [`crate::roster`]. Without one, a
+    /// row is filed under the name as read and a game spelled two ways is two
+    /// games.
+    #[serde(default)]
+    pub roster: Option<String>,
+    /// The roster file, read by [`Config::load`]. Not a field of the TOML.
+    #[serde(skip)]
+    pub rosters: std::sync::Arc<crate::roster::Rosters>,
 }
 
 /// Tolerance for the streamer nudging the LiveSplit window a few pixels.
@@ -666,6 +677,22 @@ impl Config {
             .map(|m| m.to_ascii_lowercase())
             .collect();
         cfg.validate()?;
+        // The rosters a board-mode entry names. Read here rather than at the
+        // first board, so a path that is wrong fails at startup — where the
+        // supervisor and the rollout see it — instead of halfway through an
+        // event.
+        for g in &mut cfg.games {
+            let Some(path) = g.roster.as_deref() else {
+                continue;
+            };
+            let rosters = crate::roster::Rosters::load(Path::new(path))?;
+            let (events, games) = rosters.size();
+            tracing::info!(
+                "[[games]] {:?}: {events} roster(s), {games} games from {path}",
+                g.name
+            );
+            g.rosters = std::sync::Arc::new(rosters);
+        }
         Ok(cfg)
     }
 
@@ -780,6 +807,15 @@ impl Config {
                      a board-mode entry must name a different board",
                     g.name,
                     self.game.name
+                );
+            }
+            // Only a board has rows to canonicalise, so a roster on an entry
+            // tracked by the timer is a misunderstanding worth saying so.
+            if g.roster.is_some() && g.mode != GameMode::Board {
+                bail!(
+                    "[[games]] entry {:?} has a roster but is not mode = \"board\"; \
+                     a roster names the games of a board's rows",
+                    g.name
                 );
             }
         }
@@ -1038,6 +1074,53 @@ mod tests {
              [[games]]\nname = \"Arcathlon\"\nmatch = [\"arcath\"]\n",
         )
         .is_ok());
+    }
+
+    /// A roster belongs to a board and nowhere else, and a configuration
+    /// written before this field means exactly what it did: no roster, every
+    /// row filed under the name as read.
+    #[test]
+    fn a_roster_belongs_to_a_board_entry() {
+        let cfg = parse(
+            "[stream]\nchannel = \"x\"\n[[games]]\nname = \"Arcathlon\"\nmatch = [\"arcath\"]\n\
+             mode = \"board\"\nroster = \"assets/arcathlon-rosters.toml\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.games[0].roster.as_deref(),
+            Some("assets/arcathlon-rosters.toml")
+        );
+        // `parse` does not read the file; `Config::load` does, and the
+        // deployment's own config is loaded by `repository_configs_parse`.
+        assert!(cfg.games[0].rosters.is_empty());
+        let err = parse(
+            "[stream]\nchannel = \"x\"\n[[games]]\nname = \"A\"\nmatch = [\"a\"]\n\
+             roster = \"assets/arcathlon-rosters.toml\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not mode = \"board\""), "{err}");
+        let cfg =
+            parse("[stream]\nchannel = \"x\"\n[[games]]\nname = \"A\"\nmatch = [\"a\"]\n").unwrap();
+        assert_eq!(cfg.games[0].roster, None);
+        assert!(cfg.games[0].rosters.is_empty());
+    }
+
+    /// A roster path that is not there fails at startup, where the rollout
+    /// sees it, rather than at the first board of an event.
+    #[test]
+    fn a_missing_roster_file_is_a_startup_failure() {
+        let dir = std::env::temp_dir().join(format!("ngtt-roster-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cfg.toml");
+        std::fs::write(
+            &path,
+            "[stream]\nchannel = \"x\"\n[[games]]\nname = \"Arcathlon\"\nmatch = [\"arcath\"]\n\
+             mode = \"board\"\nroster = \"no/such/rosters.toml\"\n",
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err();
+        assert!(err.to_string().contains("no/such/rosters.toml"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
