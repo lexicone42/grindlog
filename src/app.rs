@@ -1279,6 +1279,7 @@ fn apply_identity(
     fp: &identity::Fingerprint,
     pane_game: &mut Option<String>,
     id: &mut identity::Identity,
+    last_shape: &mut Option<String>,
     health: &mut db::SessionHealth,
     at_ms: i64,
 ) {
@@ -1309,6 +1310,27 @@ fn apply_identity(
         }
     }
     let reading = fp.read(title, category, board_read);
+    let verdict = id.verdict(&reading);
+    // What the pass actually saw, once per distinct shape rather than once
+    // a minute. Without this the only thing the log ever showed was the
+    // transitions, so a pass that disagreed without convicting — a board
+    // whose category is the same generic "Any%" and whose rows and counter
+    // are illegible — left no trace at all, which is the one shape that can
+    // quietly record another game as this one.
+    let shape = format!("{}: {}", verdict.label(), reading.describe());
+    if last_shape.as_deref() != Some(shape.as_str()) {
+        if verdict == identity::Verdict::Undecided {
+            info!(
+                "layout identity undecided on {:?}: {} — not enough to suspend",
+                title.unwrap_or("an unreadable board"),
+                reading.describe()
+            );
+        } else {
+            debug!("layout identity {shape} on {title:?}");
+        }
+        health.event(at_ms, "identity", shape.clone());
+        *last_shape = Some(shape);
+    }
     let Some(ok) = id.observe(&reading) else {
         return;
     };
@@ -2088,6 +2110,9 @@ pub async fn run(cfg: Config) -> Result<()> {
         .await?,
     );
     let mut pane_identity = identity::Identity::new(&cfg);
+    // The last identity reading logged, so a verdict is reported when it
+    // changes rather than once a minute for hours.
+    let mut pane_identity_shape: Option<String> = None;
     // The board reader's last snapshot, in shadow mode.
     let mut last_board_snapshot: Option<board::Snapshot> = None;
     // The marathon in progress, when the board is one a `[[games]]` entry
@@ -2290,13 +2315,14 @@ pub async fn run(cfg: Config) -> Result<()> {
                         warn!("failed to close session {id}: {e:#}");
                     } else {
                         info!(
-                            "session #{id} closed ({} of {} frames read, {} layout events, {} OCR passes skipped as static, glyph reader {} read / {} declined)",
+                            "session #{id} closed ({} of {} frames read, {} layout events, {} OCR passes skipped as static, glyph reader {} read / {} declined; identity {})",
                             health.parsed,
                             health.frames,
                             health.events.len(),
                             ocr_skipped,
                             glyph_hits,
-                            glyph_declines
+                            glyph_declines,
+                            pane_identity.tally().describe()
                         );
                     }
                 }
@@ -2709,6 +2735,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 &fingerprint,
                                 &mut pane_game,
                                 &mut pane_identity,
+                                &mut pane_identity_shape,
                                 &mut health,
                                 at_ms,
                             );
@@ -3417,6 +3444,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         &fingerprint,
                         &mut pane_game,
                         &mut pane_identity,
+                        &mut pane_identity_shape,
                         &mut health,
                         at_ms,
                     );
@@ -4025,7 +4053,17 @@ mod tests {
             category: None,
             refs: Vec::new(),
         };
-        apply_identity(&readings, &Board::default(), cfg, fp, game, id, health, 0);
+        apply_identity(
+            &readings,
+            &Board::default(),
+            cfg,
+            fp,
+            game,
+            id,
+            &mut None,
+            health,
+            0,
+        );
         id.ok()
     }
 
