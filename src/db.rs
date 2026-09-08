@@ -841,6 +841,10 @@ pub async fn runs_brief(
         .collect())
 }
 
+/// One (game, category) pair and what the database holds for it. Every
+/// pair, not just the configured one: the page leads with the game this
+/// deployment follows and lists the rest from here, and a marathon day
+/// puts ten games in the database that have no page of their own.
 #[derive(Debug, Clone, Serialize)]
 pub struct GameSummary {
     pub game: String,
@@ -848,6 +852,11 @@ pub struct GameSummary {
     pub best_ms: Option<i64>,
     pub finished: i64,
     pub attempts: i64,
+    /// When it was first and last attempted. A game he ran once in a
+    /// marathon in July and a game he is grinding this week are different
+    /// things, and an attempt count alone does not say which is which.
+    pub first_at_ms: Option<i64>,
+    pub last_at_ms: Option<i64>,
 }
 
 pub async fn summaries(pool: &SqlitePool) -> Result<Vec<GameSummary>> {
@@ -855,7 +864,8 @@ pub async fn summaries(pool: &SqlitePool) -> Result<Vec<GameSummary>> {
         "SELECT game, category, \
          MIN(CASE WHEN outcome = 'finished' THEN final_time_ms END) AS best_ms, \
          COALESCE(SUM(CASE WHEN outcome = 'finished' THEN 1 ELSE 0 END), 0) AS finished, \
-         COUNT(*) AS attempts \
+         COUNT(*) AS attempts, \
+         MIN(started_at_ms) AS first_at_ms, MAX(started_at_ms) AS last_at_ms \
          FROM runs GROUP BY game, category ORDER BY game, category",
     )
     .fetch_all(pool)
@@ -868,6 +878,8 @@ pub async fn summaries(pool: &SqlitePool) -> Result<Vec<GameSummary>> {
             best_ms: r.get("best_ms"),
             finished: r.get("finished"),
             attempts: r.get("attempts"),
+            first_at_ms: r.get("first_at_ms"),
+            last_at_ms: r.get("last_at_ms"),
         })
         .collect())
 }
@@ -992,6 +1004,42 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// `summaries` is what the page's other-games list is built from, so
+    /// it has to cover every game the database holds rather than the one
+    /// the deployment follows, and it has to say when each was played: a
+    /// game run once in a marathon in July and a game being ground this
+    /// week are different things, and an attempt count cannot tell them
+    /// apart.
+    #[tokio::test]
+    async fn summaries_cover_every_game_and_say_when_it_was_played() {
+        let (_dir, pool) = test_pool().await;
+        for r in [
+            run("smb", 1, 1_000, Some(300_000)),
+            run("smb", 2, 9_000, None),
+            run("smb", 3, 5_000, Some(295_000)),
+            run("astyanax", 1, 7_000, Some(1_308_000)),
+        ] {
+            insert_run(&pool, r).await.unwrap();
+        }
+        let s = summaries(&pool).await.unwrap();
+        assert_eq!(s.len(), 2, "one row per game, whatever is configured");
+
+        let smb = s.iter().find(|x| x.game == "smb").unwrap();
+        assert_eq!(smb.attempts, 3);
+        assert_eq!(smb.finished, 2);
+        assert_eq!(smb.best_ms, Some(295_000));
+        // The span covers every run, finished or not: the reset at 9000 is
+        // the last time he played it, and a list ordered by recency that
+        // ignored resets would put a day of failed attempts before a day
+        // he never opened the game.
+        assert_eq!(smb.first_at_ms, Some(1_000));
+        assert_eq!(smb.last_at_ms, Some(9_000));
+
+        let one = s.iter().find(|x| x.game == "astyanax").unwrap();
+        assert_eq!((one.attempts, one.finished), (1, 1));
+        assert_eq!(one.first_at_ms, one.last_at_ms, "played once, one moment");
     }
 
     #[tokio::test]

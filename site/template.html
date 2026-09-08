@@ -224,6 +224,20 @@
   .finchip.deep:hover { border-color: var(--behind); }
   .striplabel { font-family: "Silkscreen", monospace; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-right: 4px; }
 
+  /* ---------- the other games ---------- */
+  a.chip { text-decoration: none; }
+  a.chip:hover, a.chip:focus-visible { border-color: var(--series); color: var(--ink); }
+  #og-filter {
+    font: inherit; font-size: 12.5px; color: var(--ink); background: var(--card2);
+    border: 1px solid var(--hairline); border-radius: 4px; padding: 4px 9px; min-width: 170px;
+  }
+  #og-filter::placeholder { color: var(--muted); }
+  #og-filter:focus-visible { outline: 2px solid var(--series); outline-offset: 1px; }
+  /* 89 games is a long table; keep it scrollable rather than endless. */
+  .ogwrap { max-height: 420px; overflow-y: auto; overflow-x: auto; }
+  .ogwrap th { position: sticky; top: 0; background: var(--card); z-index: 1; }
+  .og-cat { color: var(--muted); font-size: 12px; }
+
   footer { margin-top: 36px; color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
   footer .px { font-size: 9px; letter-spacing: .1em; }
   a { color: var(--series); }
@@ -235,6 +249,7 @@
     <div class="wordmark">NG <span>//</span> TRACKER</div>
     <span class="chip" id="chip-cat">Any% · NES</span>
     <span class="chip" id="chip-updated"></span>
+    <a class="chip" href="#other-games" id="chip-others" hidden></a>
     <div class="tagline">Every attempt, split, and heartbreak — read live off the stream by OCR.</div>
   </header>
   <div class="horizon"></div>
@@ -332,6 +347,16 @@
     </section>
   </div>
 
+  <section class="card" style="margin-top:14px" id="other-games" hidden>
+    <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">
+      <h2>The other games</h2>
+      <input id="og-filter" type="search" placeholder="filter by name…"
+             aria-label="Filter the other games by name" autocomplete="off" spellcheck="false">
+    </div>
+    <p class="subnote" id="og-sub"></p>
+    <div class="ogwrap"><table id="other-table"></table></div>
+  </section>
+
   <footer>
     <span class="px">NGTWITCHTIMER</span>
     <span id="foot-gen"></span>
@@ -352,6 +377,12 @@ const fmt = ms => {
   const m = Math.floor(t / 60), s = (t - m * 60).toFixed(1).padStart(4, '0');
   return m >= 60 ? `${Math.floor(m/60)}:${String(m%60).padStart(2,'0')}:${s}` : `${m}:${s}`;
 };
+// Everything else on this page is a number or a date the page made itself.
+// Game names are not: they are OCR of a video stream, so they arrive as
+// arbitrary text and go into innerHTML. One unescaped "<" in a misread
+// title would take the whole page down with it.
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 // Every time on this page is the streamer's local time, whoever is reading:
 // shift by the recording machine's offset and format in UTC.
 const TZ = (D.day_offset_minutes || 0) * 60000;
@@ -1006,5 +1037,51 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
         <td class="num tnum">${s.best_ms != null ? fmt(s.best_ms) : '—'}</td>
         <td class="num tnum" title="share of frames whose timer OCR parsed">${read}</td></tr>`;
     }).join('');
+})();
+
+/* the other games */
+(function otherGames() {
+  // Every (game, category) the database holds except the one the page
+  // leads with. Most of these arrive ten at a time from a marathon day,
+  // where the board times each game and the row changes once, so a
+  // "run" there is one completed game rather than an attempt at one.
+  const rows = (D.summaries || [])
+    .filter(s => !(s.game === D.current_game && s.category === D.current_category))
+    .sort((a, b) => (b.last_at_ms || 0) - (a.last_at_ms || 0));
+  const card = document.getElementById('other-games');
+  if (!rows.length) return;            // stays hidden: nothing else tracked yet
+  card.hidden = false;
+
+  const chip = document.getElementById('chip-others');
+  chip.textContent = `+${rows.length} games`;
+  chip.hidden = false;
+
+  const runs = rows.reduce((n, s) => n + s.attempts, 0);
+  const finished = rows.reduce((n, s) => n + s.finished, 0);
+  document.getElementById('og-sub').textContent =
+    `${rows.length} games besides ${D.current_game}, ${runs} runs, ${finished} finished. ` +
+    `Most recently played first.`;
+
+  const el = document.getElementById('other-table');
+  const head = `<tr><th>Game</th><th>Category</th><th class="num">Best</th>` +
+    `<th class="num">Done</th><th class="num">Last</th></tr>`;
+  const draw = q => {
+    const needle = q.trim().toLowerCase();
+    const shown = needle
+      ? rows.filter(s => (s.game + ' ' + s.category).toLowerCase().includes(needle))
+      : rows;
+    if (!shown.length) {
+      el.innerHTML = head + `<tr><td colspan="5" class="og-cat">No game matches that.</td></tr>`;
+      return;
+    }
+    el.innerHTML = head + shown.map(s => `<tr>
+      <td>${esc(s.game)}</td>
+      <td class="og-cat">${esc(s.category)}</td>
+      <td class="num tnum">${s.best_ms != null ? fmt(s.best_ms) : '—'}</td>
+      <td class="num tnum" title="${s.finished} finished of ${s.attempts} recorded">${s.finished}/${s.attempts}</td>
+      <td class="num tnum">${s.last_at_ms ? dshort(s.last_at_ms) : '—'}</td></tr>`).join('');
+  };
+  draw('');
+  document.getElementById('og-filter').addEventListener('input', e => draw(e.target.value));
 })();
 </script>
