@@ -121,6 +121,19 @@ impl Rosters {
         Self::parse(&text).with_context(|| format!("in roster file {}", path.display()))
     }
 
+    /// The rosters this build ships with, compiled in from `assets/`.
+    ///
+    /// The tracker takes its rosters from the config, because a different
+    /// streamer's event is a different file. The report does not: it is
+    /// naming the events in one deployment's own history, and reading a
+    /// path at report time would make the site build depend on a file
+    /// beside the binary. The two uses do not have to agree, and the
+    /// tracker's configured file still wins wherever it is set.
+    pub fn bundled() -> Result<Self> {
+        Self::parse(include_str!("../assets/arcathlon-rosters.toml"))
+            .context("in the bundled roster file")
+    }
+
     pub fn parse(text: &str) -> Result<Self> {
         let raw: RawFile = toml::from_str(text)?;
         let mut events = Vec::new();

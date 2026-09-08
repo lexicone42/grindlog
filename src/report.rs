@@ -14,7 +14,61 @@ use anyhow::Result;
 
 use crate::config::Config;
 use crate::timeparse::format_ms;
-use crate::{api, app, db, stats, util};
+use crate::{api, app, db, roster, stats, util};
+
+/// Group the runs of every other game into the broadcasts they belong to,
+/// and name each broadcast from the games it holds.
+///
+/// A marathon is ten games in one session, so the session IS the event.
+/// Which event it was comes from the ten names rather than from the tag:
+/// the tag is what the board's title row happened to read, and the board
+/// of the first event titles itself "Arcathlon" with no number, exactly
+/// like a randomized draw does. The roster tells them apart for free —
+/// the ten games of a numbered event all fit one roster, and a randomized
+/// draw crosses all nine and fits none.
+///
+/// A session holding one game is not an event and is emitted as itself,
+/// which is what a day of practising a single game looks like.
+fn other_events(runs: &[db::OtherRun], rosters: &roster::Rosters) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut i = 0;
+    while i < runs.len() {
+        let session = runs[i].session;
+        let j = runs[i..].partition_point(|r| r.session == session) + i;
+        let group = &runs[i..j];
+        i = j;
+
+        let names: Vec<&str> = group.iter().map(|r| r.game.as_str()).collect();
+        // One game is a practice day, not an event to identify.
+        let event = (group.len() > 1)
+            .then(|| rosters.identify(&names))
+            .flatten();
+        let label = match (event, group.len()) {
+            (Some(e), _) => format!("Arcathlon {}", rosters.event_name(e)),
+            (None, n) if n > 1 => "Randomized Arcathlon".to_string(),
+            _ => group[0].game.clone(),
+        };
+        out.push(serde_json::json!({
+            "day": group[0].day,
+            "started_at_ms": group[0].started_at_ms,
+            "label": label,
+            // Whether the ten games fit one roster. A reader sorting for
+            // the randomized draws wants this, not the label's spelling.
+            "randomized": event.is_none() && group.len() > 1,
+            "tag": group[0].tag,
+            "total_ms": group.iter().filter_map(|r| r.final_time_ms).sum::<i64>(),
+            "games": group.iter().map(|r| serde_json::json!({
+                "game": r.game,
+                "category": r.category,
+                "started_at_ms": r.started_at_ms,
+                "final_time_ms": r.final_time_ms,
+                "outcome": r.outcome,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+    out.reverse(); // newest first, which is how the page reads them
+    out
+}
 
 pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> {
     let pool = db::open(&cfg.database.path).await?;
@@ -136,6 +190,13 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
                 .await?
                 .and_then(|s| s.parse::<i64>().ok()),
             "summaries": summaries,
+            // Every other game, grouped back into the broadcasts it was
+            // played in. The page pivots this both ways: by event, and by
+            // game across events.
+            "other_events": other_events(
+                &db::other_runs(&pool, &game, &category).await?,
+                &roster::Rosters::bundled().unwrap_or_default(),
+            ),
             "today": today,
             "runs": all_runs,
             "splits_by_run": splits_by_run,
@@ -306,4 +367,110 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(session: i64, game: &str, ms: i64) -> db::OtherRun {
+        db::OtherRun {
+            game: game.into(),
+            category: "Arcathlon".into(),
+            started_at_ms: 1_000 + session * 100 + ms / 1000,
+            final_time_ms: Some(ms),
+            outcome: "finished".into(),
+            session,
+            tag: Some("Arcathlon".into()),
+            day: "2026-08-28".into(),
+        }
+    }
+
+    /// The board of the FIRST event titles itself "Arcathlon" with no
+    /// number, exactly as a randomized draw does, so the session tag
+    /// cannot tell them apart and the games have to. Ten games that all
+    /// belong to one roster are that event; ten drawn from across the
+    /// pool are a random draw.
+    #[test]
+    fn an_event_is_named_by_its_games_not_by_its_tag() {
+        let r = roster::Rosters::bundled().expect("the bundled rosters parse");
+
+        // Event #1 as his board lists it, tagged only "Arcathlon".
+        let one: Vec<db::OtherRun> = [
+            "Batman",
+            "Castlevania",
+            "Ninja Gaiden",
+            "Ninja Gaiden II",
+            "Ninja Gaiden III",
+            "Super Mario Bros",
+            "Super Mario Bros 2",
+            "Super Mario Bros 3",
+            "Zelda",
+            "Zelda II",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, g)| run(1, g, 600_000 + i as i64 * 1000))
+        .collect();
+
+        // A draw crossing several events, tagged the same way.
+        let rando: Vec<db::OtherRun> = [
+            "Astyanax",
+            "King Kong 2",
+            "Super Mario Bros 3",
+            "Batman: ROTJ",
+            "Kabuki Quantum Fighter",
+            "Hebereke",
+            "Batman",
+            "Super Mario Bros 2",
+            "Metal Storm",
+            "Chip N Dale",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, g)| run(2, g, 700_000 + i as i64 * 1000))
+        .collect();
+
+        let mut runs = one;
+        runs.extend(rando);
+        let out = other_events(&runs, &r);
+        assert_eq!(out.len(), 2, "one event per session");
+
+        // Newest first: session 2 leads.
+        assert_eq!(out[0]["label"], "Randomized Arcathlon");
+        assert_eq!(out[0]["randomized"], true);
+        assert_eq!(out[1]["label"], "Arcathlon #1");
+        assert_eq!(out[1]["randomized"], false);
+        assert_eq!(out[1]["games"].as_array().unwrap().len(), 10);
+        // The total is the sum of what the board timed, not a wall clock.
+        assert_eq!(
+            out[1]["total_ms"].as_i64().unwrap(),
+            (0..10).map(|i| 600_000 + i * 1000).sum::<i64>()
+        );
+    }
+
+    /// A day spent on one game is not a marathon and must not be named
+    /// after an event it has nothing to do with.
+    #[test]
+    fn a_single_game_session_is_itself() {
+        let r = roster::Rosters::bundled().unwrap();
+        let out = other_events(&[run(9, "Die Hard (NES)", 142_000)], &r);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["label"], "Die Hard (NES)");
+        assert_eq!(out[0]["randomized"], false);
+    }
+
+    /// Without rosters nothing can be identified, and every marathon has
+    /// to read as a draw rather than as a wrong event.
+    #[test]
+    fn no_rosters_means_no_event_is_claimed() {
+        let none = roster::Rosters::default();
+        let runs: Vec<db::OtherRun> = ["Batman", "Castlevania", "Zelda"]
+            .iter()
+            .map(|g| run(1, g, 600_000))
+            .collect();
+        let out = other_events(&runs, &none);
+        assert_eq!(out[0]["label"], "Randomized Arcathlon");
+        assert_eq!(out[0]["randomized"], true);
+    }
 }
