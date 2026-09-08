@@ -40,10 +40,23 @@
 //! wide net maps "Ninja Gaiden Ill" onto Ninja Gaiden II, which is the exact
 //! failure this module exists to prevent.
 //!
-//! A row that matches nothing keeps the name as read: nothing is dropped and
-//! nothing is guessed at. The caller counts those and puts them in the
-//! session's health events, so a roster that has gone stale is visible rather
-//! than silent.
+//! # One game per row
+//!
+//! An identified event holds ten DISTINCT games, and two rows of it therefore
+//! cannot be the same one. Reading each row on its own ignores that, and OCR
+//! does produce the collision: on VOD 2824740806 the board's last two rows
+//! are Zelda and Zelda II, the `II` was lost on most passes, both rows read
+//! "Zelda", and an 84-minute Zelda II was filed under Zelda. So inside a
+//! roster the rows are assigned to games ONE-TO-ONE ([`Rosters::assign`]).
+//!
+//! Not across the pool: a randomized draw crosses every roster, nothing says
+//! its ten are distinct families, and two of its rows naming the same game is
+//! a thing that legitimately happens.
+//!
+//! A row that matches nothing — or that lost every game it could have had —
+//! keeps the name as read: nothing is dropped and nothing is guessed at. The
+//! caller counts those and puts them in the session's health events, so a
+//! roster that has gone stale is visible rather than silent.
 
 use std::collections::HashSet;
 
@@ -193,20 +206,78 @@ impl Rosters {
         &self.events[event].name
     }
 
-    /// The canonical name for one row of a board, given the roster the board
-    /// was identified as. `None` when nothing fits and the row keeps the name
-    /// as read.
-    pub fn canonical(&self, event: Option<usize>, name: &str) -> Option<&str> {
-        let key = Key::of(name);
-        match event.and_then(|i| self.events.get(i)) {
-            // Inside a roster the net is wide and the sequel number is only a
-            // tie-break: an event holds one Castlevania, so "Castievania" is
-            // that one whether or not its numeral survived.
-            Some(e) => pick(&key, &e.games, false).map(|g| g.name.as_str()),
-            // Across the pool it is not: three Ninja Gaidens and six Mega Mans
-            // are told apart by nothing else.
-            None => pick(&key, &self.pool, true).map(|g| g.name.as_str()),
+    /// The canonical name for every row of a board at once, in row order.
+    /// `None` for a row nothing fits, which then keeps the name as read.
+    ///
+    /// A row with no name yet — a slot the reader has never got a legible
+    /// word out of — is passed as `None` and comes back as `None`. It still
+    /// has to be passed, because it holds a place in the board.
+    ///
+    /// # Why every row together, and not one at a time
+    ///
+    /// Inside an identified roster the ten games are distinct, so no two rows
+    /// may take the same one. That cannot be decided a row at a time: it is
+    /// the rows CONTESTING a game that settles which of them gets it.
+    ///
+    /// They are assigned by descending confidence. The best (row, game) pair
+    /// on the board — best by the same [`Rank`] a single row is matched
+    /// by — takes its game; the game leaves the field; every row still open
+    /// is read again against what is left, and the next-best pair goes, until
+    /// nothing fits any more.
+    ///
+    /// Descending confidence, rather than walking the rows in order, is what
+    /// keeps the answer from depending on which row is looked at first: the
+    /// row that fits a game best gets it wherever on the board it sits, and a
+    /// row that loses falls to its own next-best candidate. Two rows fitting
+    /// one game EQUALLY well is the case that has no answer in the names —
+    /// both of 2824740806's rows read exactly "Zelda" — and there the earlier
+    /// row wins, because a roster lists its games in the order the board
+    /// prints them.
+    ///
+    /// A greedy pass and not a full assignment solve: the ranks are ordinal
+    /// (the shape of the match, then the sequel number, then the edits
+    /// forgiven) and nothing sensible adds them up, so "the best pairing
+    /// overall" is not a quantity this has. What it does have is a most
+    /// confident pair, and that one is never wrong to take.
+    ///
+    /// Across the pool — a board no roster fits — the rows are independent,
+    /// as they were: see the module docs.
+    pub fn assign(&self, event: Option<usize>, reads: &[Option<&str>]) -> Vec<Option<&str>> {
+        let keys: Vec<Key> = reads.iter().map(|r| Key::of(r.unwrap_or(""))).collect();
+        let Some(e) = event.and_then(|i| self.events.get(i)) else {
+            // Across the pool the sequel number has to agree exactly: three
+            // Ninja Gaidens and six Mega Mans are told apart by nothing else.
+            return keys
+                .iter()
+                .map(|k| pick(k, &self.pool, true).map(|g| g.name.as_str()))
+                .collect();
+        };
+        let mut out: Vec<Option<&str>> = vec![None; keys.len()];
+        let mut free = vec![true; e.games.len()];
+        let mut open: Vec<usize> = (0..keys.len()).collect();
+        while !open.is_empty() {
+            // The most confident pair over every row still open and every
+            // game still free. `min` on (rank, row, game) is best rank first,
+            // then the earlier row, then the earlier game — the board's own
+            // order, for a contest the names cannot settle.
+            let Some((_, row, game)) = open
+                .iter()
+                .filter_map(|&r| {
+                    // Inside a roster the net is wide and the sequel number
+                    // is only a tie-break: an event holds one Castlevania, so
+                    // "Castievania" is that one whether or not its numeral
+                    // survived.
+                    best(&keys[r], &e.games, false, &free).map(|(rank, g)| (rank, r, g))
+                })
+                .min()
+            else {
+                break;
+            };
+            out[row] = Some(e.games[game].name.as_str());
+            free[game] = false;
+            open.retain(|&r| r != row);
         }
+        out
     }
 }
 
@@ -218,20 +289,31 @@ impl Rosters {
 /// which is what lets "Zelda Il" pick Zelda II out of a roster holding both
 /// Zeldas while "Castievania" still finds the only Castlevania of its own.
 fn pick<'a>(read: &Key, games: &'a [Game], strict: bool) -> Option<&'a Game> {
+    let free = vec![true; games.len()];
+    best(read, games, strict, &free).map(|(_, i)| &games[i])
+}
+
+/// [`pick`] with the games already taken by another row struck out, and with
+/// the winner's rank kept: [`Rosters::assign`] compares one row's best
+/// against another's, so it needs to know how good the fit was.
+fn best(read: &Key, games: &[Game], strict: bool, free: &[bool]) -> Option<(Rank, usize)> {
     if read.stem.is_empty() {
         return None;
     }
-    let mut ranked: Vec<(Rank, &Game)> = games
+    let mut ranked: Vec<(Rank, usize)> = games
         .iter()
-        .filter(|g| !strict || g.key.sequel == read.sequel)
-        .filter_map(|g| rank(read, &g.key).map(|r| (r, g)))
+        .enumerate()
+        .filter(|(i, g)| free[*i] && (!strict || g.key.sequel == read.sequel))
+        .filter_map(|(i, g)| rank(read, &g.key).map(|r| (r, i)))
         .collect();
-    ranked.sort_by_key(|(r, _)| *r);
-    let (best, game) = *ranked.first()?;
-    // Two roster names fitting a reading equally well identify neither.
+    ranked.sort();
+    let (top, game) = *ranked.first()?;
+    // Two roster names fitting a reading equally well identify neither. The
+    // row stays open: taking a game away from the field can leave one of them
+    // standing, and then the row is no longer in any doubt.
     match ranked.get(1) {
-        Some((next, _)) if *next == best => None,
-        _ => Some(game),
+        Some((next, _)) if *next == top => None,
+        _ => Some((top, game)),
     }
 }
 
@@ -461,6 +543,19 @@ mod tests {
         Rosters::load(&path).expect("assets/arcathlon-rosters.toml")
     }
 
+    /// A board of one row, which is what most of these tests are about: a row
+    /// on its own has nothing to contest a game with, so it gets the game it
+    /// fits best whatever the rest of the board says.
+    fn one<'a>(r: &'a Rosters, event: Option<usize>, name: &str) -> Option<&'a str> {
+        r.assign(event, &[Some(name)]).into_iter().next().flatten()
+    }
+
+    /// A whole board at once, for the tests that are about the contest.
+    fn all<'a>(r: &'a Rosters, event: Option<usize>, names: &[&str]) -> Vec<Option<&'a str>> {
+        let read: Vec<Option<&str>> = names.iter().map(|n| Some(*n)).collect();
+        r.assign(event, &read)
+    }
+
     /// The file the deployment ships is nine events of ten distinct games.
     #[test]
     fn the_shipped_rosters_are_ninety_games_in_nine_events() {
@@ -478,7 +573,7 @@ mod tests {
         let r = Rosters::default();
         assert!(r.is_empty());
         assert_eq!(r.identify(&["Astyanax", "Hebereke"]), None);
-        assert_eq!(r.canonical(None, "nax"), None);
+        assert_eq!(one(&r, None, "nax"), None);
     }
 
     #[test]
@@ -558,10 +653,10 @@ mod tests {
             ("Castievania", "Castlevania II"),
             ("TMNT II", "TMNT III"),
         ] {
-            assert_eq!(r.canonical(e4, read), Some(want), "{read:?}");
+            assert_eq!(one(&r, e4, read), Some(want), "{read:?}");
         }
         // And a name off some other board is still nothing.
-        assert_eq!(r.canonical(e4, "Jurassic Park"), None);
+        assert_eq!(one(&r, e4, "Jurassic Park"), None);
     }
 
     /// The one roster holding a whole family is told apart by the numeral,
@@ -593,8 +688,133 @@ mod tests {
             ("SMB 2", "Super Mario Bros 2"),
             ("SMB3 (Warpless)", "Super Mario Bros 3"),
         ] {
-            assert_eq!(r.canonical(e1, read), Some(want), "{read:?}");
+            assert_eq!(one(&r, e1, read), Some(want), "{read:?}");
         }
+    }
+
+    /// The event's ten games are distinct, so two of its rows may not come
+    /// out as the same one.
+    ///
+    /// VOD 2824740806, verbatim: the last two rows are Zelda and Zelda II,
+    /// the numeral survived on a minority of passes, and both rows settled on
+    /// "Zelda". Read a row at a time they are both Zelda, and an 84:44 Zelda
+    /// II went into Zelda's history.
+    #[test]
+    fn two_rows_of_one_event_may_not_be_the_same_game() {
+        let r = shipped();
+        let board = [
+            "Batman",
+            "Castlevania",
+            "Ninja Gaiden",
+            "Ninja Gaiden I!",
+            "Ninja Gaiden Ill",
+            "Super Mario Bros",
+            "Super Mario Bros 2",
+            "Super Marlo Bros 3",
+            "Zelda",
+            "Zelda",
+        ];
+        let e1 = r.identify(&board);
+        assert_eq!(e1.map(|i| r.event_name(i)), Some("#1"));
+        assert_eq!(
+            all(&r, e1, &board),
+            [
+                Some("Batman"),
+                Some("Castlevania"),
+                Some("Ninja Gaiden"),
+                Some("Ninja Gaiden II"),
+                Some("Ninja Gaiden III"),
+                Some("Super Mario Bros"),
+                Some("Super Mario Bros 2"),
+                Some("Super Mario Bros 3"),
+                Some("Zelda"),
+                Some("Zelda II"),
+            ]
+        );
+        // Read a row at a time — which is what it did before — they are one
+        // game twice.
+        assert_eq!(one(&r, e1, "Zelda"), Some("Zelda"));
+    }
+
+    /// The game goes to the row that fits it best, wherever on the board that
+    /// row sits, and the row that loses falls to its own next-best candidate.
+    /// The answer does not depend on which row is looked at first.
+    #[test]
+    fn the_better_reading_takes_the_game_and_the_loser_takes_the_next() {
+        let r = shipped();
+        let e1 = r.identify(&["Batman", "Castlevania", "Zelda", "Zelda Il", "SMB2"]);
+        assert_eq!(e1.map(|i| r.event_name(i)), Some("#1"));
+        // "Zelda Il" is the exact reading of Zelda II and takes it; the bare
+        // "Zelda" is left with Zelda — in either order.
+        assert_eq!(
+            all(&r, e1, &["Zelda", "Zelda Il"]),
+            [Some("Zelda"), Some("Zelda II")]
+        );
+        assert_eq!(
+            all(&r, e1, &["Zelda Il", "Zelda"]),
+            [Some("Zelda II"), Some("Zelda")]
+        );
+        // A real contest, with a fallback: both rows want Zelda, the whole
+        // name beats the fragment, and the fragment falls to Zelda II —
+        // whichever end of the board it sits at.
+        assert_eq!(
+            all(&r, e1, &["Zelda", "elda"]),
+            [Some("Zelda"), Some("Zelda II")]
+        );
+        assert_eq!(
+            all(&r, e1, &["elda", "Zelda"]),
+            [Some("Zelda II"), Some("Zelda")]
+        );
+    }
+
+    /// A row that loses its game does not then take just anything: what is
+    /// left has to fit it better than everything else left, or the row keeps
+    /// the name as read. "inja Gaiden Ill" is a fragment of Ninja Gaiden and
+    /// of Ninja Gaiden II alike, and with Ninja Gaiden III gone it is not a
+    /// reading of either.
+    #[test]
+    fn a_loser_whose_next_two_candidates_are_level_takes_neither() {
+        let r = shipped();
+        let e1 = r.identify(&["Batman", "Castlevania", "Zelda", "Zelda Il", "SMB2"]);
+        assert_eq!(
+            all(&r, e1, &["Ninja Gaiden III", "inja Gaiden Ill"]),
+            [Some("Ninja Gaiden III"), None]
+        );
+        assert_eq!(
+            all(&r, e1, &["inja Gaiden Ill", "Ninja Gaiden III"]),
+            [None, Some("Ninja Gaiden III")]
+        );
+    }
+
+    /// A row with nothing acceptable left keeps the name as read rather than
+    /// taking a game that is not its own. Three rows reading "Zelda" is two
+    /// Zeldas and one row the caller records under the reading and counts.
+    #[test]
+    fn a_row_that_loses_every_game_keeps_the_name_as_read() {
+        let r = shipped();
+        let e1 = r.identify(&["Batman", "Castlevania", "Ninja Gaiden", "Zelda", "SMB2"]);
+        assert_eq!(
+            all(&r, e1, &["Zelda", "Zelda", "Zelda"]),
+            [Some("Zelda"), Some("Zelda II"), None]
+        );
+        // A row with no legible name at all holds its place and takes
+        // nothing, so the rows after it are not shifted onto its game.
+        assert_eq!(
+            r.assign(e1, &[None, Some("Zelda Il"), Some("Zelda")]),
+            [None, Some("Zelda II"), Some("Zelda")]
+        );
+    }
+
+    /// One game per row inside a roster, and NOT across the pool: a
+    /// randomized draw is ten games out of ninety with no roster to say they
+    /// are distinct, and rows that name the same family there are legitimate.
+    #[test]
+    fn a_board_no_roster_fits_may_name_one_game_twice() {
+        let r = shipped();
+        assert_eq!(
+            all(&r, None, &["Jaws", "aws", "Jaws"]),
+            [Some("Jaws"), Some("Jaws"), Some("Jaws")]
+        );
     }
 
     /// Across the pool the sequel number has to agree exactly, which is the
@@ -602,34 +822,28 @@ mod tests {
     #[test]
     fn across_the_pool_a_sequel_number_may_not_be_guessed() {
         let r = shipped();
-        assert_eq!(
-            r.canonical(None, "Ninja Gaiden Ill"),
-            Some("Ninja Gaiden III")
-        );
-        assert_eq!(
-            r.canonical(None, "Ninja Gaiden Il"),
-            Some("Ninja Gaiden II")
-        );
-        assert_eq!(r.canonical(None, "Ninja Gaiden"), Some("Ninja Gaiden"));
-        assert_eq!(r.canonical(None, "TMNT Ill"), Some("TMNT III"));
-        assert_eq!(r.canonical(None, "Duck Tales"), Some("Duck Tales"));
-        assert_eq!(r.canonical(None, "DuckTales"), Some("Duck Tales"));
-        assert_eq!(r.canonical(None, "Duck Tales 2"), Some("Duck Tales 2"));
-        assert_eq!(r.canonical(None, "Mega Man 5"), Some("Mega Man 5"));
+        assert_eq!(one(&r, None, "Ninja Gaiden Ill"), Some("Ninja Gaiden III"));
+        assert_eq!(one(&r, None, "Ninja Gaiden Il"), Some("Ninja Gaiden II"));
+        assert_eq!(one(&r, None, "Ninja Gaiden"), Some("Ninja Gaiden"));
+        assert_eq!(one(&r, None, "TMNT Ill"), Some("TMNT III"));
+        assert_eq!(one(&r, None, "Duck Tales"), Some("Duck Tales"));
+        assert_eq!(one(&r, None, "DuckTales"), Some("Duck Tales"));
+        assert_eq!(one(&r, None, "Duck Tales 2"), Some("Duck Tales 2"));
+        assert_eq!(one(&r, None, "Mega Man 5"), Some("Mega Man 5"));
         // A fragment with no number of its own belongs to whichever game has
         // none either, and there is one of those per family.
-        assert_eq!(r.canonical(None, "Castievania"), Some("Castlevania"));
+        assert_eq!(one(&r, None, "Castievania"), Some("Castlevania"));
         // The abbreviations he writes on a randomized board.
-        assert_eq!(r.canonical(None, "SMB2"), Some("Super Mario Bros 2"));
-        assert_eq!(r.canonical(None, "Leg of Wizard"), Some("LOTW"));
+        assert_eq!(one(&r, None, "SMB2"), Some("Super Mario Bros 2"));
+        assert_eq!(one(&r, None, "Leg of Wizard"), Some("LOTW"));
         assert_eq!(
-            r.canonical(None, "Kabuki Q Fighter"),
+            one(&r, None, "Kabuki Q Fighter"),
             Some("Kabuki Quantum Fighter")
         );
-        assert_eq!(r.canonical(None, "Harry"), Some("Hammerin' Harry"));
-        assert_eq!(r.canonical(None, "Kong 2"), Some("King Kong 2"));
-        assert_eq!(r.canonical(None, "aws"), Some("Jaws"));
-        assert_eq!(r.canonical(None, "Déja Vu"), Some("Déjà Vu"));
+        assert_eq!(one(&r, None, "Harry"), Some("Hammerin' Harry"));
+        assert_eq!(one(&r, None, "Kong 2"), Some("King Kong 2"));
+        assert_eq!(one(&r, None, "aws"), Some("Jaws"));
+        assert_eq!(one(&r, None, "Déja Vu"), Some("Déjà Vu"));
     }
 
     /// A reading that fits nothing, or two things equally, keeps the name as
@@ -637,11 +851,11 @@ mod tests {
     #[test]
     fn a_reading_that_fits_nothing_is_left_alone() {
         let r = shipped();
-        assert_eq!(r.canonical(None, "Previous Segment"), None);
-        assert_eq!(r.canonical(None, "Sum of Best Segments"), None);
-        assert_eq!(r.canonical(None, "Act 1"), None);
-        assert_eq!(r.canonical(None, "Ill"), None);
-        assert_eq!(r.canonical(None, "Some Game Nobody Played"), None);
+        assert_eq!(one(&r, None, "Previous Segment"), None);
+        assert_eq!(one(&r, None, "Sum of Best Segments"), None);
+        assert_eq!(one(&r, None, "Act 1"), None);
+        assert_eq!(one(&r, None, "Ill"), None);
+        assert_eq!(one(&r, None, "Some Game Nobody Played"), None);
     }
 
     #[test]

@@ -419,11 +419,18 @@ pub struct Marathon {
     /// The events this board may be, and the ten games of each. Empty where
     /// none is configured, and then every row keeps the name as read.
     rosters: Arc<Rosters>,
-    /// Which of them the rows say this board is, and the names that said so.
-    /// Kept because identifying the board is the expensive part and the names
-    /// stop changing within a few passes of the event starting.
+    /// Which of them the rows say this board is.
     roster: Option<usize>,
-    identified_from: Vec<String>,
+    /// The roster's name for each slot's game, one entry per slot in slot
+    /// order — the whole board assigned at once, because inside a roster no
+    /// two slots may take the same game (see
+    /// [`crate::roster::Rosters::assign`]).
+    assigned: Vec<Option<String>>,
+    /// The slot names `roster` and `assigned` were last worked out from.
+    /// Kept because reading the board against the rosters is the expensive
+    /// part and the names stop changing within a few passes of the event
+    /// starting.
+    identified_from: Vec<Option<String>>,
     /// Completed rows filed under the name as read because no roster name fit
     /// them. Reported: a roster gone stale must not fail silently.
     unmatched: u32,
@@ -439,6 +446,7 @@ impl Marathon {
             passes: 0,
             rosters,
             roster: None,
+            assigned: Vec::new(),
             identified_from: Vec::new(),
             unmatched: 0,
         }
@@ -485,8 +493,9 @@ impl Marathon {
         let names: Vec<String> = self
             .slots
             .iter()
-            .map(|s| {
-                let n = s.name().map_or("?", |n| self.canonical(n).unwrap_or(n));
+            .enumerate()
+            .map(|(i, s)| {
+                let n = self.canonical(i).or_else(|| s.name()).unwrap_or("?");
                 match s.recorded {
                     Some(_) => format!("{n}*"),
                     None => n.to_string(),
@@ -511,34 +520,45 @@ impl Marathon {
         )
     }
 
-    /// The roster's spelling of a row's name, when a roster name fits it.
+    /// The roster's spelling of one slot's game, when a roster name fits it.
     ///
-    /// The board is matched against ONE event's ten games where the rows say
-    /// which event it is, and against the whole pool where they do not — a
-    /// randomized draw crosses every roster, so none of them fits it. See
-    /// [`crate::roster`] for why the difference is the whole point.
-    fn canonical(&self, read: &str) -> Option<&str> {
-        self.rosters.canonical(self.roster, read)
+    /// The answer comes from the assignment over the WHOLE board rather than
+    /// from this slot's name alone, because inside a roster the ten games are
+    /// distinct and it is the slots contesting a game that settle which of
+    /// them gets it. See [`crate::roster::Rosters::assign`].
+    fn canonical(&self, slot: usize) -> Option<&str> {
+        self.assigned.get(slot)?.as_deref()
     }
 
-    /// Work out which roster this board is, from the names its slots have
-    /// settled on. Recomputed only when those names change, which after the
-    /// first few passes of an event they do not.
+    /// Work out which roster this board is from the names its slots have
+    /// settled on, and then which of that roster's games each slot holds.
+    /// Recomputed only when those names change, which after the first few
+    /// passes of an event they do not.
     fn identify(&mut self) {
         if self.rosters.is_empty() {
             return;
         }
-        let names: Vec<String> = self
+        let names: Vec<Option<String>> = self
             .slots
             .iter()
-            .filter_map(Slot::name)
-            .map(str::to_string)
+            .map(|s| s.name().map(str::to_string))
             .collect();
         if names == self.identified_from {
             return;
         }
-        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
-        self.roster = self.rosters.identify(&borrowed);
+        let read: Vec<Option<&str>> = names.iter().map(Option::as_deref).collect();
+        // Which event this is, from the names that are legible: a slot the
+        // reader has never got a word out of says nothing about the board.
+        let legible: Vec<&str> = read.iter().flatten().copied().collect();
+        self.roster = self.rosters.identify(&legible);
+        // And then the board, all of it at once and in slot order, because
+        // no two slots of one event may come out as the same game.
+        self.assigned = self
+            .rosters
+            .assign(self.roster, &read)
+            .into_iter()
+            .map(|n| n.map(str::to_string))
+            .collect();
         self.identified_from = names;
     }
 
@@ -794,8 +814,10 @@ impl Marathon {
             };
             // The roster's spelling of the game, so a reading missing its
             // first letter is the same game's history as a clean one. Where
-            // no roster name fits, the reading stands and is counted.
-            let canonical = self.canonical(&read).map(str::to_string);
+            // no roster name fits — or where another slot of this event took
+            // the game this one's reading fits best, and nothing acceptable
+            // was left — the reading stands and is counted.
+            let canonical = self.canonical(i).map(str::to_string);
             let unmatched = canonical.is_none();
             if unmatched {
                 self.unmatched += 1;
