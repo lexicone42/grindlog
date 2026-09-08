@@ -49,6 +49,17 @@
 //!   completion has to be recorded once and only once. Every slot is recorded
 //!   at most once here, and `seed` re-arms that across a restart from what is
 //!   already in the database.
+//! - **The marathon total is a reading too.** It is what tells a result from
+//!   a comparison time — the two are the same number at the moment a game
+//!   ends — but the big timer goes illegible like anything else on screen, and
+//!   tesseract does not stop answering when it does: it parses the wreckage
+//!   into numbers, minutes or hours from the truth and different every frame.
+//!   Three broadcasts recorded four games of ten that way. So a completion
+//!   needs the total OR the board's own arithmetic — this row's cumulative
+//!   less the row above's, against this row's segment column — and where the
+//!   tracker has watched the row above finish, the board is the better
+//!   witness: it is static text, cumulative, and it keeps a finished row's
+//!   time for the rest of the event.
 //!
 //! Nothing in this module talks to the database or the clock: `observe` takes
 //! a board and returns the completions to record, which is what makes it
@@ -597,13 +608,6 @@ impl Marathon {
             if self.slots[i].recorded.is_some() {
                 continue;
             }
-            // The marathon total is what tells a result from a comparison
-            // time, so without one there is no verdict to give. Waiting costs
-            // nothing: the board keeps a completed row's time for the rest of
-            // the event. Measured the hard way — on the one broadcast whose
-            // timer read on 8% of frames, an unchecked candidate recorded a
-            // row's comparison time (2:42:48) eight minutes into the day.
-            let Some(total) = total_ms else { continue };
             // The best of the readings this row could be finished at — not
             // simply the most-voted one, which the guards would then throw
             // away, taking the row's real completion down with it: a row
@@ -616,26 +620,15 @@ impl Marathon {
                 .filter(|(c, v)| {
                     v.count >= AGREE
                         && v.spread_ms() >= AGREE_SPREAD_MS
-                        // A cumulative ahead of the total is a comparison time
-                        // the runner has not reached, not a result.
-                        && *c <= total + AHEAD_OF_TOTAL_MS
-                        // And one far behind it is a game that ended before
-                        // the bot looked — unless the board's own arithmetic
-                        // vouches for it, which it does when the row above is
-                        // one this tracker recorded and this candidate comes
-                        // after it. Joining an event mid-way is the case that
-                        // needs the bound: nothing above the row is recorded
-                        // there, so nothing else constrains a number read off
-                        // the wrong column. One measured: a row whose leading
-                        // minus sign was lost came back "2.35", "28:03" with
-                        // the marathon total at 3:57:30, and 28:03 — the
-                        // SEGMENT column — was recorded as a cumulative and
-                        // 2.35 s as the game's time.
-                        && (*c + JUST_NOW_MS >= total || self.arithmetic_backs(i, *c))
                         // The board's own arithmetic has to hold: the rows run
                         // in order down the board and each cumulative includes
                         // every row above it.
                         && self.coherent(i, *c)
+                        // And something has to say the runner is HERE, at this
+                        // cumulative, rather than somewhere else on the board:
+                        // either the marathon total, or the row's own two
+                        // columns against the row above it.
+                        && (self.total_agrees(i, *c, total_ms) || self.board_vouches(i, *c))
                 })
                 .max_by_key(|(c, v)| (v.count, *c))
             else {
@@ -730,6 +723,77 @@ impl Marathon {
     /// where a segment column was taken for a cumulative.
     fn arithmetic_backs(&self, i: usize, cum: i64) -> bool {
         matches!(self.expected_segment(i, cum), Expect::Segment(_))
+    }
+
+    /// Does the marathon total put the runner at this cumulative?
+    ///
+    /// At the moment a game ends the two are the same number, and the total
+    /// then sits there while he draws and sets up the next one. A comparison
+    /// time he has not reached is minutes AHEAD of it; a game that ended
+    /// before the bot looked is minutes BEHIND it — the case that needs the
+    /// lower bound is joining an event mid-way, where nothing above the row is
+    /// recorded and so nothing else constrains a number read off the wrong
+    /// column: VOD 2827296024's Cowboy Kid row prints "-2.35", "28:03",
+    /// "1:38:23", the pane loses the minus on many passes, and 28:03 — the
+    /// SEGMENT column — was recorded as a cumulative with 2.35 s as the game's
+    /// time while the total stood at 3:57:30. Where the tracker has watched
+    /// the row above finish, that chain constrains it instead.
+    ///
+    /// No total, no opinion. The total is the only witness that can speak for
+    /// a row the board's arithmetic cannot reach, and an unread one says
+    /// nothing rather than yes: measured on the one broadcast whose timer read
+    /// on 8% of frames, where an unchecked candidate recorded a row's
+    /// comparison time (2:42:48) eight minutes into the day.
+    fn total_agrees(&self, i: usize, cum: i64, total_ms: Option<i64>) -> bool {
+        let Some(total) = total_ms else {
+            return false;
+        };
+        cum <= total + AHEAD_OF_TOTAL_MS
+            && (cum + JUST_NOW_MS >= total || self.arithmetic_backs(i, cum))
+    }
+
+    /// Does the board speak for a candidate on its own, with the marathon
+    /// total left out of it?
+    ///
+    /// A cumulative board is one equation per row: this row's cumulative is
+    /// the row above's plus this row's segment, and the board prints both
+    /// sides. So when the row above is one THIS tracker watched finish — a
+    /// cumulative it measured, not a comparison time it found already
+    /// printed — and the candidate's own segment column is that difference to
+    /// the second, the candidate is not a number read off the wrong column or
+    /// a digit slipped in the cumulative: it continues a chain the tracker
+    /// built, and the row's other column agrees. Both columns would have to be
+    /// damaged in exactly compensating ways to fake it, on two passes a minute
+    /// apart, which is not what OCR damage looks like.
+    ///
+    /// That matters because the marathon total is a reading too, and it fails
+    /// the way readings fail. When the big timer goes illegible tesseract does
+    /// not stop answering — it parses the wreckage into numbers, minutes or
+    /// hours from the truth and different every frame — and a total like that
+    /// vetoes every completion of the rest of the day. The board is the better
+    /// witness there: it is static text, cumulative, and it keeps a finished
+    /// row's time for the rest of the event.
+    ///
+    /// The first row is deliberately not covered. `expected_segment` answers
+    /// `cum` for it, since the marathon starts at zero, and the segment column
+    /// of a first row prints exactly that — so the equation is vacuously true
+    /// and says nothing. There the total is the only witness there is.
+    fn board_vouches(&self, i: usize, cum: i64) -> bool {
+        if i == 0 {
+            return false;
+        }
+        let Expect::Segment(exp) = self.expected_segment(i, cum) else {
+            return false;
+        };
+        // Two readings of the segment column, the same standard the cumulative
+        // itself is held to. `segment_for` will take a single reading that
+        // agrees with the arithmetic, because by then the completion is
+        // already believed and only its time is in question; here the
+        // completion is what is in question, so one reading is not enough.
+        self.slots[i]
+            .segment_votes
+            .iter()
+            .any(|((c, s), n)| *c == cum && *n >= AGREE && (*s - exp).abs() <= SEGMENT_SLACK_MS)
     }
 
     /// Does a candidate cumulative sit where the board says it must? The
@@ -1440,10 +1504,13 @@ mod tests {
         assert!(m.observe(&pass("23:10"), 960_000, total).is_empty());
     }
 
-    /// The marathon total is the whole basis for telling a result from a
-    /// comparison time, so a pass that could not read it records nothing —
-    /// and the pass that can, later, records everything, because the board
-    /// keeps a completed row's time.
+    /// Where the board cannot speak for a row itself, the marathon total is
+    /// the whole basis for telling a result from a comparison time — and here
+    /// it cannot: the row above was finished before this tracker started, so
+    /// nothing above the candidate is a cumulative it measured. A pass that
+    /// could not read the timer therefore records nothing, and the pass that
+    /// can, later, records everything, because the board keeps a completed
+    /// row's time.
     #[test]
     fn nothing_is_recorded_without_a_marathon_total() {
         let mut m = Marathon::new("Arcathlon".into());
@@ -1469,6 +1536,145 @@ mod tests {
         let seen = m.observe(&pass(&["47:10", "1:10:30"]), 480_000, total);
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].game, "Castlevania II");
+    }
+
+    /// The timer is a reading, and it fails the way readings fail: when the
+    /// big clock goes illegible tesseract does not stop answering, it parses
+    /// the wreckage. So the marathon total arrives minutes or hours from the
+    /// truth and different every pass, and it vetoes every completion left in
+    /// the day — four of ten games on VOD 2839800169, four of ten again on
+    /// 2816723472 and 2852473277.
+    ///
+    /// The board is the better witness there. Once the tracker has watched the
+    /// row above finish, the next row's cumulative and its own segment column
+    /// are one equation with a number the tracker measured on the other side
+    /// of it, and a row that satisfies it is finished whatever the timer says.
+    #[test]
+    fn the_board_speaks_for_a_completion_a_broken_timer_would_veto() {
+        // VOD 2839800169's first two rows: Castlevania III's comparison
+        // 34:41 becoming his 41:23, then Duck Tales' 42:54 becoming 49:45 —
+        // and 49:45 - 41:23 is the 8:22 the board rounds to the 8:21 it
+        // prints in the segment column.
+        let pass = |first: &[&str], second: &[&str]| {
+            board(
+                Some("Arcathion #5"),
+                vec![row("Castlevania III", first), row("Duck Tales", second)],
+            )
+        };
+        // Readings the run loop really handed the tracker after that day's
+        // timer went illegible, in the order it gave them.
+        let wreckage = [5_058_i64, 155_888_000, 3_558_020];
+        let first_done = Some(2_483_000);
+        let run = |totals: [Option<i64>; 2]| -> Vec<Completion> {
+            let mut m = Marathon::new("Arcathlon".into());
+            for t in 0..2 {
+                m.observe(
+                    &pass(&["34:41", "34:41"], &["8:13", "42:54"]),
+                    t * 60_000,
+                    Some(t * 60_000),
+                );
+            }
+            // Row 0 finishes while the timer still reads.
+            m.observe(
+                &pass(&["41:23", "41:23"], &["8:13", "42:54"]),
+                120_000,
+                first_done,
+            );
+            let seen = m.observe(
+                &pass(&["41:23", "41:23"], &["8:13", "42:54"]),
+                180_000,
+                first_done,
+            );
+            assert_eq!(seen.len(), 1, "row 0 with a working timer");
+            // Then row 1 finishes, with whatever the timer has become.
+            let done = pass(&["41:23", "41:23"], &["8:21", "49:45"]);
+            let seen = m.observe(&done, 240_000, totals[0]);
+            assert!(seen.is_empty(), "one reading is still not a completion");
+            m.observe(&done, 300_000, totals[1])
+        };
+        // A total hours behind the truth, then one hours ahead of it: either
+        // one on its own vetoes the completion, and the board overrules both.
+        for pair in [
+            [Some(wreckage[0]), Some(wreckage[1])],
+            [Some(wreckage[1]), Some(wreckage[2])],
+            // And no reading at all, which is how a broadcast that ends while
+            // the pane is unreadable loses its last game — VOD 2844298651's
+            // Wizards and Warriors, VOD 2856167316's Mega Man 4.
+            [None, None],
+        ] {
+            let seen = run(pair);
+            assert_eq!(seen.len(), 1, "the board vouches for it: {seen:?}");
+            assert_eq!(seen[0].game, "Duck Tales");
+            assert_eq!(seen[0].segment_ms, 501_000);
+            assert_eq!(seen[0].cumulative_ms, 2_985_000);
+            assert!(!seen[0].segment_derived);
+        }
+    }
+
+    /// What the board vouching for a row may not become: a way past the
+    /// guards. It speaks only where the row ABOVE is a cumulative this tracker
+    /// watched reach its end, and only where this row's own segment column is
+    /// that difference — the two damaged in exactly compensating ways is not
+    /// what OCR damage looks like.
+    #[test]
+    fn the_board_vouches_only_for_a_row_it_can_do_the_arithmetic_for() {
+        // A mid-event join: the rows above were finished before this tracker
+        // started, so they are baselines, not measurements. VOD 2827296024's
+        // Cowboy Kid row, whose lost minus sign files its SEGMENT as a
+        // cumulative, is refused here for ever however well the columns fit.
+        let mut m = Marathon::new("Arcathlon".into());
+        let joined = |third: &[&str]| {
+            board(
+                Some("Arcathion #4"),
+                vec![
+                    row("Astyanax", &["23:19", "23:19"]),
+                    row("Castlevania II", &["46:59", "1:10:19"]),
+                    row("Cowboy Kid", third),
+                ],
+            )
+        };
+        let total = Some(14_250_000);
+        for t in 0..2 {
+            assert!(m
+                .observe(&joined(&["-2.35", "28:03", "1:38:23"]), t * 60_000, total)
+                .is_empty());
+        }
+        for t in 2..10 {
+            assert!(
+                m.observe(&joined(&["2.35", "28:03"]), t * 60_000, total)
+                    .is_empty(),
+                "nothing above this row is one the tracker measured, at {t}"
+            );
+        }
+        // And a row whose two columns do not agree: the cumulative says this
+        // game took 8:22, its own segment column says 40 minutes. The board is
+        // vouching for nothing, so only the timer could speak, and it is the
+        // wreckage a dead timer parses to.
+        let mut m = Marathon::new("Arcathlon".into());
+        let pass = |first: &[&str], second: &[&str]| {
+            board(
+                Some("Arcathion #5"),
+                vec![row("Castlevania III", first), row("Duck Tales", second)],
+            )
+        };
+        for t in 0..2 {
+            m.observe(
+                &pass(&["34:41", "34:41"], &["8:13", "42:54"]),
+                t * 60_000,
+                Some(t * 60_000),
+            );
+        }
+        let first_done = Some(2_483_000);
+        let after_one = pass(&["41:23", "41:23"], &["8:13", "42:54"]);
+        m.observe(&after_one, 120_000, first_done);
+        assert_eq!(m.observe(&after_one, 180_000, first_done).len(), 1);
+        let mismatched = pass(&["41:23", "41:23"], &["40:00", "49:45"]);
+        for t in 4..12 {
+            assert!(
+                m.observe(&mismatched, t * 60_000, Some(5_058)).is_empty(),
+                "the columns disagree, so only the timer could speak, at {t}"
+            );
+        }
     }
 
     /// Rows run in order down the board, so a cumulative that would land
@@ -2071,6 +2277,28 @@ mod tests {
     #[test]
     fn replays_a_whole_numbered_broadcast() {
         check("num-2830524439", 10, 360);
+    }
+
+    /// A numbered day whose big timer went illegible an hour and three
+    /// quarters in and never came back — and tesseract went on answering,
+    /// parsing the wreckage into "5.058", "9.699", "0499", numbers minutes or
+    /// hours from the marathon total and different every frame.
+    ///
+    /// Every completion after the fourth game read as either ahead of that
+    /// total or hours behind it, and the day recorded four games of ten. It is
+    /// the case for reading the board's own arithmetic as evidence in its own
+    /// right: the six lost games are all vouched for by the row above them and
+    /// their own segment column, to the second, on a board that says nothing
+    /// at all about the timer.
+    ///
+    /// Its last game is the tightest of them: Vice: Project Doom's row shows
+    /// its result on the last two passes of the broadcast and on no others,
+    /// which is exactly the two readings a minute apart that a completion
+    /// needs, with the timer reading 1:30:05 for a marathon four and a half
+    /// hours old.
+    #[test]
+    fn replays_a_broadcast_whose_timer_died_halfway() {
+        check("num-2839800169", 10, 400);
     }
 
     /// The same broadcast with the bot restarted in the middle of it — a
