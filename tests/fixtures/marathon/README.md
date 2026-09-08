@@ -33,7 +33,10 @@ twice.
 | `num-2839800169` | VOD 2839800169, Aug 7, "Arcathlon #5", 5h20m, 397 passes | the big timer goes illegible 1h42m in and never comes back, and tesseract goes on answering — "5.058", "9.699", "0499", `1:12:54` turning into 4990 ms between one frame and the next — so from the fifth game on the marathon total is wrong by minutes or hours and wrong differently every pass. Nothing else about the day is hard; it recorded four games of ten until the board's own arithmetic was allowed to speak. The last game's result is on the final two passes of the broadcast and no others |
 
 Fields per pass: `t_ms` (into the broadcast), `total_ms` (the marathon total,
-null where the timer went unread), `title` (null on most passes — these were
+null where the timer went unread — captured before `sanity::Monotone` was put
+between the timer reader and this field, so `num-2839800169`'s wreckage is
+still in it, which is that fixture's whole point: the tracker must not trust
+the total whatever else does), `title` (null on most passes — these were
 captured with a pane crop that cut the title row off, which is why the
 tracker is not allowed to need it), and `rows` of `{name, cells}` exactly as
 the board reader returned them, junk and all. `expect` is the answer key:
@@ -73,3 +76,24 @@ To rebuild one: replay the VOD with `scripts/replay-arcathlon.sh` (or any
 config with `debug.board_log` and `debug.obs_log` on), then join the two logs
 — every board pass, plus the last `parsed_ms` within the 30 s before it — and
 wrap them around the answer key's ten games.
+
+## Every broadcast, not just these four
+
+Those two logs for every broadcast replayed live under `arcathlon-db/`, which
+is 300 MB of working set and is not in the repository.
+`marathon::tests::replays_every_captured_broadcast` replays all of them and
+scores each against an answer key taken from that board's own first and last
+word — a row whose settled cumulative changed was played, a row still showing
+what it showed at the start was not, and on a numbered event the giveaway is
+that its value is identical on every broadcast of that event. It prints a
+table:
+
+    ARCATHLON_DB=arcathlon-db cargo test --release \
+      replays_every_captured -- --ignored --nocapture
+
+It is `#[ignore]`d because the directory is not there in CI. Use it to
+measure a change to `src/marathon.rs`, `src/signature.rs` or the gate in
+`src/sanity.rs` against every broadcast there is; the four fixtures above are
+what CI runs. Its answer key is OCR like everything else here, so a row it
+scores against the tracker is worth reading off the board log by hand before
+believing it.
