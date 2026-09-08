@@ -188,11 +188,49 @@ pub(crate) fn into_lines(mut boxes: Vec<(R, String)>) -> Vec<Vec<(R, String)>> {
     lines
 }
 
+/// Whether a header line names a speedrun category rather than a game.
+///
+/// Deliberately narrow: it decides only whether to prefer the line above,
+/// so a game wrongly called a category loses its own name. A category is
+/// recognised by the percent sign every "Any%" and "100%" carries, or by
+/// one of the words a category is built from — none of which appears in a
+/// game's name on his boards. "Any% (Beginner)" and "Warpless" are
+/// categories; "Die Hard (NES)" and "Ninja Gaiden (NES)" are not.
+///
+/// OCR reads "%" from these panes reliably, but reads it as "7", "Z" or
+/// nothing often enough that the word list has to stand on its own.
+fn reads_as_category(s: &str) -> bool {
+    const WORDS: [&str; 8] = [
+        "glitchless",
+        "warpless",
+        "beginner",
+        "no major",
+        "all stages",
+        "any%",
+        "100%",
+        "low%",
+    ];
+    let lower = s.to_lowercase();
+    lower.contains('%') || WORDS.iter().any(|w| lower.contains(w))
+}
+
 /// The title lines above the split rows, from the letters pass: the title
 /// is the line with the most letters (at least four) — the topmost line is
 /// not necessarily it, themed layouts have artwork above the pane that OCR
 /// turns into stray syllables — and the subtitle is whatever sits directly
-/// under it. Words are taken at confidence 30 and up, within the timer's
+/// under it.
+///
+/// One correction to "most letters": LiveSplit prints the game above the
+/// category, and the category is sometimes the wordier of the two. On his
+/// Big 20 boards "Any% (Beginner)" outweighs "Die Hard (NES)", so the
+/// densest line was the category, the game went unread, and the pane
+/// answered "what is this timing?" with a category that names no game. A
+/// line that reads as a category therefore yields to the line above it,
+/// when that line has letters of its own. Artwork above the pane still
+/// loses to the header, because the rule moves up exactly one line and
+/// only from a line that says "category" in as many words.
+///
+/// Words are taken at confidence 30 and up, within the timer's
 /// horizontal band, no taller than twice the timer crop, with something
 /// alphanumeric in them and not digits alone (that is the attempt counter).
 /// `splits_top` is the top of the split rows in 1x pixels; nothing at or
@@ -244,6 +282,12 @@ pub(crate) fn title_lines(
         .filter(|(_, s)| letters_in(s) >= 4)
         .max_by_key(|(_, s)| letters_in(s))
         .map(|(i, _)| i);
+    // The densest line is the category on a board whose category is wordier
+    // than its game; the game is then the line directly above.
+    let title_idx = title_idx.map(|i| match i.checked_sub(1) {
+        Some(above) if reads_as_category(&lines[i]) && letters_in(&lines[above]) >= 4 => above,
+        _ => i,
+    });
     (
         title_idx.map(|i| lines[i].clone()),
         title_idx.and_then(|i| lines.get(i + 1).cloned()),
@@ -561,7 +605,7 @@ pub fn game_matches(detected: &str, configured: &str) -> bool {
 /// Levenshtein within a fifth of the longer string, capped: two names of
 /// different games differ by far more than OCR damage does. Empty strings
 /// never match.
-fn edit_close(a: &str, b: &str) -> bool {
+pub(crate) fn edit_close(a: &str, b: &str) -> bool {
     let (m, n) = (a.chars().count(), b.chars().count());
     if m == 0 || n == 0 {
         return false;
@@ -965,6 +1009,80 @@ mod tests {
         let b = read_board(&[], &[], 2, (100, 200, 140, 40));
         assert_eq!(b, Board::default());
         assert_eq!(canonical_key(&b, &Config::for_test_with_min_final(1)), None);
+    }
+
+    /// The header of a Big 20 board, at 2x: the game over the category,
+    /// the attempt counter to their right. The counter is digits alone and
+    /// is not a header line.
+    fn header(lines: &[&[&str]]) -> Vec<ocr::Word> {
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let y = 20 + i as u32 * 36;
+            let mut x = 150;
+            for t in line.iter() {
+                let w = 30 + t.chars().count() as u32 * 14;
+                out.push(word(x, y, w, 22, t));
+                x += w + 10;
+            }
+        }
+        out
+    }
+
+    /// The pane names the game even when the category is the wordier line.
+    /// His Big 20 board prints "Die Hard (NES)" over "Any% (Beginner)":
+    /// the category carries eleven letters to the game's ten, so the
+    /// densest-line rule read the category as the game and the board
+    /// answered "what is this timing?" with a name no game has. The bot
+    /// filed that broadcast's resets as Ninja Gaiden attempts.
+    #[test]
+    fn the_title_is_the_game_not_the_wordier_category() {
+        let letters = header(&[&["Die", "Hard", "(NES)"], &["Any%", "(Beginner)"]]);
+        let (title, sub) = title_lines(&letters, 2, (100, 200, 100, 40), 60);
+        assert_eq!(title.as_deref(), Some("Die Hard (NES)"));
+        assert_eq!(sub.as_deref(), Some("Any% (Beginner)"));
+    }
+
+    /// The correction must not disturb the board it was not written for:
+    /// his Ninja Gaiden header already put the game on the denser line.
+    #[test]
+    fn the_title_is_still_the_game_when_the_category_is_short() {
+        let letters = header(&[&["Ninja", "Gaiden", "(NES)"], &["Any%"]]);
+        let (title, sub) = title_lines(&letters, 2, (100, 200, 100, 40), 60);
+        assert_eq!(title.as_deref(), Some("Ninja Gaiden (NES)"));
+        assert_eq!(sub.as_deref(), Some("Any%"));
+    }
+
+    /// A category with nothing above it keeps the title. Preferring the
+    /// line above unconditionally would leave a one-line header nameless.
+    #[test]
+    fn a_category_alone_on_the_header_is_still_the_title() {
+        let letters = header(&[&["Any%", "(Beginner)"]]);
+        let (title, sub) = title_lines(&letters, 2, (100, 200, 100, 40), 60);
+        assert_eq!(title.as_deref(), Some("Any% (Beginner)"));
+        assert_eq!(sub, None);
+    }
+
+    #[test]
+    fn a_category_is_told_from_a_game_by_its_own_words() {
+        for s in [
+            "Any%",
+            "Any% (Beginner)",
+            "100%",
+            "Warpless",
+            "All Stages",
+            "No Major Glitches",
+        ] {
+            assert!(reads_as_category(s), "{s} should read as a category");
+        }
+        for s in [
+            "Die Hard (NES)",
+            "Ninja Gaiden (NES)",
+            "Batman: ROTJ",
+            "Legacy of the Wizard",
+            "Crystal Palace",
+        ] {
+            assert!(!reads_as_category(s), "{s} is a game, not a category");
+        }
     }
 
     #[test]

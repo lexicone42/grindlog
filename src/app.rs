@@ -47,6 +47,7 @@ use tracing::{debug, error, info, warn};
 use crate::board::{self, game_matches, Board};
 use crate::config::Config;
 use crate::db::{self, NewRun};
+use crate::identity;
 use crate::marathon;
 use crate::ocr::{self, OcrEngine, PreprocessCfg};
 use crate::sanity;
@@ -1253,70 +1254,82 @@ fn sane_reference(kind: RefKind, ms: i64, refs: &RefTracker, cfg: &Config) -> bo
     }
 }
 
-/// Apply a freshly read title row. Recording is suppressed only after two
-/// consecutive mismatches, and resumes on the first match: one garbled read
-/// of the game's name must not take the rest of a broadcast with it.
+/// Apply a freshly read pane: log the header when what it says changes,
+/// and put the board to [`identity::Fingerprint`] to decide whether the
+/// pane is still timing the game this deployment tracks.
+///
+/// The verdict used to come from the header alone and was off by default,
+/// which is how a Big 20 broadcast of Die Hard came to be recorded as
+/// Ninja Gaiden attempts 3138 and 3139. It now takes two of the board's
+/// four signals (see `identity`), so it is safe enough to leave on, and
+/// `game.require_title_match` survives as the strict setting.
+///
+/// The header is taken from the board the pane reader measured, and only
+/// then from `readings`, which reads the same lines through the rectangle
+/// the config describes. The two agree on his Ninja Gaiden layout and part
+/// company on any other: replayed against the Big 20 broadcast, the
+/// measured board read "Die Hard (NES)" on every pass while the configured
+/// rectangle — anchored above where that pane's rows actually start — read
+/// no header at all, and a signal that cannot see the header cannot use it.
 #[allow(clippy::too_many_arguments)]
-fn apply_title(
+fn apply_identity(
     readings: &PaneReadings,
+    board_read: &Board,
     cfg: &Config,
+    fp: &identity::Fingerprint,
     pane_game: &mut Option<String>,
-    pane_game_ok: &mut bool,
-    mismatches: &mut u32,
+    id: &mut identity::Identity,
     health: &mut db::SessionHealth,
     at_ms: i64,
 ) {
-    let Some(name) = readings.game.as_deref() else {
-        return; // title unreadable: leave the verdict as it stands
-    };
-    let matches = game_matches(name, &cfg.game.name);
-    *mismatches = if matches { 0 } else { *mismatches + 1 };
+    let title = board_read.title.as_deref().or(readings.game.as_deref());
+    let category = board_read
+        .subtitle
+        .as_deref()
+        .or(readings.category.as_deref());
     // A change of title is a change of what it says, not of how tesseract
     // spelled it this minute: "(NES" and "(NES)" flipping every read filled
     // the session's event list (thousands of "title" events a day against
     // its cap of 400). The first read of a session always records.
-    let changed = pane_game.as_deref().map(board::normalise_title).as_deref()
-        != Some(board::normalise_title(name).as_str());
-    if changed {
-        info!(
-            "layout title: {name:?}{}{}",
-            readings
-                .category
-                .as_deref()
-                .map(|c| format!(" [{c}]"))
-                .unwrap_or_default(),
-            if matches {
-                ""
-            } else {
-                " — NOT the tracked game"
-            }
-        );
-        health.event(at_ms, "title", name.to_string());
-        *pane_game = Some(name.to_string());
-    }
-    if !cfg.game.require_title_match {
-        *pane_game_ok = true;
-        return;
-    }
-    let ok = matches || *mismatches < 2;
-    if ok != *pane_game_ok {
-        if ok {
+    if let Some(name) = title {
+        let changed = pane_game.as_deref().map(board::normalise_title).as_deref()
+            != Some(board::normalise_title(name).as_str());
+        if changed {
             info!(
-                "layout is timing {:?} again; recording resumed",
-                cfg.game.name
+                "layout title: {name:?}{}{}",
+                category.map(|c| format!(" [{c}]")).unwrap_or_default(),
+                if game_matches(name, &cfg.game.name) {
+                    ""
+                } else {
+                    " — NOT the tracked game"
+                }
             );
-        } else {
-            warn!(
-                "layout is timing {name:?}, not {:?}; recording suspended",
-                cfg.game.name
-            );
+            health.event(at_ms, "title", name.to_string());
+            *pane_game = Some(name.to_string());
         }
+    }
+    let reading = fp.read(title, category, board_read);
+    let Some(ok) = id.observe(&reading) else {
+        return;
+    };
+    let what = title.unwrap_or("another game");
+    if ok {
+        info!(
+            "layout is timing {:?} again; recording resumed",
+            cfg.game.name
+        );
+        health.event(at_ms, "resumed", what.to_string());
+    } else {
+        warn!(
+            "layout is timing {what:?}, not {:?} ({} disagree); recording suspended",
+            cfg.game.name,
+            reading.describe_against()
+        );
         health.event(
             at_ms,
-            if ok { "resumed" } else { "suspended" },
-            name.to_string(),
+            "suspended",
+            format!("{what} ({})", reading.describe_against()),
         );
-        *pane_game_ok = ok;
     }
 }
 
@@ -2058,11 +2071,23 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
     }
     let mut last_sob_read_t: i64 = i64::MIN / 2;
-    // The game the layout says it is timing, whether runs may be recorded,
-    // and how many consecutive reads disagreed with the configured game.
+    // The game the layout says it is timing, and whether runs may be
+    // recorded from it. The verdict comes from the board (see `identity`),
+    // fingerprinted against the configured game and the highest attempt
+    // that game has already been seen at — its counter cannot go back
+    // below that without being another splits file.
     let mut pane_game: Option<String> = None;
-    let mut pane_game_ok = true;
-    let mut title_mismatches: u32 = 0;
+    let fingerprint = identity::Fingerprint::of(
+        &cfg,
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(ls_attempt) FROM runs WHERE game = ? AND category = ?",
+        )
+        .bind(&cfg.game.name)
+        .bind(&cfg.game.category)
+        .fetch_one(&pool)
+        .await?,
+    );
+    let mut pane_identity = identity::Identity::new(&cfg);
     // The board reader's last snapshot, in shadow mode.
     let mut last_board_snapshot: Option<board::Snapshot> = None;
     // The marathon in progress, when the board is one a `[[games]]` entry
@@ -2675,14 +2700,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                     {
                         Ok((geom, readings, board)) => {
                             let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
-                            // What the pane says it is timing. Only gates
-                            // recording when the operator asked it to.
-                            apply_title(
+                            // What the pane says it is timing, and whether
+                            // that is still this deployment's game.
+                            apply_identity(
                                 &readings,
+                                &board,
                                 &cfg,
+                                &fingerprint,
                                 &mut pane_game,
-                                &mut pane_game_ok,
-                                &mut title_mismatches,
+                                &mut pane_identity,
                                 &mut health,
                                 at_ms,
                             );
@@ -3055,7 +3081,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         // The layout is timing a different game (a marathon broadcast moving
         // on to the next one): read on so the title is re-checked at the next
         // lock, but record nothing.
-        let obs = if pane_game_ok && !marathon_active {
+        let obs = if pane_identity.ok() && !marathon_active {
             parsed.map(Obs::Time).unwrap_or(Obs::Illegible)
         } else {
             Obs::Illegible
@@ -3384,12 +3410,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                         }
                     }
                     let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
-                    apply_title(
+                    apply_identity(
                         &readings,
+                        &board,
                         &cfg,
+                        &fingerprint,
                         &mut pane_game,
-                        &mut pane_game_ok,
-                        &mut title_mismatches,
+                        &mut pane_identity,
                         &mut health,
                         at_ms,
                     );
@@ -3982,17 +4009,34 @@ mod tests {
         assert_eq!(r.category.as_deref(), Some("Any%"));
     }
 
+    /// One header reading against a board that says nothing else, so the
+    /// header is the only signal in play. Returns whether recording is
+    /// still allowed afterwards.
+    fn feed_header(
+        title: Option<&str>,
+        cfg: &Config,
+        fp: &identity::Fingerprint,
+        game: &mut Option<String>,
+        id: &mut identity::Identity,
+        health: &mut db::SessionHealth,
+    ) -> bool {
+        let readings = PaneReadings {
+            game: title.map(str::to_string),
+            category: None,
+            refs: Vec::new(),
+        };
+        apply_identity(&readings, &Board::default(), cfg, fp, game, id, health, 0);
+        id.ok()
+    }
+
     #[test]
     fn title_events_record_a_change_of_title_not_of_spelling() {
         let mut cfg = Config::for_test_with_min_final(660_000);
         cfg.game.name = "Ninja Gaiden (NES)".into();
-        let (mut game, mut ok, mut miss) = (None, true, 0u32);
+        let fp = identity::Fingerprint::of(&cfg, None);
+        let mut id = identity::Identity::new(&cfg);
+        let mut game = None;
         let mut health = db::SessionHealth::default();
-        let titled = |s: &str| PaneReadings {
-            game: Some(s.into()),
-            category: None,
-            refs: Vec::new(),
-        };
         let titles = |h: &db::SessionHealth| {
             h.events
                 .iter()
@@ -4008,35 +4052,18 @@ mod tests {
             "Ninja Gaiden (NES",
             "NINJA GAIDEN (NES)",
         ] {
-            apply_title(
-                &titled(s),
-                &cfg,
-                &mut game,
-                &mut ok,
-                &mut miss,
-                &mut health,
-                0,
-            );
+            feed_header(Some(s), &cfg, &fp, &mut game, &mut id, &mut health);
         }
         assert_eq!(titles(&health), ["Ninja Gaiden (NES"]);
         // A real change does, and so does the way back.
-        apply_title(
-            &titled("Astyanax"),
+        feed_header(Some("Astyanax"), &cfg, &fp, &mut game, &mut id, &mut health);
+        feed_header(
+            Some("Ninja Gaiden (NES)"),
             &cfg,
+            &fp,
             &mut game,
-            &mut ok,
-            &mut miss,
+            &mut id,
             &mut health,
-            0,
-        );
-        apply_title(
-            &titled("Ninja Gaiden (NES)"),
-            &cfg,
-            &mut game,
-            &mut ok,
-            &mut miss,
-            &mut health,
-            0,
         );
         assert_eq!(
             titles(&health),
@@ -4165,81 +4192,51 @@ mod tests {
     }
 
     #[test]
-    fn title_gate_needs_two_misreads_and_recovers() {
+    fn strict_title_gate_needs_two_misreads_and_recovers() {
         let mut cfg = Config::for_test_with_min_final(660_000);
         cfg.game.name = "Ninja Gaiden (NES)".into();
         cfg.game.require_title_match = true;
-        let (mut game, mut ok, mut miss) = (None, true, 0u32);
+        let fp = identity::Fingerprint::of(&cfg, None);
+        let mut id = identity::Identity::new(&cfg);
+        let mut game = None;
         let mut health = db::SessionHealth::default();
-        let titled = |s: &str| PaneReadings {
-            game: Some(s.into()),
-            category: None,
-            refs: Vec::new(),
+        let mut feed = |t: Option<&str>, id: &mut identity::Identity| {
+            feed_header(t, &cfg, &fp, &mut game, id, &mut health)
         };
         // One garbled read must not suspend a six-hour broadcast.
-        apply_title(
-            &titled("Nlnja Galden (NE5)"),
-            &cfg,
-            &mut game,
-            &mut ok,
-            &mut miss,
-            &mut health,
-            0,
-        );
-        assert!(ok, "a single misread is tolerated");
-        apply_title(
-            &titled("Nlnja Galden (NE5)"),
-            &cfg,
-            &mut game,
-            &mut ok,
-            &mut miss,
-            &mut health,
-            0,
-        );
-        assert!(!ok, "a second disagreeing read suspends recording");
+        let bad = Some("Nlnja Galden (NE5)");
+        assert!(feed(bad, &mut id), "a single misread is tolerated");
+        assert!(!feed(bad, &mut id), "a second disagreeing read suspends");
         // An unreadable title leaves the verdict alone...
-        apply_title(
-            &PaneReadings::default(),
-            &cfg,
-            &mut game,
-            &mut ok,
-            &mut miss,
-            &mut health,
-            0,
-        );
-        assert!(!ok);
+        assert!(!feed(None, &mut id));
         // ...and one good read brings it straight back.
-        apply_title(
-            &titled("Ninja Gaiden (NES)"),
-            &cfg,
-            &mut game,
-            &mut ok,
-            &mut miss,
-            &mut health,
-            0,
+        assert!(
+            feed(Some("Ninja Gaiden (NES)"), &mut id),
+            "recording resumes as soon as the title reads right"
         );
-        assert!(ok, "recording resumes as soon as the title reads right");
-        // With the gate off, a different game never suppresses anything.
-        cfg.game.require_title_match = false;
-        apply_title(
-            &titled("Super Mario Bros."),
-            &cfg,
-            &mut game,
-            &mut ok,
-            &mut miss,
-            &mut health,
-            0,
-        );
-        apply_title(
-            &titled("Super Mario Bros."),
-            &cfg,
-            &mut game,
-            &mut ok,
-            &mut miss,
-            &mut health,
-            0,
-        );
-        assert!(ok);
+    }
+
+    /// Left lenient — the deployed setting — the header disagreeing is one
+    /// signal of three and never suspends on its own. The board has to
+    /// corroborate it, which is what `identity` is for.
+    #[test]
+    fn a_lone_disagreeing_header_does_not_suspend_recording() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        let fp = identity::Fingerprint::of(&cfg, None);
+        let mut id = identity::Identity::new(&cfg);
+        let mut game = None;
+        let mut health = db::SessionHealth::default();
+        for _ in 0..4 {
+            assert!(feed_header(
+                Some("Super Mario Bros."),
+                &cfg,
+                &fp,
+                &mut game,
+                &mut id,
+                &mut health,
+            ));
+        }
     }
 
     #[test]
