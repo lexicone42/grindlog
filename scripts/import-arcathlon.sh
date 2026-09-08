@@ -10,9 +10,17 @@
 # and the live database already holds 45 Ninja Gaiden runs for that date),
 # so replacing the day would delete them. A marathon import is additive and
 # scoped to its own VOD: it removes only what a previous import of THIS VOD
-# left behind — matched on the session's vod_id, not on the date — and
-# inserts that VOD's session and its completed games beside whatever else
-# the day holds.
+# left behind and inserts that VOD's session and its completed games beside
+# whatever else the day holds.
+#
+# Scoped to the VOD is still not scoped enough on its own, because the same
+# morning-and-afternoon day is often ONE broadcast under ONE vod_id, which
+# the Ninja Gaiden backfill's session for that day already carries. Matching
+# on vod_id alone therefore deleted those runs — 30 of the 38 captured
+# marathons share a VOD with Ninja Gaiden runs, 1888 of them in total. What
+# this import owns is narrower: the sessions of the VOD that hold no run of
+# another category. Rehearse against a copy anyway; that is how this was
+# found.
 #
 # What lands: one session (source "vod", tagged with the event, carrying the
 # VOD id so every run can be linked to its moment) and one run per completed
@@ -66,26 +74,47 @@ for id in "${ids[@]}"; do
   # One transaction: drop what an earlier import of THIS VOD left, then
   # insert its session and its games. Row ids are the live database's own,
   # so nothing here depends on the per-VOD database's numbering.
+  #
+  # "What an earlier import left" is not everything carrying this vod_id.
+  # A day he spent on Ninja Gaiden in the morning and the marathon in the
+  # afternoon is ONE broadcast under ONE vod_id, so the Ninja Gaiden
+  # backfill's session for that day shares the id this import is scoped to.
+  # Deleting by vod_id alone took those runs with it: 30 of the 38 captured
+  # marathons sit in a VOD that already holds Ninja Gaiden runs, 1888 of
+  # them altogether, and a rehearsal against a copy stopped at the first one
+  # with 57 runs gone. So this owns only the sessions of the VOD that hold
+  # no run of another category — the ones it wrote itself, and the empty
+  # ones a half-finished import left.
   q "$LIVE" "
     ATTACH DATABASE '$(pwd)/$src' AS src;
     BEGIN IMMEDIATE;
+    CREATE TEMP TABLE mine AS
+      SELECT s.id FROM sessions s
+       WHERE s.vod_id = '$id'
+         AND NOT EXISTS (SELECT 1 FROM runs r
+                          WHERE r.session_id = s.id AND r.category <> 'Arcathlon');
     DELETE FROM splits WHERE run_id IN
-      (SELECT r.id FROM runs r JOIN sessions s ON r.session_id = s.id WHERE s.vod_id = '$id');
-    DELETE FROM runs WHERE session_id IN (SELECT id FROM sessions WHERE vod_id = '$id');
-    DELETE FROM sessions WHERE vod_id = '$id';
+      (SELECT id FROM runs WHERE session_id IN (SELECT id FROM mine));
+    DELETE FROM runs WHERE session_id IN (SELECT id FROM mine);
+    DELETE FROM sessions WHERE id IN (SELECT id FROM mine);
+    DROP TABLE mine;
     INSERT INTO sessions (started_at_ms, ended_at_ms, source, label, tag, frames, parsed,
                           probing, relocks, counter_reads, events, vod_id, vod_created_at_ms)
       SELECT started_at_ms, ended_at_ms, source, label, tag, frames, parsed,
              probing, relocks, counter_reads, events, '$id', vod_created_at_ms
       FROM src.sessions ORDER BY started_at_ms;
+    -- The session just written, held aside: the VOD's other sessions carry
+    -- the same vod_id, and last_insert_rowid() moves with every run below.
+    CREATE TEMP TABLE target AS SELECT last_insert_rowid() AS id;
     INSERT INTO runs (game, category, attempt_number, started_at_ms, ended_at_ms, outcome,
                       reset_reason, final_time_ms, last_timer_ms, session_id, ls_attempt)
       SELECT r.game, r.category,
              (SELECT COUNT(*) FROM runs x WHERE x.game = r.game AND x.category = r.category
                 AND x.started_at_ms <= r.started_at_ms) + 1,
              r.started_at_ms, r.ended_at_ms, r.outcome, r.reset_reason, r.final_time_ms,
-             r.last_timer_ms, (SELECT id FROM sessions WHERE vod_id = '$id' LIMIT 1), r.ls_attempt
+             r.last_timer_ms, (SELECT id FROM target), r.ls_attempt
       FROM src.runs r WHERE r.category = 'Arcathlon' ORDER BY r.started_at_ms;
+    DROP TABLE target;
     COMMIT;
     DETACH DATABASE src;"
 
