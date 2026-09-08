@@ -49,6 +49,7 @@ use crate::config::Config;
 use crate::db::{self, NewRun};
 use crate::marathon;
 use crate::ocr::{self, OcrEngine, PreprocessCfg};
+use crate::sanity;
 use crate::state::{Event, Obs, Tracker};
 use crate::timeparse::{format_ms, has_fraction, parse_time, parse_timer_text, time_shaped};
 use crate::{capture, chat, util};
@@ -1358,10 +1359,12 @@ fn shadow_board(
     *last = Some(snap);
 }
 
-/// The marathon total for a pane pass: the timer as last read, when it was
-/// read in the last half minute. Only ever used to reject a cumulative time
-/// the runner has not reached yet, so a stale or missing reading costs
-/// nothing but the check.
+/// The marathon total for a pane pass: the timer as last BELIEVED, when it
+/// was believed in the last half minute — `last` comes from
+/// [`sanity::Monotone`], which drops readings the clock could not have made.
+/// None is no opinion, and the board's own arithmetic speaks for a
+/// completion where the timer cannot, so a stale or missing reading costs
+/// only the check.
 fn marathon_total(last: Option<(i64, i64)>, t: i64) -> Option<i64> {
     last.filter(|(_, seen)| t - seen <= 30_000).map(|(v, _)| v)
 }
@@ -1404,12 +1407,18 @@ pub(crate) const MARATHON_LET_GO: u32 = 3;
 
 /// Consecutive pane passes reading a marathon board before an event is
 /// taken up, the mirror of [`MARATHON_LET_GO`] and for the same reason: a
-/// verdict is evidence from one frame, not a fact about the day. His own
-/// Ninja Gaiden board measures like a marathon board whenever three of its
-/// labels come back damaged into words of their own — 13 passes of it over
-/// the eight marathon broadcasts, never more than two in a row — and an
-/// event started on one of those suspends the timer and files his acts as
-/// games. A real marathon board reads as one for hours.
+/// verdict is evidence from one frame, not a fact about the day. An event
+/// started on a stray reading suspends the timer and files his acts as
+/// games.
+///
+/// It is the second line of defence, not the first. What his run board
+/// reads as is settled by the column its rows are read over — eleven
+/// minutes, where a marathon of ten NES games runs for hours — because a
+/// count of agreeing passes was never going to hold on its own: on VOD
+/// 2855279442 his Ninja Gaiden pane read as a marathon board on three
+/// passes running inside the first minute of the broadcast, took an event
+/// up, filed five acts as finished games, and cost the day all ten of its
+/// real ones.
 pub(crate) const MARATHON_TAKE_UP: u32 = 3;
 
 /// How far back a restarted bot looks for the completions it already
@@ -1461,7 +1470,18 @@ async fn track_marathon(
         }
         marathon::Verdict::Board(alias) => {
             *misses = 0;
-            if state.as_ref().is_none_or(|m| m.category() != alias.name) {
+            // A tracker is rebuilt when the event changes — and when the
+            // BOARD does under it. `disowns` is the second case: the same
+            // event by title and configuration, but not one of the rows the
+            // tracker settled on is on screen any more, so its slots,
+            // names and baselines belong to a board that is gone. Rebuilt
+            // the way one is started, on three passes agreeing, and seeded
+            // from the database so nothing already recorded is recorded
+            // again.
+            if state
+                .as_ref()
+                .is_none_or(|m| m.category() != alias.name || m.disowns(board))
+            {
                 // An event is taken up on several passes agreeing, the way
                 // it is let go. One pass of a run board whose labels came
                 // back damaged reads as a marathon board, and starting an
@@ -1469,6 +1489,19 @@ async fn track_marathon(
                 *hits += 1;
                 if *hits < MARATHON_TAKE_UP {
                     return state.is_some();
+                }
+                if let Some(old) = state.take() {
+                    info!(
+                        "marathon board replaced under {:?}: not one of its rows is on screen \
+                         any more, so the tracker is rebuilt ({})",
+                        old.category(),
+                        old.describe()
+                    );
+                    health.event(
+                        at_ms,
+                        "marathon",
+                        format!("{} board replaced", old.category()),
+                    );
                 }
                 let mut m = marathon::Marathon::new(alias.name.clone());
                 // What a previous run of the bot over this same broadcast
@@ -2025,8 +2058,12 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut marathon_active = false;
     // The marathon total as last read, and when: the completion cross-check
     // wants the timer itself, since the state machine is fed nothing while a
-    // marathon board is up and its smoothed clock stops.
+    // marathon board is up and its smoothed clock stops. Only readings the
+    // clock could have made get in — see `sanity::Monotone`, and the
+    // broadcasts where a dead timer went on being parsed into numbers that
+    // vetoed every completion left in the day.
     let mut last_timer_seen: Option<(i64, i64)> = None;
+    let mut timer_clock = sanity::Monotone::new();
 
     // Recorded sources (vod/file) may decode much faster than realtime, so
     // the state machine is ticked by frame index instead of wall clock —
@@ -2189,6 +2226,11 @@ pub async fn run(cfg: Config) -> Result<()> {
                 not_marathon = 0;
                 marathon_hits = 0;
                 marathon_active = false;
+                // The next broadcast's timer is a different clock; holding
+                // this one's last reading would cost the new one the few
+                // frames it takes to be believed.
+                last_timer_seen = None;
+                timer_clock = sanity::Monotone::new();
                 if let Some(id) = session_id.take() {
                     if let Err(e) = db::update_session_health(&pool, id, &health).await {
                         warn!("failed to update session health: {e:#}");
@@ -2781,7 +2823,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     .smoothed_now(t)
                     .is_none_or(|s| (v - s).abs() <= cfg.detection.max_jump_ms)
         });
-        if let Some(v) = parsed {
+        if let Some(v) = parsed.and_then(|v| timer_clock.push(t, v)) {
             last_timer_seen = Some((v, t));
         }
         // Resume probing after a dark stretch on the active position: either

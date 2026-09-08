@@ -21,6 +21,12 @@
 use crate::board::Board;
 use crate::timeparse::parse_time;
 
+/// How far a running total must reach before a board of differently-named
+/// rows can be a marathon of them. Between his run board's column, which
+/// tops out at 11:37 over six acts, and his marathon's, which runs from a
+/// first game of twenty minutes to a four-hour finish.
+const MARATHON_MIN_MS: i64 = 20 * 60 * 1000;
+
 /// What the row labels look like as a set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Labels {
@@ -367,6 +373,16 @@ impl BoardSignature {
         };
         match self.labels {
             Labels::Sequential => run,
+            // Different games — over a column that has to be big enough to
+            // hold them. A marathon of ten NES games runs for hours and its
+            // first row alone is a quarter of one; his run board's column
+            // tops out at 11:37. When two or three of its act labels come
+            // back damaged into words of their own the labels read as
+            // different games, and on one broadcast that started an event on
+            // his Ninja Gaiden pane, filed five acts as finished games and
+            // then missed all ten real ones. The column is what settles it,
+            // and it is measured on the same frame as the labels.
+            Labels::Titles if self.total_ms.is_some_and(|t| t < MARATHON_MIN_MS) => run,
             Labels::Titles => marathon,
             Labels::Absent => {
                 // Nameless: an attempt counter means a run repeated, and a
@@ -775,6 +791,67 @@ mod tests {
         assert_eq!(s.shape(), Shape::Unknown);
         assert!(is_placeholder("024") && is_placeholder("077") && is_placeholder("227"));
         assert!(is_placeholder("0?") && !is_placeholder("SMB2"));
+    }
+
+    /// Names decide what the rows ARE; the column they are read over
+    /// decides whether ten games could fit in them. His Ninja Gaiden board
+    /// with two or three act labels damaged into words of their own reads as
+    /// different games, and it used to read as a marathon of them — over a
+    /// column eleven minutes long. On one broadcast that started an event on
+    /// his run pane, filed five acts as finished games and missed all ten
+    /// real ones.
+    #[test]
+    fn different_games_over_an_eleven_minute_column_are_one_games_segments() {
+        // VOD 2855279442, t=60 s, verbatim: the pass the event was taken up
+        // on, whose title read "Ninja ont (NES)" and named nothing.
+        let seg = ["0:47.5", "1:54.0", "1:21.2", "2:11.8", "2:24.5", "2:56.4"];
+        let cum = ["0:47.5", "2:41.5", "4:02.7", "6:14.5", "8:39.0", "11:35.4"];
+        let names = [
+            None,
+            Some("Act 2"),
+            None,
+            Some("Act 4"),
+            Some("Act 6"),
+            None,
+        ];
+        let mut rows: Vec<BoardRow> = (0..6).map(|i| row(names[i], &[seg[i], cum[i]])).collect();
+        rows.push(row(Some("Previous Segment"), &[]));
+        rows.push(row(Some("Sum of Best Segments"), &["11:32.0"]));
+        let s = BoardSignature::of(&board(None, rows.clone()));
+        assert_eq!(
+            s.labels,
+            Labels::Titles,
+            "the damaged labels really do read as different games: {}",
+            s.line()
+        );
+        assert_eq!(
+            s.shape(),
+            Shape::Run {
+                acts: 8,
+                partial: false
+            },
+            "…and eleven minutes is less than one game of a marathon"
+        );
+        // Different names over a marathon's column are a marathon's rows.
+        let hours: Vec<BoardRow> = ["Astyanax", "King Kong 2", "Hebereke", "Metal Storm"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| row(Some(n), &["30:00", &format!("{}:00:00", i + 1)]))
+            .collect();
+        assert_eq!(
+            BoardSignature::of(&board(None, hours)).shape(),
+            Shape::Marathon {
+                games: 4,
+                partial: false
+            }
+        );
+        // And a board whose column did not read at all is still judged by
+        // its names: an unread column is not a small one.
+        let unread: Vec<BoardRow> = ["Astyanax", "King Kong 2", "Hebereke"]
+            .iter()
+            .map(|n| row(Some(n), &[]))
+            .collect();
+        assert_eq!(BoardSignature::of(&board(None, unread)).total_ms, None);
     }
 
     /// Two labels that collapse are not a run board. His August 28 board
