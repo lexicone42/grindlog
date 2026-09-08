@@ -81,7 +81,7 @@ use crate::timeparse::{parse_time, time_shaped};
 /// Passes that must agree before a cumulative time is believed. The board is
 /// static text re-read once a minute, so a real value repeats and a digit
 /// slip does not.
-const AGREE: u32 = 2;
+pub const AGREE: u32 = 2;
 
 /// How far apart those readings must lie. The pane pass runs every ten
 /// seconds until the board's geometry settles and every minute afterwards,
@@ -89,7 +89,7 @@ const AGREE: u32 = 2;
 /// later off nearly the same pixels — measured: a completed row's 23:19 read
 /// "23:10" on two consecutive ten-second passes and on no other pass of the
 /// broadcast. A minute apart the frame is a different frame.
-const AGREE_SPREAD_MS: i64 = 45_000;
+pub const AGREE_SPREAD_MS: i64 = 45_000;
 
 /// How far a row's own segment column may sit from the difference between
 /// its cumulative and the previous game's before the reading is held back
@@ -423,8 +423,7 @@ pub struct Marathon {
     roster: Option<usize>,
     /// The roster's name for each slot's game, one entry per slot in slot
     /// order — the whole board assigned at once, because inside a roster no
-    /// two slots may take the same game (see
-    /// [`crate::roster::Rosters::assign`]).
+    /// two slots may take the same game (see [`crate::roster::Rosters::assign`]).
     assigned: Vec<Option<String>>,
     /// The slot names `roster` and `assigned` were last worked out from.
     /// Kept because reading the board against the rosters is the expensive
@@ -1332,6 +1331,16 @@ pub fn clean_name(raw: &str) -> Option<String> {
     (name.chars().filter(|c| c.is_alphabetic()).count() >= 3).then_some(name)
 }
 
+/// The cumulative time one row of a board showed, for a reader outside this
+/// module. [`crate::audit`] derives its answer key off the same columns the
+/// tracker reads and must not hold a second opinion about which cell is
+/// which: the pane leaves junk in front of the columns and a completed row
+/// prints a signed delta before them, so which cell is the cumulative is a
+/// decision, and it is made here.
+pub fn row_cumulative_ms(row: &BoardRow) -> Option<i64> {
+    read_cells(row).cumulative_ms
+}
+
 /// Is this cumulative where the marathon total stands right now? At the
 /// moment a game ends the two are the same number, and the total then sits
 /// there while the runner draws and sets up the next game, so a pane pass a
@@ -1362,6 +1371,111 @@ fn event_number(title: &str) -> Option<u32> {
     let (_, rest) = title.split_once('#')?;
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
+}
+
+// ---- replaying a broadcast off its logs ---------------------------------
+
+/// One pane pass, as the run loop hands it over: the board the reader
+/// returned, when it did, and the marathon total the timer had.
+#[derive(Debug, Clone)]
+pub struct Pass {
+    pub at_ms: i64,
+    pub total_ms: Option<i64>,
+    pub board: Board,
+}
+
+/// Drive passes through the whole decision sequence `app::track_marathon`
+/// runs — [`classify`], the take-up and let-go counts, the reconcile against
+/// what is already recorded, then [`Marathon::observe`] — and return the
+/// completions and a line describing the board at the end.
+///
+/// Feeding `observe` directly validates a path the bot does not run: it
+/// cannot see a marathon that is never started, or one torn down mid-event.
+/// No database is needed; a `Vec<i64>` of the cumulatives recorded so far is
+/// exactly what `db::marathon_totals` returns.
+///
+/// `restart_at` drops everything the tracker has learned at that pass and
+/// picks the event up again from the database alone, which is what a crash
+/// restart, a rollout or a stream reconnect does to the live bot mid-event.
+///
+/// This is what both the fixtures in this module and `crate::audit` replay
+/// through, so that what they measure is the path the bot takes.
+pub fn replay(
+    cfg: &Config,
+    passes: &[Pass],
+    restart_at: Option<usize>,
+) -> (Vec<Completion>, String) {
+    let mut state: Option<Marathon> = None;
+    let mut misses: u32 = 0;
+    let mut hits: u32 = 0;
+    // The database: every cumulative recorded for this event so far.
+    let mut recorded: Vec<i64> = Vec::new();
+    let mut out = Vec::new();
+    let mut verdicts = [0u32; 3];
+    for (n, p) in passes.iter().enumerate() {
+        if restart_at == Some(n) {
+            // The process goes down and comes back. Everything it had
+            // learned about the board goes with it; the database stays.
+            state = None;
+            misses = 0;
+            hits = 0;
+        }
+        match classify(&p.board, cfg, state.as_ref()) {
+            // Not evidence of anything: a marathon in force keeps reading the
+            // board, and none is started.
+            Verdict::Silent => verdicts[0] += 1,
+            Verdict::Other => {
+                verdicts[1] += 1;
+                misses += 1;
+                hits = 0;
+                // Somebody else's board — but the rows are left alone until
+                // enough passes agree, and then the event is over.
+                if misses >= crate::app::MARATHON_LET_GO {
+                    state = None;
+                }
+                continue;
+            }
+            Verdict::Board(alias) => {
+                verdicts[2] += 1;
+                misses = 0;
+                if state
+                    .as_ref()
+                    .is_none_or(|m| m.category() != alias.name || m.disowns(&p.board))
+                {
+                    // And an event is taken up on several passes agreeing,
+                    // the way it is let go.
+                    hits += 1;
+                    if hits < crate::app::MARATHON_TAKE_UP {
+                        continue;
+                    }
+                    let mut m = Marathon::new(alias.name.clone(), alias.rosters.clone());
+                    m.seed(&recorded);
+                    state = Some(m);
+                }
+            }
+        }
+        let Some(m) = state.as_mut() else { continue };
+        for c in m.observe(&p.board, p.at_ms, p.total_ms) {
+            recorded.push(c.cumulative_ms);
+            out.push(c);
+        }
+    }
+    let summary = format!(
+        "{} passes ({} board, {} silent, {} other){} — {}",
+        passes.len(),
+        verdicts[2],
+        verdicts[0],
+        verdicts[1],
+        match restart_at {
+            Some(n) => format!(", restarted at pass {n}"),
+            None => String::new(),
+        },
+        match &state {
+            Some(m) => m.describe(),
+            None => "no marathon in force at the end".to_string(),
+        }
+    );
+    (out, summary)
 }
 
 #[cfg(test)]
@@ -2612,100 +2726,10 @@ mod tests {
         cfg
     }
 
-    /// One pane pass, as the run loop hands it over.
-    struct Pass {
-        at_ms: i64,
-        total_ms: Option<i64>,
-        board: Board,
-    }
-
-    /// Drive passes through the decision sequence `app::track_marathon`
-    /// runs — `classify`, the take-up and let-go counts, the database
-    /// reconcile, then `observe` — rather than straight into `observe`.
-    /// Feeding `observe` directly validates a path the bot does not run: it
-    /// cannot see a marathon that is never started, or one torn down
-    /// mid-event, which is what two of the fixtures do. No database is
-    /// needed; a `Vec<i64>` of the cumulatives recorded so far is exactly
-    /// what `db::marathon_totals` returns.
-    ///
-    /// `restart_at` drops everything the tracker has learned at that pass and
-    /// picks the event up again from the database alone, which is what a
-    /// crash restart, a rollout or a stream reconnect does to the live bot
-    /// mid-event — the ordinary case, and not the one a replay from the
-    /// first pass exercises.
+    /// The fixtures' replay: [`replay`] against the configuration a
+    /// deployment following this streamer has.
     fn drive(passes: &[Pass], restart_at: Option<usize>) -> (Vec<Completion>, String) {
-        let cfg = board_config();
-        let mut state: Option<Marathon> = None;
-        let mut misses: u32 = 0;
-        let mut hits: u32 = 0;
-        // The database: every cumulative recorded for this event so far.
-        let mut recorded: Vec<i64> = Vec::new();
-        let mut out = Vec::new();
-        let mut verdicts = [0u32; 3];
-        for (n, p) in passes.iter().enumerate() {
-            if restart_at == Some(n) {
-                // The process goes down and comes back. Everything it had
-                // learned about the board goes with it; the database stays.
-                state = None;
-                misses = 0;
-                hits = 0;
-            }
-            match classify(&p.board, &cfg, state.as_ref()) {
-                // Not evidence of anything: a marathon in force keeps
-                // reading the board, and none is started.
-                Verdict::Silent => verdicts[0] += 1,
-                Verdict::Other => {
-                    verdicts[1] += 1;
-                    misses += 1;
-                    hits = 0;
-                    // Somebody else's board — but the rows are left alone
-                    // until enough passes agree, and then the event is over.
-                    if misses >= crate::app::MARATHON_LET_GO {
-                        state = None;
-                    }
-                    continue;
-                }
-                Verdict::Board(alias) => {
-                    verdicts[2] += 1;
-                    misses = 0;
-                    if state
-                        .as_ref()
-                        .is_none_or(|m| m.category() != alias.name || m.disowns(&p.board))
-                    {
-                        // And an event is taken up on several passes
-                        // agreeing, the way it is let go.
-                        hits += 1;
-                        if hits < crate::app::MARATHON_TAKE_UP {
-                            continue;
-                        }
-                        let mut m = Marathon::new(alias.name.clone(), alias.rosters.clone());
-                        m.seed(&recorded);
-                        state = Some(m);
-                    }
-                }
-            }
-            let Some(m) = state.as_mut() else { continue };
-            for c in m.observe(&p.board, p.at_ms, p.total_ms) {
-                recorded.push(c.cumulative_ms);
-                out.push(c);
-            }
-        }
-        let summary = format!(
-            "{} passes ({} board, {} silent, {} other){} — {}",
-            passes.len(),
-            verdicts[2],
-            verdicts[0],
-            verdicts[1],
-            match restart_at {
-                Some(n) => format!(", restarted at pass {n}"),
-                None => String::new(),
-            },
-            match &state {
-                Some(m) => m.describe(),
-                None => "no marathon in force at the end".to_string(),
-            }
-        );
-        (out, summary)
+        replay(&board_config(), passes, restart_at)
     }
 
     fn replay_from(name: &str, restart_at: Option<usize>) -> (Vec<Completion>, Vec<FGame>) {
@@ -2822,12 +2846,10 @@ mod tests {
         );
     }
 
+    /// A board's times are whole seconds, and the fixtures' answer keys are
+    /// written the way the board prints them.
     fn format_ms_short(ms: i64) -> String {
-        let s = ms / 1000;
-        match s / 3600 {
-            0 => format!("{}:{:02}", s / 60, s % 60),
-            h => format!("{h}:{:02}:{:02}", (s / 60) % 60, s % 60),
-        }
+        crate::timeparse::format_ms_seconds(ms)
     }
 
     /// A randomized day: no comparison times, "???" until each game is drawn,
@@ -2918,209 +2940,17 @@ mod tests {
 
     // ---- every broadcast captured, replayed ------------------------------
 
-    /// One line of `boards-<vod>.jsonl`: the board as the reader returned it
-    /// on one pane pass.
-    #[derive(serde::Deserialize)]
-    struct LoggedBoard {
-        t_ms: i64,
-        title: Option<String>,
-        rows: Vec<FRow>,
-    }
-
-    /// One line of `obs-<vod>.jsonl`, of the two fields that matter here:
-    /// the timer as the reader parsed it on one frame.
-    #[derive(serde::Deserialize)]
-    struct LoggedObs {
-        t_ms: i64,
-        parsed_ms: Option<i64>,
-    }
-
-    /// Every pane pass of one broadcast, with the marathon total the run
-    /// loop would have handed it: the last timer reading of the previous
-    /// 30 s that the clock could have made, which is what `app::run` feeds
-    /// through [`crate::sanity::Monotone`] and `app::marathon_total` returns.
-    fn logged_passes(dir: &str, vod: &str) -> Vec<Pass> {
-        let boards = std::fs::read_to_string(format!("{dir}/boards-{vod}.jsonl"))
-            .unwrap_or_else(|e| panic!("boards-{vod}.jsonl: {e}"));
-        let obs = std::fs::read_to_string(format!("{dir}/obs-{vod}.jsonl")).unwrap_or_default();
-        let mut clock = crate::sanity::Monotone::new();
-        let reads: Vec<(i64, i64)> = obs
-            .lines()
-            .filter_map(|l| serde_json::from_str::<LoggedObs>(l).ok())
-            .filter_map(|o| o.parsed_ms.map(|v| (o.t_ms, v)))
-            .filter_map(|(t, v)| clock.push(t, v).map(|v| (t, v)))
-            .collect();
-        let mut next = 0usize;
-        let mut last: Option<(i64, i64)> = None;
-        let mut out = Vec::new();
-        for line in boards.lines() {
-            let Ok(b) = serde_json::from_str::<LoggedBoard>(line) else {
-                continue;
-            };
-            while next < reads.len() && reads[next].0 <= b.t_ms {
-                last = Some((reads[next].1, reads[next].0));
-                next += 1;
-            }
-            out.push(Pass {
-                at_ms: b.t_ms,
-                total_ms: last
-                    .filter(|(_, seen)| b.t_ms - seen <= 30_000)
-                    .map(|(v, _)| v),
-                board: Board {
-                    title: b.title,
-                    subtitle: None,
-                    counter: None,
-                    rows: b
-                        .rows
-                        .iter()
-                        .map(|r| BoardRow {
-                            name: r.name.clone(),
-                            cells: r.cells.clone(),
-                            y: 0,
-                        })
-                        .collect(),
-                },
-            });
-        }
-        out
-    }
-
-    /// One row of the answer key: the name it settled on, the cumulative it
-    /// first settled on, and the one it last settled on.
-    type RowEnds = (Option<String>, Option<i64>, Option<i64>);
-
-    /// What the board itself says was played, which is the answer key this
-    /// replay is scored against: for each row, the first value it settled on
-    /// and the last, over the whole broadcast.
-    ///
-    /// Only the passes that returned the whole board are read, so a short
-    /// pass cannot shift a row onto its neighbour, and only values a row
-    /// showed twice over at least [`AGREE_SPREAD_MS`] count as settled, so a
-    /// digit slip is not a change. A row whose settled value changed was
-    /// played; a row still showing what it showed at the start was not,
-    /// which on a numbered event is its comparison time — and the giveaway
-    /// there is that the value is identical on every broadcast of the event.
-    ///
-    /// This is deliberately not the tracker's own machinery: it reads the
-    /// whole broadcast at once and takes the last word, which nothing
-    /// running live can do.
-    fn board_ends(passes: &[Pass]) -> Vec<RowEnds> {
-        // His Ninja Gaiden board comes back with ten rows too, when the
-        // pane's footer and a blank line join its six acts, and on the
-        // broadcasts where the marathon pane thins to the row being played
-        // it returns MORE ten-row passes than the marathon does. Its column
-        // tops out at twelve minutes where a marathon total runs to hours,
-        // which is what tells them apart without asking the code under test.
-        let mine: Vec<&Pass> = passes
-            .iter()
-            .filter(|p| {
-                p.board
-                    .rows
-                    .iter()
-                    .filter_map(|r| read_cells(r).cumulative_ms)
-                    .max()
-                    .is_some_and(|m| m > 20 * 60_000)
-            })
-            .collect();
-        let mut widths: HashMap<usize, usize> = HashMap::new();
-        for p in mine.iter().filter(|p| p.board.rows.len() >= 6) {
-            *widths.entry(p.board.rows.len()).or_insert(0) += 1;
-        }
-        let Some((&width, _)) = widths.iter().max_by_key(|(w, n)| (**n, **w)) else {
-            return Vec::new();
-        };
-        let all: Vec<&Pass> = mine
-            .into_iter()
-            .filter(|p| p.board.rows.len() == width)
-            .collect();
-        // And a pass counts only where a name on it is the name that row has
-        // been carrying all day, so a shifted read is not laid over the
-        // board.
-        let consensus: Vec<Option<String>> = (0..width)
-            .map(|i| {
-                let mut names: HashMap<String, usize> = HashMap::new();
-                for p in &all {
-                    if let Some(n) = p.board.rows[i].name.as_deref().and_then(clean_name) {
-                        *names.entry(n).or_insert(0) += 1;
-                    }
-                }
-                names
-                    .into_iter()
-                    .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
-                    .map(|(n, _)| n)
-            })
-            .collect();
-        let full: Vec<&Pass> = all
-            .into_iter()
-            .filter(|p| {
-                p.board.rows.iter().enumerate().any(|(i, r)| {
-                    let (Some(read), Some(known)) =
-                        (r.name.as_deref().and_then(clean_name), &consensus[i])
-                    else {
-                        return false;
-                    };
-                    game_matches(&read, known)
-                })
-            })
-            .collect();
-        let rows: Vec<(Option<String>, Vec<i64>)> = (0..width)
-            .map(|i| {
-                let mut names: HashMap<String, usize> = HashMap::new();
-                let mut seen: Vec<(i64, i64)> = Vec::new();
-                for p in &full {
-                    if let Some(n) = p.board.rows[i].name.as_deref().and_then(clean_name) {
-                        *names.entry(n).or_insert(0) += 1;
-                    }
-                    if let Some(c) = read_cells(&p.board.rows[i]).cumulative_ms {
-                        seen.push((p.at_ms, c));
-                    }
-                }
-                let name = names
-                    .into_iter()
-                    .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
-                    .map(|(n, _)| n);
-                let mut spread: HashMap<i64, (i64, i64, usize)> = HashMap::new();
-                for (t, c) in &seen {
-                    let e = spread.entry(*c).or_insert((*t, *t, 0));
-                    e.1 = *t;
-                    e.2 += 1;
-                }
-                let settled: Vec<i64> = seen
-                    .iter()
-                    .map(|(_, c)| *c)
-                    .filter(|c| {
-                        spread[c].2 >= AGREE as usize
-                            && spread[c].1 - spread[c].0 >= AGREE_SPREAD_MS
-                    })
-                    .collect();
-                (name, settled)
-            })
-            .collect();
-        // The column is cumulative, so what a row settled on has to be at
-        // least what the row above settled on. That is what throws out a
-        // misreading that settled: 51:15 read "1:15" on enough passes of one
-        // real board to look settled, and it lands under the row above it.
-        let (mut floor_first, mut floor_last) = (0, 0);
-        rows.iter()
-            .map(|(name, settled)| {
-                let first = settled.iter().find(|&&v| v >= floor_first).copied();
-                let last = settled.iter().rev().find(|&&v| v >= floor_last).copied();
-                floor_first = first.unwrap_or(floor_first);
-                floor_last = last.unwrap_or(floor_last);
-                (name.clone(), first, last)
-            })
-            .collect()
-    }
-
     /// Replay every broadcast in the capture working set and score it
-    /// against its own final board.
+    /// against the key its own board derives: [`crate::audit`], which is what
+    /// `scripts/audit-arcathlon.sh` runs and what the tables in it mean.
     ///
     /// `scripts/replay-arcathlon.sh` leaves `boards-<vod>.jsonl` and
     /// `obs-<vod>.jsonl` per broadcast under `arcathlon-db/`; that is 300 MB
     /// of working set and is not in the repository, so this test is ignored
     /// by default and finds the directory through `ARCATHLON_DB`. The four
-    /// fixtures beside it are what CI runs; this is how a change to this
-    /// module is measured against every broadcast there is.
+    /// fixtures above are what CI runs; this is how a change to this module,
+    /// to `src/signature.rs` or to the gate in `src/sanity.rs` is measured
+    /// against every broadcast there is.
     ///
     ///   ARCATHLON_DB=arcathlon-db cargo test --release \
     ///     replays_every_captured -- --ignored --nocapture
@@ -3128,148 +2958,23 @@ mod tests {
     #[ignore = "needs arcathlon-db/, the replay working set, which is not in the repository"]
     fn replays_every_captured_broadcast() {
         let dir = std::env::var("ARCATHLON_DB").unwrap_or_else(|_| "arcathlon-db".into());
-        let mut vods: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("{dir}: {e}"))
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let n = e.file_name().to_string_lossy().into_owned();
-                n.strip_prefix("boards-")
-                    .and_then(|r| r.strip_suffix(".jsonl"))
-                    .map(str::to_string)
-            })
-            .collect();
-        vods.sort();
-        let boards: Vec<Vec<Pass>> = vods.iter().map(|v| logged_passes(&dir, v)).collect();
-        let all_ends: Vec<Vec<RowEnds>> = boards.iter().map(|p| board_ends(p)).collect();
-        // A numbered event is run four times over the capture, and a row he
-        // did not reach shows the same comparison time every time — which is
-        // the second way to tell a comparison from a result, and the one
-        // that catches a randomized board's first game, whose row appears
-        // with its result already in it and so never changes. Broadcasts of
-        // one event are the ones whose rows carry the same games; a
-        // randomized draw matches nothing but itself.
-        let same_event = |a: usize, b: usize| -> bool {
-            let (x, y) = (&all_ends[a], &all_ends[b]);
-            x.len() == y.len()
-                && x.iter()
-                    .zip(y.iter())
-                    .filter(|(p, q)| match (&p.0, &q.0) {
-                        (Some(m), Some(n)) => game_matches(m, n),
-                        _ => false,
-                    })
-                    .count()
-                    * 10
-                    >= x.len() * 6
-        };
-        // The board prints whole seconds and one pass in a few damages a
-        // digit, so a recorded cumulative counts as this row's when it is
-        // within a couple of seconds — far inside the five seconds that
-        // separate one measured comparison time from its result.
-        let near = |a: i64, b: Option<i64>| b.is_some_and(|b| (a - b).abs() <= 2000);
-        let (mut t_played, mut t_found, mut t_wrong, mut t_unread) = (0, 0, 0, 0);
-        for (v, vod) in vods.iter().enumerate() {
-            let passes = &boards[v];
-            let ends = &all_ends[v];
-            let (found, summary) = drive(passes, None);
-            let elsewhere = |i: usize, value: i64| -> bool {
-                (0..vods.len()).any(|w| {
-                    w != v
-                        && same_event(v, w)
-                        && all_ends[w].get(i).is_some_and(|e| near(value, e.2))
-                })
-            };
-            // A row whose value never settled says nothing either way: it is
-            // not evidence that the game was played and not evidence that it
-            // was skipped, so it is reported and left out of the score.
-            let played: Vec<usize> = (0..ends.len())
-                .filter(|&i| {
-                    // A change of one second is a change: one measured
-                    // comparison time and its result are 2:47:22 and
-                    // 2:47:23. The tolerance belongs on the other
-                    // comparison, where a recorded value is matched to the
-                    // row it came from.
-                    ends[i]
-                        .2
-                        .is_some_and(|last| ends[i].1 != Some(last) || !elsewhere(i, last))
-                })
-                .collect();
-            let unread: Vec<usize> = (0..ends.len()).filter(|&i| ends[i].2.is_none()).collect();
-            let hit = |i: usize| found.iter().find(|c| near(c.cumulative_ms, ends[i].2));
-            let wrong: Vec<&Completion> = found
-                .iter()
-                .filter(|c| {
-                    !played.iter().any(|&i| near(c.cumulative_ms, ends[i].2))
-                        && !unread.contains(&c.slot)
-                })
-                .collect();
-            let hits = played.iter().filter(|&&i| hit(i).is_some()).count();
-            t_played += played.len();
-            t_found += hits;
-            t_wrong += wrong.len();
-            t_unread += unread.len();
-            println!(
-                "\n=== {vod}: {} of {} played rows recorded, {} not on the board, \
-                 {} row(s) never settled — {summary}",
-                hits,
-                played.len(),
-                wrong.len(),
-                unread.len()
-            );
-            for (i, (name, first, last)) in ends.iter().enumerate() {
-                let mark = match (played.contains(&i), unread.contains(&i), hit(i)) {
-                    (true, _, Some(c)) => format!("RECORDED as {:?} {}", c.game, fmt(c.segment_ms)),
-                    (true, _, None) => "MISSED".to_string(),
-                    (false, true, _) => match found.iter().find(|c| c.slot == i) {
-                        Some(c) => format!("row never settled; recorded {}", fmt(c.cumulative_ms)),
-                        None => "row never settled".to_string(),
-                    },
-                    (false, false, _) => "not played".to_string(),
-                };
-                println!(
-                    "  row {:2} {:24} {:>9} -> {:>9}  {mark}",
-                    i + 1,
-                    name.as_deref().unwrap_or("?"),
-                    first.map(fmt).unwrap_or_else(|| "-".into()),
-                    last.map(fmt).unwrap_or_else(|| "-".into()),
-                );
-                // Machine-readable, for checking against the hand-verified
-                // answer keys outside the test.
-                if let Some(c) = found.iter().find(|c| c.slot == i) {
-                    println!(
-                        "REC {vod} {} {} {} {}",
-                        c.slot + 1,
-                        c.cumulative_ms,
-                        c.segment_ms,
-                        c.game
-                    );
-                }
-            }
-            for c in &wrong {
-                println!(
-                    "  !!! row {:2} {:24} {:>9}  NOT ON THE FINAL BOARD (segment {})",
-                    c.slot + 1,
-                    c.game,
-                    fmt(c.cumulative_ms),
-                    fmt(c.segment_ms)
-                );
-                println!(
-                    "BAD {vod} {} {} {} {}",
-                    c.slot + 1,
-                    c.cumulative_ms,
-                    c.segment_ms,
-                    c.game
-                );
-            }
-        }
-        println!(
-            "\nTOTAL over {} broadcasts: {t_found} of {t_played} played rows recorded, \
-             {t_wrong} recorded that the final board does not show, {t_unread} row(s) never settled",
-            vods.len()
+        let totals = crate::audit::run(&board_config(), std::path::Path::new(&dir))
+            .unwrap_or_else(|e| panic!("{dir}: {e:#}"));
+        assert!(totals.broadcasts > 0, "{dir} holds no board logs");
+        // Deliberately not a threshold on how many games came out: the
+        // capture grows, and a broadcast whose pane went unreadable for an
+        // hour is not a defect in this module. Read the table for those.
+        //
+        // What IS asserted is what the board proves on its own evidence, with
+        // no answer key having to be right: an identified event holds ten
+        // distinct games, so no broadcast of one may record two runs under a
+        // single name, and no run may go under a game the board gave to
+        // another row.
+        assert_eq!(
+            totals.duplicated, 0,
+            "a name recorded twice in one broadcast"
         );
-    }
-
-    fn fmt(ms: i64) -> String {
-        format_ms_short(ms)
+        assert_eq!(totals.misfiled, 0, "a run filed under another row's game");
     }
 
     /// A run board whose labels read as different games — the mirror of the

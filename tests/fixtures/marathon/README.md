@@ -85,19 +85,31 @@ wrap them around the answer key's ten games.
 
 Those two logs for every broadcast replayed live under `arcathlon-db/`, which
 is 300 MB of working set and is not in the repository.
-`marathon::tests::replays_every_captured_broadcast` replays all of them and
-scores each against an answer key taken from that board's own first and last
-word — a row whose settled cumulative changed was played, a row still showing
-what it showed at the start was not, and on a numbered event the giveaway is
-that its value is identical on every broadcast of that event. It prints a
-table:
+`marathon::tests::replays_every_captured_broadcast` replays all of them
+through `src/audit.rs` and scores each against an answer key taken from that
+board's own first and last word — a row whose settled cumulative changed was
+played, a row still showing what it showed at the start was not, and on a
+numbered event the giveaway is that its value is identical on every broadcast
+of that event. The key names GAMES rather than row numbers: the roster the
+board's names fit says which ten are on it, and each row is assigned one of
+them one-to-one, so the report can say "he played Zelda II and the tracker
+filed it under Zelda". It prints a table:
 
     ARCATHLON_DB=arcathlon-db cargo test --release \
       replays_every_captured -- --ignored --nocapture
 
-It is `#[ignore]`d because the directory is not there in CI. Use it to
-measure a change to `src/marathon.rs`, `src/signature.rs` or the gate in
-`src/sanity.rs` against every broadcast there is; the four fixtures above are
-what CI runs. Its answer key is OCR like everything else here, so a row it
-scores against the tracker is worth reading off the board log by hand before
-believing it.
+`scripts/audit-arcathlon.sh` prints the same tables from the command line
+(`ngtwitchtimer audit`), which is the form to run before and after a change
+and diff.
+
+The test is `#[ignore]`d because the directory is not there in CI, and what
+it asserts is only what the board proves on its own evidence: no broadcast
+may record two runs under one name, and no run may go under a game the board
+gave to another row. The counts are for reading, not for failing on — the
+capture grows, and a broadcast whose pane went unreadable for an hour is not
+a defect. Use it to measure a change to `src/marathon.rs`, `src/roster.rs`,
+`src/signature.rs` or the gate in `src/sanity.rs` against every broadcast
+there is; the four fixtures above are what CI runs. Its answer key is OCR
+like everything else here, so a row it scores against the tracker is worth
+reading off the board log by hand before believing it — it disagrees with the
+hand-read keys in one known place, 2827296024's Astyanax.
