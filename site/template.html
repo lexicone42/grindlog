@@ -234,9 +234,29 @@
   #og-filter::placeholder { color: var(--muted); }
   #og-filter:focus-visible { outline: 2px solid var(--series); outline-offset: 1px; }
   /* 89 games is a long table; keep it scrollable rather than endless. */
-  .ogwrap { max-height: 420px; overflow-y: auto; overflow-x: auto; }
+  .ogwrap { max-height: 460px; overflow-y: auto; overflow-x: auto; }
   .ogwrap th { position: sticky; top: 0; background: var(--card); z-index: 1; }
   .og-cat { color: var(--muted); font-size: 12px; }
+  .ogtabs { display: inline-flex; gap: 6px; }
+  .ogtab { background: none; cursor: pointer; font-family: inherit; }
+  .ogtab.on { color: var(--ink); border-color: var(--series); }
+  .ogtab:focus-visible { outline: 2px solid var(--series); outline-offset: 1px; }
+  /* One marathon: a header naming the event, then its games in the order
+     he played them. */
+  .ogev { margin-bottom: 18px; }
+  .ogev + .ogev { border-top: 1px solid var(--hairline); padding-top: 14px; }
+  .ogev-h { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .ogev-name { font-weight: 600; }
+  .ogev-meta { color: var(--muted); font-size: 12px; }
+  .ogev-total { margin-left: auto; color: var(--ink2); }
+  /* A draw from the whole pool rather than one event's ten. */
+  .ogev-rand {
+    font-family: "Silkscreen", monospace; font-size: 9px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--gold);
+    border: 1px solid var(--gold-soft); border-radius: 3px; padding: 2px 6px 1px;
+  }
+  .ogev td { padding: 5px 10px 5px 0; }
+  .ogev .n { color: var(--muted); width: 2em; }
 
   footer { margin-top: 36px; color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
   footer .px { font-size: 9px; letter-spacing: .1em; }
@@ -348,13 +368,18 @@
   </div>
 
   <section class="card" style="margin-top:14px" id="other-games" hidden>
-    <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
       <h2>The other games</h2>
+      <span class="ogtabs" role="tablist" aria-label="How to group the other games">
+        <button class="chip ogtab on" id="ogtab-game" role="tab" aria-selected="true">By game</button>
+        <button class="chip ogtab" id="ogtab-event" role="tab" aria-selected="false">By event</button>
+      </span>
       <input id="og-filter" type="search" placeholder="filter by name…"
              aria-label="Filter the other games by name" autocomplete="off" spellcheck="false">
     </div>
     <p class="subnote" id="og-sub"></p>
-    <div class="ogwrap"><table id="other-table"></table></div>
+    <div class="ogwrap" id="og-bygame"><table id="other-table"></table></div>
+    <div class="ogwrap" id="og-byevent" hidden></div>
   </section>
 
   <footer>
@@ -1058,15 +1083,21 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
 
   const runs = rows.reduce((n, s) => n + s.attempts, 0);
   const finished = rows.reduce((n, s) => n + s.finished, 0);
+  const events = D.other_events || [];
+  const marathons = events.filter(e => e.games.length > 1);
+  const randos = marathons.filter(e => e.randomized);
   document.getElementById('og-sub').textContent =
-    `${rows.length} games besides ${D.current_game}, ${runs} runs, ${finished} finished. ` +
-    `Most recently played first.`;
+    `${rows.length} games besides ${D.current_game}, ${runs} runs, ${finished} finished` +
+    (marathons.length
+      ? `, over ${marathons.length} marathon${marathons.length > 1 ? 's' : ''}` +
+        (randos.length ? ` (${randos.length} randomized)` : '')
+      : '') + '.';
 
+  /* ---- by game ---- */
   const el = document.getElementById('other-table');
   const head = `<tr><th>Game</th><th>Category</th><th class="num">Best</th>` +
     `<th class="num">Done</th><th class="num">Last</th></tr>`;
-  const draw = q => {
-    const needle = q.trim().toLowerCase();
+  const drawGames = needle => {
     const shown = needle
       ? rows.filter(s => (s.game + ' ' + s.category).toLowerCase().includes(needle))
       : rows;
@@ -1081,7 +1112,60 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
       <td class="num tnum" title="${s.finished} finished of ${s.attempts} recorded">${s.finished}/${s.attempts}</td>
       <td class="num tnum">${s.last_at_ms ? dshort(s.last_at_ms) : '—'}</td></tr>`).join('');
   };
-  draw('');
-  document.getElementById('og-filter').addEventListener('input', e => draw(e.target.value));
+
+  /* ---- by event ---- */
+  // A marathon's games are listed in the order he played them, which is
+  // the order the board's rows completed, not the order they are printed.
+  const evEl = document.getElementById('og-byevent');
+  const drawEvents = needle => {
+    const shown = events
+      .map(e => ({ e, games: needle
+        ? e.games.filter(g => g.game.toLowerCase().includes(needle))
+        : e.games }))
+      .filter(x => x.games.length);
+    if (!shown.length) {
+      evEl.innerHTML = `<p class="og-cat">No event has a game matching that.</p>`;
+      return;
+    }
+    evEl.innerHTML = shown.map(({ e, games }) => {
+      const part = games.length !== e.games.length
+        ? `<span class="ogev-meta">${games.length} of ${e.games.length} shown</span>` : '';
+      return `<div class="ogev">
+        <div class="ogev-h">
+          <span class="ogev-name">${esc(e.label)}</span>
+          ${e.randomized ? '<span class="ogev-rand">random draw</span>' : ''}
+          <span class="ogev-meta">${dshort(e.started_at_ms)}</span>
+          ${part}
+          <span class="ogev-total tnum">${e.total_ms ? fmt(e.total_ms) : ''}</span>
+        </div>
+        <table>${games.map((g, i) => `<tr>
+          <td class="n tnum">${e.games.indexOf(g) + 1}</td>
+          <td>${esc(g.game)}</td>
+          <td class="num tnum">${g.final_time_ms != null ? fmt(g.final_time_ms) : '—'}</td>
+        </tr>`).join('')}</table>
+      </div>`;
+    }).join('');
+  };
+
+  /* ---- the two views ---- */
+  let view = 'game';
+  const byGame = document.getElementById('og-bygame');
+  const tabG = document.getElementById('ogtab-game'), tabE = document.getElementById('ogtab-event');
+  const render = () => {
+    const needle = document.getElementById('og-filter').value.trim().toLowerCase();
+    if (view === 'game') drawGames(needle); else drawEvents(needle);
+    byGame.hidden = view !== 'game';
+    evEl.hidden = view === 'game';
+    for (const [t, v] of [[tabG, 'game'], [tabE, 'event']]) {
+      t.classList.toggle('on', view === v);
+      t.setAttribute('aria-selected', String(view === v));
+    }
+  };
+  // No events means nothing to group by, so the tab would lead nowhere.
+  if (!events.length) tabE.hidden = true;
+  tabG.addEventListener('click', () => { view = 'game'; render(); });
+  tabE.addEventListener('click', () => { view = 'event'; render(); });
+  document.getElementById('og-filter').addEventListener('input', render);
+  render();
 })();
 </script>

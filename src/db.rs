@@ -841,6 +841,59 @@ pub async fn runs_brief(
         .collect())
 }
 
+/// One run of a game this deployment does not follow, with the broadcast
+/// it belongs to. A marathon puts ten of these in one session, which is
+/// what lets the report group them back into the event they were.
+#[derive(Debug, Clone, Serialize)]
+pub struct OtherRun {
+    pub game: String,
+    pub category: String,
+    pub started_at_ms: i64,
+    pub final_time_ms: Option<i64>,
+    pub outcome: String,
+    /// The session, so runs can be grouped by broadcast without exposing
+    /// anything else about it.
+    pub session: i64,
+    /// What the session was tagged, which for a marathon is the event as
+    /// its board titled itself ("Arcathlon #4").
+    pub tag: Option<String>,
+    pub day: String,
+}
+
+/// Every run of every game EXCEPT the configured one, oldest first.
+///
+/// The rest of this module is scoped to one (game, category) pair, which
+/// is right for a page about one game. This is the other side of it: a
+/// marathon day records ten games that have no page, and until now they
+/// reached the site as nothing at all.
+pub async fn other_runs(pool: &SqlitePool, game: &str, category: &str) -> Result<Vec<OtherRun>> {
+    let rows = sqlx::query(
+        "SELECT r.game, r.category, r.started_at_ms, r.final_time_ms, r.outcome, \
+         r.session_id, s.tag, \
+         date(r.started_at_ms/1000,'unixepoch','localtime') AS day \
+         FROM runs r LEFT JOIN sessions s ON r.session_id = s.id \
+         WHERE NOT (r.game = ? AND r.category = ?) \
+         ORDER BY r.started_at_ms",
+    )
+    .bind(game)
+    .bind(category)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| OtherRun {
+            game: r.get("game"),
+            category: r.get("category"),
+            started_at_ms: r.get("started_at_ms"),
+            final_time_ms: r.get("final_time_ms"),
+            outcome: r.get("outcome"),
+            session: r.get::<Option<i64>, _>("session_id").unwrap_or(0),
+            tag: r.get("tag"),
+            day: r.get("day"),
+        })
+        .collect())
+}
+
 /// One (game, category) pair and what the database holds for it. Every
 /// pair, not just the configured one: the page leads with the game this
 /// deployment follows and lists the rest from here, and a marathon day
