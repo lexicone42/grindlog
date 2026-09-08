@@ -373,6 +373,32 @@ mod tests {
         assert!(!Identity::default().convicts(&r));
     }
 
+    /// A board whose splits are numbered rather than named, read off his
+    /// Double Dragon II run: rows "01" to "09" for the game's stages, an
+    /// attempt counter of 1, category "JP". The rows say nothing — a
+    /// number names no game, and counting them as foreign names would
+    /// have them convict every board that numbers its splits, including
+    /// one of his own if he ever renumbered Ninja Gaiden's acts. The other
+    /// three signals are more than enough without them.
+    #[test]
+    fn numbered_splits_say_nothing_and_the_rest_still_convicts() {
+        let f = Fingerprint::of(&cfg(), Some(97_080));
+        let b = board(
+            Some("1"),
+            &[Some("01"), Some("02"), Some("03"), Some("04"), Some("09")],
+        );
+        let r = f.read(Some("Double Dragon II: The Revenge"), Some("JP"), &b);
+        assert!(
+            !r.for_it.contains(&Signal::Rows) && !r.against.contains(&Signal::Rows),
+            "numbered rows are not evidence either way: {r:?}"
+        );
+        assert_eq!(
+            r.against,
+            vec![Signal::Header, Signal::Category, Signal::Counter]
+        );
+        assert!(Identity::default().convicts(&r));
+    }
+
     /// The Big 20 board that started this: a different game, a different
     /// splits file, different rows. Three signals against, and the pass
     /// convicts on its own.
