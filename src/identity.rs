@@ -94,6 +94,73 @@ impl Reading {
             .collect::<Vec<_>>()
             .join(", ")
     }
+
+    /// The whole pass in one line: "header, category against; counter
+    /// for". Stable for a given set of signals, so the caller can log it
+    /// once per distinct shape instead of once a minute.
+    pub fn describe(&self) -> String {
+        let side = |v: &[Signal], word| {
+            (!v.is_empty()).then(|| {
+                format!(
+                    "{} {word}",
+                    v.iter().map(|s| s.label()).collect::<Vec<_>>().join(", ")
+                )
+            })
+        };
+        match (side(&self.against, "against"), side(&self.for_it, "for")) {
+            (None, None) => "nothing legible".to_string(),
+            (a, f) => [a, f].into_iter().flatten().collect::<Vec<_>>().join("; "),
+        }
+    }
+}
+
+/// What one pass amounts to once the threshold is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Nothing legible said anything either way.
+    Silent,
+    /// Spoke for the tracked game with nothing against it.
+    Clear,
+    /// Enough against to suspend, on its own or with the pass before it.
+    Convicting,
+    /// Something against, but not enough to act on.
+    ///
+    /// The one worth counting. A board whose category is the generic
+    /// "Any%" the tracked game also uses, and whose rows and counter are
+    /// illegible, disagrees on its header alone and lands here — and
+    /// until this existed it left no trace in the log at all, so the one
+    /// shape that can quietly record another game as this one was also
+    /// the one shape nothing reported.
+    Undecided,
+}
+
+impl Verdict {
+    pub fn label(self) -> &'static str {
+        match self {
+            Verdict::Silent => "silent",
+            Verdict::Clear => "clear",
+            Verdict::Convicting => "convicting",
+            Verdict::Undecided => "undecided",
+        }
+    }
+}
+
+/// How the passes of one session came out, for the closing line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub silent: u32,
+    pub clear: u32,
+    pub convicting: u32,
+    pub undecided: u32,
+}
+
+impl Tally {
+    pub fn describe(&self) -> String {
+        format!(
+            "{} clear, {} convicting, {} undecided, {} silent",
+            self.clear, self.convicting, self.undecided, self.silent
+        )
+    }
 }
 
 /// The tracked game as its board looks: what the header should say, what
@@ -273,6 +340,7 @@ pub struct Identity {
     ok: bool,
     convicting: u32,
     threshold: usize,
+    tally: Tally,
 }
 
 impl Default for Identity {
@@ -281,6 +349,7 @@ impl Default for Identity {
             ok: true,
             convicting: 0,
             threshold: 2,
+            tally: Tally::default(),
         }
     }
 }
@@ -303,9 +372,33 @@ impl Identity {
         r.against.len() >= self.threshold
     }
 
+    /// What this pass amounts to, before any hysteresis.
+    pub fn verdict(&self, r: &Reading) -> Verdict {
+        if self.convicts(r) {
+            Verdict::Convicting
+        } else if !r.against.is_empty() {
+            Verdict::Undecided
+        } else if r.acquits() {
+            Verdict::Clear
+        } else {
+            Verdict::Silent
+        }
+    }
+
+    /// How this session's passes have come out so far.
+    pub fn tally(&self) -> Tally {
+        self.tally
+    }
+
     /// Fold in one pane pass. Returns the new verdict when it changed, so
     /// the caller logs a transition and not a heartbeat.
     pub fn observe(&mut self, r: &Reading) -> Option<bool> {
+        match self.verdict(r) {
+            Verdict::Silent => self.tally.silent += 1,
+            Verdict::Clear => self.tally.clear += 1,
+            Verdict::Convicting => self.tally.convicting += 1,
+            Verdict::Undecided => self.tally.undecided += 1,
+        }
         if self.convicts(r) {
             self.convicting += 1;
         } else if r.acquits() {
@@ -529,6 +622,66 @@ mod tests {
             assert!(r.against.is_empty(), "{c} should read as Any%: {r:?}");
             assert!(r.for_it.contains(&Signal::Category));
         }
+    }
+
+    /// The shape that can quietly record another game as this one, and
+    /// the reason the tally exists.
+    ///
+    /// Kid Klown in Night Mayor World, read off the Big 20 stream: its
+    /// category is the same generic "Any%" the tracked game uses, its
+    /// board shows no counter, and no row name was legible. The header
+    /// disagrees and the category agrees, which is one signal each way —
+    /// not a conviction, and not an acquittal either. The gate holds
+    /// whatever it already thought, so a bot that restarted onto this
+    /// board would record it as Ninja Gaiden.
+    #[test]
+    fn a_generic_category_leaves_a_foreign_board_undecided() {
+        let f = Fingerprint::of(&cfg(), None);
+        let r = f.read(
+            Some("Klown in Night Mayor World"),
+            Some("Any%"),
+            &board(None, &[]),
+        );
+        assert_eq!(r.against, vec![Signal::Header]);
+        assert_eq!(r.for_it, vec![Signal::Category]);
+        assert!(!r.acquits(), "a disagreeing header is not an acquittal");
+
+        let mut id = Identity::default();
+        assert_eq!(id.verdict(&r), Verdict::Undecided);
+        assert_eq!(id.observe(&r), None, "the verdict does not move");
+        assert!(id.ok(), "and it holds whatever it already was");
+        assert_eq!(id.tally().undecided, 1, "but it is counted");
+        assert_eq!(
+            r.describe(),
+            "header against; category for",
+            "and it is legible in the log"
+        );
+    }
+
+    /// The tally is the session's own account of itself, so a week of
+    /// broadcasts can be read for how often each shape came up.
+    #[test]
+    fn every_pass_lands_in_exactly_one_bucket() {
+        let f = Fingerprint::of(&cfg(), Some(97_080));
+        let mut id = Identity::default();
+        let good = f.read(
+            Some("Ninja Gaiden (NES)"),
+            Some("Any%"),
+            &board(Some("97085"), &[Some("Act 1")]),
+        );
+        let foreign = f.read(
+            Some("Die Hard (NES)"),
+            Some("Any% (Beginner)"),
+            &board(Some("28971"), &[]),
+        );
+        let lone = f.read(Some("Kid Klown"), Some("Any%"), &board(None, &[]));
+
+        for r in [&good, &good, &foreign, &lone, &Reading::default()] {
+            id.observe(r);
+        }
+        let t = id.tally();
+        assert_eq!((t.clear, t.convicting, t.undecided, t.silent), (2, 1, 1, 1));
+        assert_eq!(t.describe(), "2 clear, 1 convicting, 1 undecided, 1 silent");
     }
 
     /// `require_title_match` lowers the bar to one signal, so a header
