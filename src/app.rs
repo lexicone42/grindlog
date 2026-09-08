@@ -1503,7 +1503,7 @@ async fn track_marathon(
                         format!("{} board replaced", old.category()),
                     );
                 }
-                let mut m = marathon::Marathon::new(alias.name.clone());
+                let mut m = marathon::Marathon::new(alias.name.clone(), alias.rosters.clone());
                 // What a previous run of the bot over this same broadcast
                 // already recorded, so a restart mid-event does not record
                 // the finished games again.
@@ -1536,6 +1536,7 @@ async fn track_marathon(
         return false;
     };
     let completions = m.observe(board, at_ms, total_ms);
+    let unmatched = m.unmatched();
     // Name the broadcast after the event it turned out to be.
     if let Some(id) = session_id {
         let want = m.tag();
@@ -1574,9 +1575,13 @@ async fn track_marathon(
         };
         match db::insert_run(pool, run).await {
             Ok(_) => info!(
-                "marathon row {}: {} finished in {}{} (total {})",
+                "marathon row {}: {} finished in {}{}{} (total {})",
                 c.slot + 1,
                 c.game,
+                match &c.as_read {
+                    Some(read) => format!(" (the board read {read:?})"),
+                    None => String::new(),
+                },
                 format_ms(c.segment_ms),
                 if c.segment_derived {
                     ", from the cumulative column (its own segment column disagreed)"
@@ -1592,6 +1597,24 @@ async fn track_marathon(
             "marathon",
             format!("{} {}", c.game, format_ms(c.segment_ms)),
         );
+        // A row no roster name fits is recorded under the reading, which
+        // starts a history of its own on the site. Said in the log and
+        // counted in the session's health events, with the running total, so
+        // a roster that has gone stale — a new event, a renamed row — shows
+        // up as something rather than as nothing.
+        if c.unmatched {
+            warn!(
+                "marathon row {}: no roster game matches {:?}; recorded under the name as read \
+                 ({unmatched} so far this event)",
+                c.slot + 1,
+                c.game
+            );
+            health.event(
+                at_ms,
+                "marathon",
+                format!("{unmatched} unmatched, latest {:?}", c.game),
+            );
+        }
     }
     true
 }

@@ -40,9 +40,13 @@ the total whatever else does), `title` (null on most passes — these were
 captured with a pane crop that cut the title row off, which is why the
 tracker is not allowed to need it), and `rows` of `{name, cells}` exactly as
 the board reader returned them, junk and all. `expect` is the answer key:
-`order`, `game`, `segment`, `cumulative`, `ended_s`, and `recorded_as` where
-OCR does not give the board's own spelling ("Hammerin’ Harry" for
-"Hammerin' Harry").
+`order`, `game` (spelled the way that board prints it), `segment`,
+`cumulative`, `ended_s`, and `filed_as` where the run goes under a different
+string — the roster's name for a game the board abbreviates ("Super Mario
+Bros 2" for "SMB 2", "Kabuki Quantum Fighter" for "Kabuki Q Fighter"), and
+the reading itself where no roster name fits at all. The fixtures are
+replayed against `assets/arcathlon-rosters.toml`, which is what a deployment
+following this streamer configures, so a change to that file shows up here.
 
 The fixtures are replayed through the decision sequence `app::track_marathon`
 runs — `classify`, the let-go count for a board that reads as somebody

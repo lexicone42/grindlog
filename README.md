@@ -564,10 +564,11 @@ between them), or leave board mode off while it runs.
 A marathon has no resets — he plays each game to the end — so every row
 completes exactly once, and when it does the board prints the authoritative
 time. Each completed row is recorded as one finished run: `game` is the
-row's own name as the board prints it (`Astyanax`, `SMB3 (Warpless)`), so
-his times for a game accumulate across events in the `runs.game` every
-report and chat query already groups by — **as far as the spelling holds**
-(see below); `category` is the entry's `name`
+game's canonical name where a `roster` is configured (see below) and the
+row's own name as the board prints it otherwise (`Astyanax`, `SMB3
+(Warpless)`), so his times for a game accumulate across events in the
+`runs.game` every report and chat query already groups by;
+`category` is the entry's `name`
 (`Arcathlon`), and its `category` field then describes the board rather than
 the runs; `final_time_ms` is the row's segment time; `last_timer_ms` is the
 marathon total the row ended at; `ended_at_ms` is the pane pass that saw it
@@ -597,16 +598,58 @@ finished before the bot first read the board are not recorded — nothing says
 when they happened — so a marathon has to be watched from its start. Replay
 one with `scripts/replay-arcathlon.sh <vod_id>`.
 
-**A known limitation: the name is the OCR reading, and it is not
-canonicalised across events.** Within one event a row's spellings are
-grouped and the run is filed under the one they agree on, but nothing spans
-events, and `runs.game` groups by exact string. If one day's board settles
-on `TMNT III` and another's on `TMNT Ill`, the reports, the chat queries and
-the feed show two histories of one game, and nothing in the log says so —
-and games do recur: across the eight surveyed events eighteen of them do.
-Until a board-name-to-game mapping lands, expect to check new marathon names
-against the ones already in `runs` (`SELECT DISTINCT game FROM runs WHERE
-category = 'Arcathlon'`) and merge split spellings by hand with an `UPDATE`.
+**One canonical name per game (`roster`).** `runs.game` groups by exact
+string, so the name a row is filed under decides where its history goes, and
+the name is an OCR reading like everything else here. Left alone it splits: a
+spelling missing its first character or two (`nax` for Astyanax, `aws` for
+Jaws, `Harry` for Hammerin' Harry), a damaged numeral (`Castlevania Il`,
+`Joumey to Silius`), the runner's own abbreviation on a randomized board
+(`SMB2`, `Kabuki Q Fighter`, `Leg of Wizard` for LOTW). Over 38 replayed
+broadcasts that made **119 distinct names for a pool of 90 games** — each
+variant its own game on the site.
+
+Point the board entry at a roster file and the readings are folded onto the
+names in it (`src/roster.rs`, `assets/arcathlon-rosters.toml`):
+
+```toml
+[[games]]
+name = "Arcathlon"
+category = "10 games"
+match = ["arcath", "randomized"]
+mode = "board"
+roster = "assets/arcathlon-rosters.toml"
+```
+
+The file is a list of `[[event]]` blocks, each a name and the games of that
+event's board — data, not code, so correcting a name or adding next season's
+event needs no rebuild and another streamer's marathon is another file.
+
+**The events, and not just a list of names, are what make the matching
+safe.** Against all ninety games at once a fragment is ambiguous where it
+matters most: `Castlevania` fits three of them, `Duck Tales` two, `Mega Man`
+six. But each numbered event holds exactly one of each family, so the bot
+first works out which roster a board is — by how many of its legible row
+names fit each — and then matches only against those ten. Inside a roster the
+net is wide: a reading that is a substring of a roster name or contains one,
+that abbreviates to the same initials, or that is within an edit or two of
+some stretch of it. Where no roster fits — a randomized draw crosses all nine,
+so none does — the fallback is the whole pool, and there a trailing sequel
+number has to agree exactly after the ways OCR mangles a numeral (`Il` for
+`II`, `Ill` for `III`, `l` for `1`) are normalised. Without that rule the same
+wide net would file `Ninja Gaiden Ill` under Ninja Gaiden II.
+
+A row that fits nothing is still recorded, under the name as read: the log
+says so and the count goes in the session's health events, so a roster that
+has gone stale shows as something rather than as nothing. With no `roster`
+configured nothing is folded and every row is filed under its reading, which
+is what the bot did before this existed.
+
+Over the same 38 broadcasts the shipped rosters take the 119 names to **89**,
+every one of the 363 recorded rows under one of the file's 90, none unmatched
+and not one row recorded differently. Names already in the database keep the
+spelling they were written with; merge those by hand
+(`SELECT DISTINCT game FROM runs WHERE category = 'Arcathlon'`, then
+`UPDATE`).
 
 **Splits, run numbers and golds.** LiveSplit shows the comparison time in
 rows not yet reached and the actual time in completed ones, so a split is
