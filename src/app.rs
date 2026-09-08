@@ -1575,11 +1575,14 @@ async fn track_marathon(
         };
         match db::insert_run(pool, run).await {
             Ok(_) => info!(
-                "marathon row {}: {} finished in {}{}{} (total {})",
+                "marathon row {}: {}{} finished in {}{} (total {})",
                 c.slot + 1,
                 c.game,
+                // The board's own spelling, where the roster gave the run a
+                // different one: the line has to say what was on screen or it
+                // cannot be checked against the board log.
                 match &c.as_read {
-                    Some(read) => format!(" (the board read {read:?})"),
+                    Some(read) => format!(" (the row reads {read:?})"),
                     None => String::new(),
                 },
                 format_ms(c.segment_ms),
