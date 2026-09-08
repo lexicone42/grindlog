@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod audit;
 mod board;
 mod calibrate;
 mod capture;
@@ -78,6 +79,18 @@ enum Command {
     Glyphs {
         #[command(subcommand)]
         action: GlyphsAction,
+    },
+    /// Check every replayed marathon broadcast against the answer key its own
+    /// board derives: which of the event's games he played (the row he plays
+    /// is the one whose time changes), what the tracker recorded, and the
+    /// differences in both directions. Needs no video, no timer and no
+    /// outside answer key — only the logs `scripts/replay-arcathlon.sh`
+    /// leaves. See scripts/audit-arcathlon.sh
+    Audit {
+        /// The capture working set: boards-<vod>.jsonl and obs-<vod>.jsonl
+        /// per broadcast
+        #[arg(long, default_value = "arcathlon-db")]
+        dir: std::path::PathBuf,
     },
 }
 
@@ -170,6 +183,7 @@ async fn main() -> Result<()> {
         Command::Calibrate { full_frame } => calibrate::run(cfg, full_frame).await,
         Command::Report { json, api_dir } => report::run(cfg, json, api_dir.as_deref()).await,
         Command::Locate { image, frames } => locate::run(cfg, image, frames).await,
+        Command::Audit { dir } => audit::run(&cfg, &dir).map(|_| ()),
         Command::Glyphs { action } => match action {
             GlyphsAction::Train {
                 corpus,

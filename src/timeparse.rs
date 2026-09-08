@@ -176,9 +176,31 @@ pub fn format_ms(ms: i64) -> String {
     }
 }
 
+/// Format milliseconds the way a marathon board prints them: whole seconds,
+/// `H:MM:SS` past an hour and `M:SS` below it. A board's split columns are
+/// rounded to the second, so this is the form its own times are reported in.
+pub fn format_ms_seconds(ms: i64) -> String {
+    let s = ms / 1000;
+    match s / 3600 {
+        0 => format!("{}:{:02}", s / 60, s % 60),
+        h => format!("{h}:{:02}:{:02}", (s / 60) % 60, s % 60),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_board_prints_whole_seconds() {
+        assert_eq!(format_ms_seconds(0), "0:00");
+        assert_eq!(format_ms_seconds(59_900), "0:59");
+        assert_eq!(format_ms_seconds(11 * 60_000 + 53_000), "11:53");
+        assert_eq!(
+            format_ms_seconds(4 * 3_600_000 + 34 * 60_000 + 10_000),
+            "4:34:10"
+        );
+    }
 
     #[test]
     fn parses_full_hms_with_fraction() {

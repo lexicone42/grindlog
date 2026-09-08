@@ -638,18 +638,50 @@ number has to agree exactly after the ways OCR mangles a numeral (`Il` for
 `II`, `Ill` for `III`, `l` for `1`) are normalised. Without that rule the same
 wide net would file `Ninja Gaiden Ill` under Ninja Gaiden II.
 
-A row that fits nothing is still recorded, under the name as read: the log
-says so and the count goes in the session's health events, so a roster that
-has gone stale shows as something rather than as nothing. With no `roster`
-configured nothing is folded and every row is filed under its reading, which
-is what the bot did before this existed.
+**One game per row.** An identified event holds ten *distinct* games, so two
+rows of it may not come out as the same one — and OCR does produce that: on
+one broadcast the last two rows are Zelda and Zelda II, the numeral was lost
+on most passes, both rows read `Zelda`, and an 84-minute Zelda II went into
+Zelda's history. So inside a roster the rows are assigned to games one-to-one
+rather than a row at a time: the most confident (row, game) pair on the board
+takes its game, the game leaves the field, every row still open is read again
+against what is left, and so on until nothing fits. Assigning by descending
+confidence rather than down the board is what keeps the answer from depending
+on which row is looked at first; where two rows fit one game equally well the
+earlier row wins, because a roster lists its games in the order the board
+prints them. Not across the pool — a randomized draw crosses every roster,
+nothing says its ten are distinct families, and two of its rows naming the
+same game is legitimate.
+
+A row that fits nothing, or that lost every game it could have had, is still
+recorded, under the name as read: the log says so and the count goes in the
+session's health events, so a roster that has gone stale shows as something
+rather than as nothing. With no `roster` configured nothing is folded and
+every row is filed under its reading, which is what the bot did before this
+existed.
 
 Over the same 38 broadcasts the shipped rosters take the 119 names to **89**,
-every one of the 363 recorded rows under one of the file's 90, none unmatched
-and not one row recorded differently. Names already in the database keep the
-spelling they were written with; merge those by hand
+every one of the 363 recorded rows under one of the file's 90, none
+unmatched, and no game recorded twice in one broadcast. Names already in the
+database keep the spelling they were written with; merge those by hand
 (`SELECT DISTINCT game FROM runs WHERE category = 'Arcathlon'`, then
 `UPDATE`).
+
+**Checking a marathon change: the board is its own answer key.** A board
+prints two kinds of time in one column and they look identical in a single
+frame — a game he has finished shows his result, one he has not reached shows
+the comparison. Over a whole broadcast they are not identical at all, because
+the row he plays changes exactly once and no other row changes at all. So a
+board log says which of the event's ten games he played, and in what time,
+with no video, no timer, no title and no answer key read off the stream by
+hand. `scripts/audit-arcathlon.sh` replays every captured broadcast through
+the tracker's own decision sequence and prints that key beside what the
+tracker recorded, with the differences in both directions; run it before and
+after any change to `src/marathon.rs`, `src/roster.rs`, `src/signature.rs` or
+the gate in `src/sanity.rs`, and diff the two. The key is OCR like everything
+it checks — it disagrees with the keys read off the video by hand in one
+known place, 2827296024's Astyanax, where the hand-read key is right — so
+read a row off the board log before believing either.
 
 **Splits, run numbers and golds.** LiveSplit shows the comparison time in
 rows not yet reached and the actual time in completed ones, so a split is
@@ -693,6 +725,7 @@ best (tracked)" next to the runner's own Sum of Best row read off the layout
 | `scripts/obs-diff.sh [-q] <a.jsonl> <b.jsonl>` | join two observation logs of the same window on the frame number and list the frames where OCR text, parsed value, phase, layout offset or events differ; summary line first, exit status like `diff`. Warns when the logs are not frame-aligned |
 | `scripts/backfill-vods.sh <vod_id>...` | analyze Twitch VODs one after another straight from Twitch (no download), one database each in `backfill-db/vod-<id>.db` with its obs log in `backfill-logs/`; run several chains in parallel. It does not read `live.toml`: it writes its own config per VOD with the reference deployment baked in (channel, layouts, acts, 480p30, 2 fps, the glyph reader, `min_final_ms`, the AppImage `tessdata_path`), so edit the heredoc for another streamer. Workers run under `nice`; a rerun replaces an earlier pass over the same VOD |
 | `scripts/replay-arcathlon.sh <vod_id>...` | replay marathon broadcasts, one database each in `arcathlon-db/vod-<id>.db` beside its board log, obs log and bot log; run several chains in parallel. It writes its own config per VOD — the marathon total as the timer (its own crop and threshold, the offset search off, tesseract rather than the glyph templates), the pane crop raised to include the title row, and the `[[games]]` entry in `mode = "board"` — so every completed row lands as a run of its own game under category `Arcathlon`, and the base `[game]` is title-gated so the timer records nothing. `ARCA_OUT`, `ARCA_FPS`, `ARCA_BIN`, `ARCA_START` and `ARCA_NICE` override the output directory, frame rate, binary, starting second and worker priority; a rerun replaces an earlier pass. Start it at second 0: a row already carrying its time when the board first comes into view is not recorded |
+| `scripts/audit-arcathlon.sh` | check every replayed marathon broadcast against the answer key its own board derives — over a whole broadcast the row he plays changes exactly once and no other row changes at all, so the board says which of the event's ten games he played and in what time, with no video, no timer, no title and no key read off the stream by hand. Replays each board log through the tracker's own decision sequence (`ngtwitchtimer audit`, `src/audit.rs`) and prints per broadcast: the roster its rows identify, every row with the first and last value it settled on, and the differences in both directions — a game played and not recorded, a run recorded the board does not account for, a run filed under a game the board gave to another row, and two runs of one broadcast under one name (which an event of ten distinct games can never have). Run it before and after a change and diff the `REC`, `BAD` and `SUM` lines; also runs as `ARCATHLON_DB=arcathlon-db cargo test --release replays_every_captured -- --ignored --nocapture`. `ARCA_OUT`, `ARCA_BIN`, `ARCA_ROSTER` override the capture directory, binary and roster file. The key is OCR like the thing it checks and disagrees with the hand-read keys in one known place (2827296024's Astyanax, where the hand-read key is right) |
 | `scripts/import-vod.sh <vod_id> [--deploy] [--force]` | replace one broadcast day in the live database from its completed VOD database (refuses a VOD whose sessions are not all closed); one transaction, safe while the bot is running, held under the site build's lock (`.build-site.lock`, up to 120 s) so it cannot commit in the middle of a feed build; normalises finished runs' final-act split to the finish time, renumbers attempts chronologically and runs `fill-run-numbers.sh`. Before replacing it compares the incoming day with the one in the live database (runs, numbered runs, session span) and refuses with exit 3 when the new pass holds under 90% of either count, so a pass that died partway cannot overwrite a fuller day; `--force` replaces anyway. `LIVE=copy.db` targets another database for a dry run |
 | `scripts/import-when-done.sh <vod_id>...` | detached: import each VOD as its chain finishes and redeploy the site. A VOD the import gate refuses is left unmarked and reported; it is retried only when its database changes, and the final line names the refused ids (exit 3) |
 | `scripts/list-vods.sh <channel> [--game <substring>]` | list a channel's archived VODs newest first (`id  date  hours  title`) from Twitch's GraphQL endpoint with `curl` + `jq`, so a backfill can be assembled without guessing ids; `--game` filters titles case-insensitively; falls back to `yt-dlp` (no dates) when GraphQL declines. `TWITCH_CLIENT_ID` overrides the web client-id |

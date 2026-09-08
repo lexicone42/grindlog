@@ -9,8 +9,9 @@ how to change it without breaking the deployment that depends on it.
 A Rust bot that watches a Twitch stream, reads the streamer's LiveSplit
 timer off the video, logs every attempt to SQLite and publishes a records
 site. One binary, `ngtwitchtimer`, with subcommands (`run`, `calibrate`,
-`locate`, `report`, `glyphs`). The reference deployment follows one streamer
-around the clock and is the thing every change here ends up running against.
+`locate`, `report`, `glyphs`, `audit`). The reference deployment follows one
+streamer around the clock and is the thing every change here ends up running
+against.
 
 Layout of `src/`:
 
@@ -25,7 +26,9 @@ Layout of `src/`:
 - `board.rs` — the pane read as a board (title, rows, time cells) and which
   game a title files under; `marathon.rs` — a board whose rows are ten
   different games, tracked by which of them have completed rather than by
-  the timer (`[[games]] mode = "board"`).
+  the timer (`[[games]] mode = "board"`); `roster.rs` — which of an event's
+  ten games a row's OCR-read name is; `audit.rs` — the harness that scores a
+  replayed marathon against the key its own board derives (`audit`).
 - `capture.rs` / `twitch_hls.rs` — stream and VOD decoding via ffmpeg;
   `config.rs` — the TOML config (every field documented in
   `config.example.toml`); `db.rs`, `stats.rs`, `report.rs` — persistence and
@@ -98,6 +101,39 @@ first comes into view was finished before the bot looked and is not
 recorded. `debug.board_log` is what to read when a game is missing — the
 board is cumulative, so an unreadable stretch delays a reading, it does not
 destroy it.
+
+**And a marathon board is its own answer key**, which is what makes a change
+to it checkable at all. A game he has finished shows his result and one he
+has not reached shows the comparison; in a single frame they are the same
+kind of number, but over a whole broadcast the row he plays CHANGES exactly
+once and no other row changes at all. So a board log says which of the
+event's ten games he played and in what time, with no video, no timer, no
+title and no key read off the stream by hand.
+`scripts/audit-arcathlon.sh` (the `audit` subcommand, `src/audit.rs`) replays
+every broadcast under `arcathlon-db/` through the tracker's own decision
+sequence and prints, per broadcast, the roster its rows identify, every row
+with the first and last value it settled on, and the differences both ways:
+a game played and not recorded, a run recorded the board does not account
+for, a run filed under a game the board gave to another row, and two runs of
+one broadcast under one name — which an event of ten distinct games can
+never have, so that last one is a defect on the board's own evidence with no
+key having to be right. Run it before and after any change to
+`src/marathon.rs`, `src/roster.rs`, `src/signature.rs` or the gate in
+`src/sanity.rs`, and diff the `REC`, `BAD` and `SUM` lines; it takes about a
+second over all 38 captures. The same check runs as a test:
+
+    ARCATHLON_DB=arcathlon-db cargo test --release \
+      replays_every_captured -- --ignored --nocapture
+
+Two honest limits. Its key is OCR like everything it checks, and it
+disagrees with the keys read off the video by hand in one known place
+(2827296024's Astyanax, where the hand-read key is right) — so read the row
+off the board log before believing either. And it folds names onto games
+with the same `src/roster.rs` the tracker uses, so it cannot score that
+module: a roster that named the wrong game would name it wrong for both.
+What it scores is the plumbing — which rows were played, which were
+recorded, at what time, under which of the event's games — and `roster.rs`'s
+own tests hold the other end.
 
 The unit tests run without ffmpeg or tesseract. Anything that needs video
 needs `ffmpeg`; anything that reads splits, the counter or a fallback timer
