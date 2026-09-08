@@ -40,8 +40,10 @@ nohup.out
 # Replay-window work files (configs, dbs, obs logs per replay)
 /replays/
 
-# Marathon replay working set (scripts/replay-arcathlon.sh)
-/arcathlon-db/
+# Marathon replay working set (scripts/replay-arcathlon.sh). ARCA_OUT names
+# the directory, so a second pass over the same broadcasts lands beside the
+# first rather than over it.
+/arcathlon-db*/
 
 # Database backups (scripts/backup-db.sh) and retired copies
 /backups/
