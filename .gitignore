@@ -20,6 +20,7 @@
 /site/api/
 /site/arcathlon/
 /site/rando/
+/site/game/
 
 # Local screenshots / scratch — but the glyph reader's test crops are kept
 *.png
