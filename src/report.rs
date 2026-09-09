@@ -29,15 +29,46 @@ use crate::{api, app, db, roster, stats, util};
 ///
 /// A session holding one game is not an event and is emitted as itself,
 /// which is what a day of practising a single game looks like.
+///
+/// One correction to "the session IS the event": a broadcast can be cut in
+/// two. Twitch split 2026-07-23 across two VODs over a 39-second drop, so
+/// its Arcathlon #4 arrived as a nine-game session and a one-game session,
+/// and the page showed a spurious one-game "Astyanax" event beside a #4
+/// that looked incomplete. Neither was true and no data was missing.
+///
+/// So adjacent sessions of the same day carrying the same tag are joined,
+/// but only when no game appears in both. That last condition is what
+/// makes it safe: an event is ten DISTINCT games, so two genuine events
+/// can never merge without colliding, and the audit leans on the same
+/// invariant. Over the whole corpus this fires exactly once.
 fn other_events(runs: &[db::OtherRun], rosters: &roster::Rosters) -> Vec<serde_json::Value> {
-    let mut out: Vec<serde_json::Value> = Vec::new();
+    // Session boundaries first, then the joins.
+    let mut groups: Vec<Vec<&db::OtherRun>> = Vec::new();
     let mut i = 0;
     while i < runs.len() {
         let session = runs[i].session;
         let j = runs[i..].partition_point(|r| r.session == session) + i;
-        let group = &runs[i..j];
+        groups.push(runs[i..j].iter().collect());
         i = j;
+    }
+    let joinable = |a: &Vec<&db::OtherRun>, b: &Vec<&db::OtherRun>| {
+        a[0].day == b[0].day
+            && a[0].tag.is_some()
+            && a[0].tag == b[0].tag
+            && !b
+                .iter()
+                .any(|r| a.iter().any(|x| x.game.eq_ignore_ascii_case(&r.game)))
+    };
+    let mut joined: Vec<Vec<&db::OtherRun>> = Vec::new();
+    for g in groups {
+        match joined.last() {
+            Some(prev) if joinable(prev, &g) => joined.last_mut().unwrap().extend(g),
+            _ => joined.push(g),
+        }
+    }
 
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for group in &joined {
         let names: Vec<&str> = group.iter().map(|r| r.game.as_str()).collect();
         // One game is a practice day, not an event to identify.
         let event = (group.len() > 1)
@@ -447,6 +478,69 @@ mod tests {
             out[1]["total_ms"].as_i64().unwrap(),
             (0..10).map(|i| 600_000 + i * 1000).sum::<i64>()
         );
+    }
+
+    /// Twitch cut 2026-07-23 in two over a 39-second drop, so one Arcathlon
+    /// #4 arrived as a nine-game session and a one-game session and the page
+    /// showed a spurious "Astyanax" event beside an incomplete #4. Adjacent
+    /// same-day, same-tag sessions rejoin.
+    #[test]
+    fn a_broadcast_split_across_two_vods_is_one_event() {
+        let r = roster::Rosters::bundled().unwrap();
+        let nine = [
+            "Castlevania II",
+            "Cowboy Kid",
+            "Goonies II",
+            "Hebereke",
+            "Little Samson",
+            "Panic Restaurant",
+            "Shadowgate",
+            "Solstice",
+            "TMNT III",
+        ];
+        let mut runs: Vec<db::OtherRun> = nine
+            .iter()
+            .enumerate()
+            .map(|(i, g)| run(1, g, 600_000 + i as i64 * 1000))
+            .collect();
+        runs.push(run(2, "Astyanax", 1_399_000)); // the tail VOD
+
+        let out = other_events(&runs, &r);
+        assert_eq!(out.len(), 1, "one broadcast, not two");
+        assert_eq!(out[0]["label"], "Arcathlon #4");
+        assert_eq!(out[0]["games"].as_array().unwrap().len(), 10);
+        assert_eq!(out[0]["randomized"], false);
+    }
+
+    /// The join must never fuse two genuine events. An Arcathlon is ten
+    /// DISTINCT games, so a repeated name is proof the two halves are not
+    /// one broadcast — which is the whole safety of the rule.
+    #[test]
+    fn sessions_sharing_a_game_are_never_joined() {
+        let r = roster::Rosters::bundled().unwrap();
+        // Two same-day, same-tag sessions that both hold Batman.
+        let runs = vec![
+            run(1, "Batman", 700_000),
+            run(1, "Castlevania", 800_000),
+            run(2, "Batman", 710_000),
+            run(2, "Zelda", 900_000),
+        ];
+        let out = other_events(&runs, &r);
+        assert_eq!(out.len(), 2, "a shared game keeps them apart");
+    }
+
+    /// A tagless session joins nothing: without a tag there is no evidence
+    /// the two halves belong together, and two practice sessions on one day
+    /// are not a marathon.
+    #[test]
+    fn untagged_sessions_are_never_joined() {
+        let r = roster::Rosters::bundled().unwrap();
+        let mut a = run(1, "Solstice", 600_000);
+        let mut b = run(2, "Hebereke", 700_000);
+        a.tag = None;
+        b.tag = None;
+        let out = other_events(&[a, b], &r);
+        assert_eq!(out.len(), 2);
     }
 
     /// A day spent on one game is not a marathon and must not be named
