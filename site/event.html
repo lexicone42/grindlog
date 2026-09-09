@@ -1,0 +1,175 @@
+<!-- One Arcathlon, as its own page. Rendered once per event by
+     scripts/build-site.sh, which splices the event's slice of the report
+     into the empty data script below, as it does for site/template.html.
+     Do not write the placeholder's name in prose anywhere in this file: the
+     splice takes the whole line, and a mention in a comment silently ate
+     the data once already.
+
+     Two shapes share this template because they share a subject:
+       kind "series" — one of the nine NUMBERED events. Its ten games are
+         fixed and it ran three or four times, so the page is a grid: ten
+         rows, one column per cycle. The repetition IS the content.
+       kind "draw"   — one of the randomized Arcathlons. Ten games pulled
+         from all ninety, once, never to recur. There is nothing to compare
+         it against, so the page records the day instead of charting it.
+
+     The page names games, never the streamer. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen&family=Martian+Mono:wght@400;600&display=swap">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
+    --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
+    --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
+  }
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #f2f2ec; --card: #ffffff; --ink: #171425; --ink2: #4e5170;
+    --muted: #83879f; --hairline: rgba(20,15,60,.11); --series: #2a78d6;
+    --gold: #a9791a; --gold-soft: rgba(169,121,26,.12); --ahead: #1f8f63;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
+      --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
+      --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
+    --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
+    --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
+  }
+  body {
+    background: var(--bg); color: var(--ink); margin: 0;
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 28px 20px 60px; }
+  a { color: var(--series); }
+  .back {
+    font-family: "Silkscreen", monospace; font-size: 10px; letter-spacing: .1em;
+    text-transform: uppercase; text-decoration: none; color: var(--muted);
+  }
+  .back:hover { color: var(--ink); }
+  h1 { font-size: clamp(22px, 4vw, 32px); margin: 14px 0 4px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
+  .badge {
+    font-family: "Silkscreen", monospace; font-size: 9px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--gold); vertical-align: 3px;
+    border: 1px solid var(--gold-soft); border-radius: 3px; padding: 3px 7px 2px;
+    margin-left: 10px; white-space: nowrap;
+  }
+  .card { background: var(--card); border: 1px solid var(--hairline); border-radius: 8px; padding: 18px 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th {
+    text-align: left; font-weight: 500; color: var(--muted); font-size: 11px;
+    letter-spacing: .04em; text-transform: uppercase; padding: 0 10px 8px 0;
+    border-bottom: 1px solid var(--hairline); white-space: nowrap;
+  }
+  td { padding: 8px 10px 8px 0; border-top: 1px solid var(--hairline); }
+  th.num, td.num { text-align: right; padding-right: 0; }
+  .tnum { font-family: "Martian Mono", monospace; font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .n { color: var(--muted); width: 2em; }
+  /* The fastest cycle of a row, which is the point of laying them side by side. */
+  .best { color: var(--gold); font-weight: 600; }
+  .none { color: var(--muted); }
+  tfoot td { border-top: 2px solid var(--hairline); color: var(--ink2); font-weight: 600; }
+  .scroll { overflow-x: auto; }
+  .note { color: var(--muted); font-size: 12.5px; margin: 18px 0 0; }
+  footer { margin-top: 34px; color: var(--muted); font-size: 12px; }
+</style>
+
+<div class="wrap">
+  <a class="back" href="/">&larr; all games</a>
+  <h1 id="title"></h1>
+  <p class="sub" id="sub"></p>
+  <section class="card scroll"><table id="grid"></table></section>
+  <p class="note" id="note"></p>
+  <footer>Times read off the on-screen LiveSplit board, frame by frame · <a href="/api/v1/README.md">data</a></footer>
+</div>
+
+<script id="data" type="application/json">
+__DATA__
+</script>
+
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+// Game names are OCR of a video stream and reach the page as arbitrary text.
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = ms => {
+  if (ms == null) return '—';
+  const t = Math.floor(ms / 100) / 10;
+  const m = Math.floor(t / 60), s = (t - m * 60).toFixed(1).padStart(4, '0');
+  return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${s}` : `${m}:${s}`;
+};
+const TZ = (D.day_offset_minutes || 0) * 60000;
+const dshort = ms => new Date(ms + TZ).toLocaleDateString(undefined,
+  { month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+document.title = D.title;
+document.getElementById('title').innerHTML =
+  esc(D.title) + (D.kind === 'draw' ? '<span class="badge">random draw</span>' : '');
+
+if (D.kind === 'draw') {
+  // One day, one draw, ten games in the order they came up. Nothing to
+  // compare it to by design: these ten were pulled from all ninety and
+  // this combination happened once.
+  const e = D.cycles[0];
+  document.getElementById('sub').textContent =
+    `${dshort(e.started_at_ms)} · ten games drawn from all ninety · ${fmt(e.total_ms)} of running`;
+  document.getElementById('grid').innerHTML =
+    `<tr><th></th><th>Game</th><th class="num">Time</th></tr>` +
+    e.games.map((g, i) => `<tr>
+      <td class="n tnum">${i + 1}</td>
+      <td>${esc(g.game)}</td>
+      <td class="num tnum">${g.final_time_ms != null ? fmt(g.final_time_ms) : '<span class="none">—</span>'}</td>
+    </tr>`).join('') +
+    `<tfoot><tr><td></td><td>Total</td><td class="num tnum">${fmt(e.total_ms)}</td></tr></tfoot>`;
+  document.getElementById('note').textContent =
+    'A randomized Arcathlon draws its ten from the whole pool, so this line-up ran once and will not recur.';
+} else {
+  // The same ten games, three or four times over. One column per running.
+  const cycles = D.cycles;
+  const names = [...new Set(cycles.flatMap(c => c.games.map(g => g.game)))].sort();
+  const timeOf = (c, name) => {
+    const g = c.games.find(x => x.game === name);
+    return g ? g.final_time_ms : null;
+  };
+  document.getElementById('sub').textContent =
+    `${names.length} games · run ${cycles.length} times between ` +
+    `${dshort(cycles[cycles.length - 1].started_at_ms)} and ${dshort(cycles[0].started_at_ms)}`;
+
+  const head = `<tr><th>Game</th>` +
+    cycles.map(c => `<th class="num">${dshort(c.started_at_ms)}</th>`).join('') + `</tr>`;
+  const body = names.map(name => {
+    const times = cycles.map(c => timeOf(c, name));
+    const best = Math.min(...times.filter(t => t != null));
+    return `<tr><td>${esc(name)}</td>` + times.map(t => t == null
+      ? `<td class="num tnum none">—</td>`
+      : `<td class="num tnum${t === best ? ' best' : ''}">${fmt(t)}</td>`).join('') + `</tr>`;
+  }).join('');
+  const totals = `<tfoot><tr><td>Total</td>` +
+    cycles.map(c => `<td class="num tnum">${fmt(c.total_ms)}</td>`).join('') + `</tr></tfoot>`;
+  document.getElementById('grid').innerHTML = head + body + totals;
+
+  // Blanks WITHIN the grid are cycles where a game read badly. A roster
+  // short of ten is different and worth saying out loud: it means a game
+  // of this event was never captured in any running of it, which is a
+  // hole in the record rather than a gap in a row.
+  const gaps = names.length * cycles.length -
+    cycles.reduce((n, c) => n + c.games.filter(g => g.final_time_ms != null).length, 0);
+  const short = 10 - names.length;
+  document.getElementById('note').textContent =
+    'The fastest running of each game is marked.' +
+    (gaps ? ` ${gaps} cell${gaps > 1 ? 's are' : ' is'} blank: the board never gave a reading` +
+            ` the tracker would accept there.` : '') +
+    (short > 0 ? ` This event runs ten games; ${short} ${short > 1 ? 'are' : 'is'} missing from` +
+                 ` the record entirely, never captured in any running of it.` : '');
+}
+</script>

@@ -13,10 +13,13 @@
 /calibration/
 
 # Generated site output (index.html is built from template.html + the db;
-# site/api/ holds the machine-readable projections; site/static/ is tracked)
+# arcathlon/ and rando/ are one page per event from event.html; site/api/
+# holds the machine-readable projections; site/static/ is tracked)
 /site/index.html
 /site/data.json
 /site/api/
+/site/arcathlon/
+/site/rando/
 
 # Local screenshots / scratch — but the glyph reader's test crops are kept
 *.png

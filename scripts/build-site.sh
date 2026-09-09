@@ -143,7 +143,7 @@ jq '.sessions |= map(if .events then .events |= map(select(.k != "title")) else 
 sed -i 's|</|<\\/|g' "$tmp"
 out=$(mktemp site/index.html.XXXXXX)
 awk -v data="$tmp" '
-  /__DATA__/ { found = 1
+  /^__DATA__$/ { found = 1
                while ((getline l < data) > 0) { print l; n++ }
                next }
   { print }
@@ -153,3 +153,60 @@ awk -v data="$tmp" '
 mv "$tmp" site/data.json
 mv "$out" site/index.html
 echo "wrote site/index.html ($(wc -c < site/index.html) bytes)"
+
+# ---- a page per Arcathlon (site/event.html)
+# Two shapes, one template. A NUMBERED event ran three or four times with the
+# same ten games, so its page lays the cycles side by side — the repetition is
+# the only thing these have that a leaderboard does not. A RANDOMIZED draw
+# happened once and cannot recur, so its page records the day instead.
+#
+# Pages are generated, never hand-written: a correction to the roster or a
+# re-import changes them on the next build. Paths are stable so a link keeps
+# working — /arcathlon/<n>/ and /rando/<day>/.
+render_event() {          # $1 = directory under site/, $2 = title, $3 = json file
+  local dir="site/$1" title="$2" data="$3" page
+  mkdir -p "$dir"
+  sed -i 's|</|<\\/|g' "$data"
+  page=$(mktemp "$dir/index.html.XXXXXX")
+  awk -v data="$data" -v title="$title" '
+    { gsub(/__TITLE__/, title) }
+    /^__DATA__$/ { found = 1
+                 while ((getline l < data) > 0) { print l; n++ }
+                 next }
+    { print }
+    END { if (!found) { print "event.html has no __DATA__ placeholder" > "/dev/stderr"; exit 1 }
+          if (!n)     { print "no data spliced into " title            > "/dev/stderr"; exit 1 } }
+  ' site/event.html > "$page"
+  mv "$page" "$dir/index.html"
+}
+
+events=0
+# The numbered events, grouped across their cycles, newest cycle first.
+while read -r n; do
+  [ -n "$n" ] || continue
+  slice=$(mktemp)
+  jq -c --arg label "Arcathlon #$n" \
+    '{kind: "series", title: $label, day_offset_minutes: .day_offset_minutes,
+      cycles: [.other_events[] | select(.label == $label)]}' site/api/v1/report.json > "$slice"
+  render_event "arcathlon/$n" "Arcathlon #$n" "$slice"
+  rm -f "$slice"
+  events=$((events + 1))
+done < <(jq -r '[.other_events[] | select(.randomized | not) | .label
+                | select(startswith("Arcathlon #")) | ltrimstr("Arcathlon #")]
+               | unique | .[]' site/api/v1/report.json)
+
+# The randomized draws, one page each, keyed by the day they happened.
+while read -r day; do
+  [ -n "$day" ] || continue
+  slice=$(mktemp)
+  jq -c --arg day "$day" \
+    '{kind: "draw", title: ("Randomized Arcathlon · " + $day),
+      day_offset_minutes: .day_offset_minutes,
+      cycles: [.other_events[] | select(.randomized and .day == $day)]}' \
+    site/api/v1/report.json > "$slice"
+  render_event "rando/$day" "Randomized Arcathlon $day" "$slice"
+  rm -f "$slice"
+  events=$((events + 1))
+done < <(jq -r '.other_events[] | select(.randomized) | .day' site/api/v1/report.json | sort -u)
+
+echo "wrote $events event page(s) under site/arcathlon/ and site/rando/"
