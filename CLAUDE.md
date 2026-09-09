@@ -191,8 +191,14 @@ install and the in-process build).
   closed day's bytes must not change between builds unless its rows did
   (no timestamps in day files, sorted rows; the tests check it). Within
   `/api/v1/` only add fields; a change of meaning is a new version path. The
-  feed does not name the streamer (the page does not either); that is the
-  owner's call, not a default to flip.
+  feed and the page now DO name the channel — the owner asked for a link to
+  the stream in the live panel on 2026-09-09, so `channel` is in the report
+  and the page links it. That was his call to make and he made it; it is
+  still not a default to flip for anyone else's deployment. What stays off
+  is `game.public_vod_links`, which publishes a deep link to the moment of
+  every individual run: naming the channel and timestamping every attempt
+  he has ever made are different disclosures, and they are deliberately not
+  wired to the same switch.
 - The board reader (`src/board.rs`) runs on the pane passes but only speaks
   with `game.follow_title = "log"`: `layout snapshot:` lines and `layout`
   session events, one per distinct board, naming the `[[games]]` alias or
