@@ -209,4 +209,28 @@ while read -r day; do
   events=$((events + 1))
 done < <(jq -r '.other_events[] | select(.randomized) | .day' site/api/v1/report.json | sort -u)
 
-echo "wrote $events event page(s) under site/arcathlon/ and site/rando/"
+# A page per GAME, at /game/<slug>/. The slug is lowercase with every run of
+# non-alphanumerics collapsed to a hyphen — "Batman: ROTJ" is batman-rotj,
+# "SMB3 (Warpless)" is smb3-warpless. site/template.html builds the same slug
+# in JS to link here, so the two expressions must stay in step; the test
+# `game_slugs_match_the_page_builder` in src/report.rs pins the rule.
+while IFS= read -r game; do
+  [ -n "$game" ] || continue
+  slug=$(printf '%s' "$game" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/-/g; s/^-//; s/-$//')
+  [ -n "$slug" ] || continue
+  slice=$(mktemp)
+  jq -c --arg g "$game" \
+    '{kind: "game", title: $g, day_offset_minutes: .day_offset_minutes,
+      runs: [.other_events[] as $e | $e.games[] | select(.game == $g)
+             | {day: $e.day, started_at_ms, event: $e.label,
+                href: (if ($e.label | startswith("Arcathlon #"))
+                       then "/arcathlon/" + ($e.label | ltrimstr("Arcathlon #")) + "/index.html"
+                       elif $e.randomized then "/rando/" + $e.day + "/index.html"
+                       else null end),
+                final_time_ms}]}' site/api/v1/report.json > "$slice"
+  render_event "game/$slug" "$game" "$slice"
+  rm -f "$slice"
+  events=$((events + 1))
+done < <(jq -r '[.other_events[].games[].game] | unique | .[]' site/api/v1/report.json)
+
+echo "wrote $events page(s) under site/arcathlon/, site/rando/ and site/game/"

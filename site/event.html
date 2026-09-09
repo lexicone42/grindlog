@@ -12,6 +12,10 @@
        kind "draw"   — one of the randomized Arcathlons. Ten games pulled
          from all ninety, once, never to recur. There is nothing to compare
          it against, so the page records the day instead of charting it.
+       kind "game"   — ONE game, every time he has run it, across whichever
+         events it belongs to. A game of a numbered event recurs on a
+         schedule; one that has only ever come up in a draw may have a
+         single line. Both are worth a page.
 
      The page names games, never the streamer. -->
 <meta charset="utf-8">
@@ -116,7 +120,30 @@ document.title = D.title;
 document.getElementById('title').innerHTML =
   esc(D.title) + (D.kind === 'draw' ? '<span class="badge">random draw</span>' : '');
 
-if (D.kind === 'draw') {
+if (D.kind === 'game') {
+  // One game, every running of it, oldest last. The event column matters:
+  // a game can reach the board both on its own numbered event's schedule
+  // and again in a random draw, and those are different occasions.
+  const runs = D.runs;
+  const times = runs.map(r => r.final_time_ms).filter(t => t != null);
+  const best = times.length ? Math.min(...times) : null;
+  const played = runs.length;
+  document.getElementById('sub').textContent =
+    `run ${played} time${played > 1 ? 's' : ''}` +
+    (best != null ? ` · best ${fmt(best)}` : '') +
+    (played > 1 ? ` · ${dshort(runs[runs.length - 1].started_at_ms)} to ${dshort(runs[0].started_at_ms)}` : '');
+  document.getElementById('grid').innerHTML =
+    `<tr><th>Date</th><th>Event</th><th class="num">Time</th></tr>` +
+    runs.map(r => `<tr>
+      <td class="tnum">${dshort(r.started_at_ms)}</td>
+      <td>${r.href ? `<a href="${r.href}">${esc(r.event)}</a>` : esc(r.event)}</td>
+      <td class="num tnum${r.final_time_ms != null && r.final_time_ms === best ? ' best' : ''}">${
+        r.final_time_ms != null ? fmt(r.final_time_ms) : '<span class="none">—</span>'}</td>
+    </tr>`).join('');
+  document.getElementById('note').textContent = played > 1
+    ? 'The fastest running is marked. Times are the game’s own segment of the marathon, as its board recorded it.'
+    : 'Run once so far. The time is the game’s own segment of the marathon, as its board recorded it.';
+} else if (D.kind === 'draw') {
   // One day, one draw, ten games in the order they came up. Nothing to
   // compare it to by design: these ten were pulled from all ninety and
   // this combination happened once.
