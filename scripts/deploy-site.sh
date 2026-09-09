@@ -46,6 +46,21 @@ aws s3 cp site/index.html "s3://${DOMAIN}/index.html" \
   --region "$REGION" \
   --content-type "text/html; charset=utf-8" \
   --cache-control "public, max-age=60"
+# A page per Arcathlon, at /arcathlon/<n>/ and /rando/<day>/. Uploaded to the
+# directory key with no trailing filename so the URL a reader shares has no
+# ".html" in it; the bucket serves index documents. Named explicitly rather
+# than synced, like everything else here, so a stale local file cannot be
+# published by accident — but that also means a NEW kind of page has to be
+# added here or it silently never ships.
+event_pages=0
+for page in site/arcathlon/*/index.html site/rando/*/index.html; do
+  [ -e "$page" ] || continue
+  key=${page#site/}
+  aws s3 cp "$page" "s3://${DOMAIN}/${key}" --region "$REGION" --only-show-errors \
+    --content-type "text/html; charset=utf-8" --cache-control "public, max-age=300"
+  event_pages=$((event_pages + 1))
+done
+echo "uploaded $event_pages event page(s)"
 # The machine-readable data (build-site.sh writes site/api/v1/) and the static
 # documents that describe it. They are not invalidated: their max-age is what
 # governs freshness at the edge, and a minute is the promise made in the docs.
@@ -108,6 +123,11 @@ DIST_ID=$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$S
 # The feed's other files are never invalidated (their max-age is the promise
 # made in the docs); the long-cached day files are, and only when one changed.
 paths=("/index.html" "/")
+# The event pages are regenerated on every build from whatever the database
+# now holds, so a re-import or a roster correction changes them; at
+# max-age=300 an uninvalidated edge would serve the old table for five
+# minutes after a deploy that exists to fix it.
+[ "$event_pages" -gt 0 ] && paths+=("/arcathlon/*" "/rando/*")
 [ "$days_changed" = 1 ] && paths+=("/api/v1/days/*")
 aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "${paths[@]}" \
   --query 'Invalidation.Id' --output text
