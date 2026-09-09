@@ -4,6 +4,12 @@ Notes for an AI assistant (or a new contributor) working in this repository.
 The README explains what the bot does and how to run it; this file is about
 how to change it without breaking the deployment that depends on it.
 
+Deeper detail lives in `docs/`: [detection](docs/detection.md) (how video
+becomes runs, and why each step is shaped that way),
+[operations](docs/operations.md) (running the deployed bot),
+[marathons](docs/marathons.md) (the ten-game days and their own tooling),
+[install](docs/install.md) (ffmpeg and tesseract, including without root).
+
 ## What this is
 
 A Rust bot that watches a Twitch stream, reads the streamer's LiveSplit
@@ -89,65 +95,28 @@ Validate on recorded footage before the live stream ever sees it:
    per reader and prints the worst frames with their neighbours.
 4. Only then `scripts/rollout.sh`.
 
-A marathon day is a different scene and a different tracker, so it has its
-own replay: `scripts/replay-arcathlon.sh <vod_id>` writes the whole
-broadcast into `arcathlon-db/vod-<id>.db` with its board log beside it, and
-every completed row of the board lands as a run of its own game under
-category `Arcathlon`. It bakes its own config (the marathon total as the
-timer, the pane crop raised to take in the title row, `[[games]] mode =
-"board"`), so it needs no live config and cannot touch the live database.
-Start it at second 0: a row that already carries its time when the board
-first comes into view was finished before the bot looked and is not
-recorded. `debug.board_log` is what to read when a game is missing — the
-board is cumulative, so an unreadable stretch delays a reading, it does not
-destroy it.
+**Marathon days are a different scene and a different tracker**, with their
+own replay, import and audit — see [docs/marathons.md](docs/marathons.md).
+Three rules that must not be got wrong:
 
-`scripts/import-arcathlon.sh` lands those games in the live database, and it
-is **not** `import-vod.sh`: that one replaces a broadcast *day*, which is
-right for a Ninja Gaiden VOD and destructive here, because he has run Ninja
-Gaiden in the morning and a marathon in the afternoon of the same day (2026
--07-23 has two VODs and 45 Ninja Gaiden runs the marathon import must not
-touch). The marathon import is additive and scoped to its own VOD by the
-session's `vod_id`, and it re-counts the day's other categories afterwards
-and stops if any went missing. Rehearse it with `LIVE=<a copy>` first.
-
-**And a marathon board is its own answer key**, which is what makes a change
-to it checkable at all. A game he has finished shows his result and one he
-has not reached shows the comparison; in a single frame they are the same
-kind of number, but over a whole broadcast the row he plays CHANGES exactly
-once and no other row changes at all. So a board log says which of the
-event's ten games he played and in what time, with no video, no timer, no
-title and no key read off the stream by hand.
-`scripts/audit-arcathlon.sh` (the `audit` subcommand, `src/audit.rs`) replays
-every broadcast under `arcathlon-db/` through the tracker's own decision
-sequence and prints, per broadcast, the roster its rows identify, every row
-with the first and last value it settled on, and the differences both ways:
-a game played and not recorded, a run recorded the board does not account
-for, a run filed under a game the board gave to another row, and two runs of
-one broadcast under one name — which an event of ten distinct games can
-never have, so that last one is a defect on the board's own evidence with no
-key having to be right. Run it before and after any change to
-`src/marathon.rs`, `src/roster.rs`, `src/signature.rs` or the gate in
-`src/sanity.rs`, and diff the `REC`, `BAD` and `SUM` lines; it takes about a
-second over all 38 captures. The same check runs as a test:
-
-    ARCATHLON_DB=arcathlon-db cargo test --release \
-      replays_every_captured -- --ignored --nocapture
-
-Two honest limits. Its key is OCR like everything it checks, and it
-disagrees with the keys read off the video by hand in one known place
-(2827296024's Astyanax, where the hand-read key is right) — so read the row
-off the board log before believing either. And it folds names onto games
-with the same `src/roster.rs` the tracker uses, so it cannot score that
-module: a roster that named the wrong game would name it wrong for both.
-What it scores is the plumbing — which rows were played, which were
-recorded, at what time, under which of the event's games — and `roster.rs`'s
-own tests hold the other end.
+- `scripts/replay-arcathlon.sh <vod_id>` starts at **second 0**. A row
+  already carrying its time when the board first appears was finished
+  before the bot looked, and is not recorded.
+- Land them with `scripts/import-arcathlon.sh`, **never `import-vod.sh`** —
+  that one replaces a broadcast *day*, and he runs Ninja Gaiden in the
+  morning and a marathon in the afternoon of the same one. Rehearse with
+  `LIVE=<a copy>` first; doing so is what caught an import that would have
+  deleted 1888 Ninja Gaiden runs.
+- Run `scripts/audit-arcathlon.sh` before and after any change to
+  `marathon.rs`, `roster.rs`, `signature.rs` or the gate in `sanity.rs`,
+  and diff the `REC`, `BAD` and `SUM` lines. It takes about a second over
+  all 38 captures. Its denominator hides its own misses: a clipped row is
+  filed as "never settled" and dropped from the count, so a broadcast that
+  lost a game can still print `9/9`.
 
 The unit tests run without ffmpeg or tesseract. Anything that needs video
 needs `ffmpeg`; anything that reads splits, the counter or a fallback timer
-frame needs `tesseract` (see the README's Requirements for the user-space
-install and the in-process build).
+frame needs `tesseract` (see [docs/install.md](docs/install.md)).
 
 ## Operating facts
 
@@ -183,7 +152,7 @@ install and the in-process build).
   uploads it. A single uncaught JavaScript error blanks the whole page, so
   check it in a browser after touching the template.
 - The same build writes the machine-readable feed (`site/api/v1/`, see the
-  README's *Machine-readable data*): `latest.json` comes from
+  README's *Machine-readable data*, fields in site/static/api/v1/README.md): `latest.json` comes from
   `scripts/api-latest.jq`, `summary`/`report`/`index` from `jq` in
   `build-site.sh`, and the per-day feed (`days/<day>.json`, `history.json`,
   `schema.json`, `manifest.json`) from `report --api-dir` in `src/api.rs`,
@@ -191,8 +160,14 @@ install and the in-process build).
   closed day's bytes must not change between builds unless its rows did
   (no timestamps in day files, sorted rows; the tests check it). Within
   `/api/v1/` only add fields; a change of meaning is a new version path. The
-  feed does not name the streamer (the page does not either); that is the
-  owner's call, not a default to flip.
+  feed and the page now DO name the channel — the owner asked for a link to
+  the stream in the live panel on 2026-09-09, so `channel` is in the report
+  and the page links it. That was his call to make and he made it; it is
+  still not a default to flip for anyone else's deployment. What stays off
+  is `game.public_vod_links`, which publishes a deep link to the moment of
+  every individual run: naming the channel and timestamping every attempt
+  he has ever made are different disclosures, and they are deliberately not
+  wired to the same switch.
 - The board reader (`src/board.rs`) runs on the pane passes but only speaks
   with `game.follow_title = "log"`: `layout snapshot:` lines and `layout`
   session events, one per distinct board, naming the `[[games]]` alias or
@@ -212,7 +187,7 @@ The timer is read by templates harvested from the streamer's own footage
 session-close line in the log reports `glyph reader N read / M declined`;
 a window of mostly declines logs a warning that the templates do not cover
 what is on screen (a new theme or font). Retraining is documented in the
-README under *Reading the timer with templates*; the corpus must come from
+docs/detection.md under *Reading the timer with templates*; the corpus must come from
 a replay with `reader = "tesseract"`, because templates are labelled by
 tesseract's readings and frames the glyph reader read are skipped.
 

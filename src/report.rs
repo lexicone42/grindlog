@@ -225,6 +225,18 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
             // with this rather than with the tracked game, because on a
             // Big 20 day the tracked game is not what is happening.
             "now": db::now_playing(&pool).await?,
+            // The channel, so the live panel can link to the stream it is
+            // reading.
+            //
+            // This NAMES THE STREAMER, which the page and the feed had
+            // deliberately not done. The owner asked for the link, so the
+            // decision is made and this is unconditional rather than a
+            // flag — but it is deliberately NOT wired to
+            // `public_vod_links`, which stays off. That flag publishes a
+            // deep link to the moment of every individual run, which is a
+            // much larger disclosure than naming the channel, and the two
+            // should not ride together just because both mention Twitch.
+            "channel": cfg.stream.channel,
             // Every other game, grouped back into the broadcasts it was
             // played in. The page pivots this both ways: by event, and by
             // game across events.

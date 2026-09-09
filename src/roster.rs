@@ -171,13 +171,6 @@ impl Rosters {
     }
 
     /// Is there anything here to canonicalise against?
-    /// Every game named in the file, once each, in pool order. The pool is
-    /// already deduplicated across events, so this is the list of games
-    /// this file knows about.
-    pub fn all_games(&self) -> Vec<String> {
-        self.pool.iter().map(|g| g.name.clone()).collect()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.pool.is_empty()
     }
