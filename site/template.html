@@ -508,6 +508,13 @@ document.getElementById('chip-cat').textContent = D.current_category;
   if (stale && n.game) bits.push(`last board read was ${esc(n.game)}`);
   if (n.at_ms) bits.push(fresh ? 'read from the LiveSplit board just now'
                                : `${dshort(n.at_ms)} ${dtime(n.at_ms)}`);
+  // Only when the deployment has chosen to name the channel. The login is
+  // [a-zA-Z0-9_] by Twitch's own rules, but it reaches an href, so it is
+  // escaped and pattern-checked rather than trusted.
+  if (D.channel && /^[A-Za-z0-9_]{3,25}$/.test(D.channel)) {
+    bits.push(`<a href="https://twitch.tv/${esc(D.channel)}" rel="noopener">`
+      + `watch on Twitch</a>`);
+  }
   // Link only where a page exists. A game gets one from its recorded runs,
   // and most of what he plays has none — the tracker reads those boards
   // and deliberately records nothing from them.
