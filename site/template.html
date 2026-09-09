@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230c0e14'/%3E%3Crect x='2' y='6' width='12' height='4' rx='1' fill='%233987e5'/%3E%3Crect x='4' y='7' width='2' height='2' fill='%23eef0f6'/%3E%3Crect x='10' y='7' width='2' height='2' fill='%23eef0f6'/%3E%3C/svg%3E">
-<title>NG Tracker</title>
+<title>Retro Tracker</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=Instrument+Sans:wght@400;500;600&family=Martian+Mono:wght@400;600;700&display=swap">
 <link rel="alternate" type="application/json" href="/api/v1/latest.json" title="Grind Log data (JSON)">
@@ -224,6 +224,24 @@
   .finchip.deep:hover { border-color: var(--behind); }
   .striplabel { font-family: "Silkscreen", monospace; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-right: 4px; }
 
+  /* ---------- what is on screen now ---------- */
+  .nowcard {
+    background: linear-gradient(135deg, var(--series-soft), transparent 60%), var(--card);
+    border: 1px solid var(--hairline); border-left: 3px solid var(--series);
+    border-radius: 8px; padding: 16px 20px; margin-bottom: 14px;
+  }
+  .nowgame { font-size: clamp(20px, 3vw, 28px); font-weight: 600; letter-spacing: -.01em; line-height: 1.15; }
+  .nowmeta { color: var(--ink2); font-size: 13px; margin-top: 6px; }
+  .nowcard .eyebrow { margin-bottom: 6px; }
+  /* Live gets the same pulsing dot the updated chip uses. */
+  .nowcard.on { border-left-color: var(--behind); }
+  .nowcard.on .eyebrow { color: var(--behind); }
+
+  /* The tracked game is a section of the page, not the identity of it. */
+  .gamehead { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 26px 0 12px; }
+  .gamehead h2 { margin: 0; font-size: 19px; }
+  .gamehead .subnote { margin: 0; flex-basis: 100%; }
+
   /* ---------- the other games ---------- */
   a.chip { text-decoration: none; }
   a.chip:hover, a.chip:focus-visible { border-color: var(--series); color: var(--ink); }
@@ -268,13 +286,30 @@
 
 <div class="wrap">
   <header>
-    <div class="wordmark">NG <span>//</span> TRACKER</div>
-    <span class="chip" id="chip-cat">Any% · NES</span>
+    <div class="wordmark">RETRO <span>//</span> TRACKER</div>
     <span class="chip" id="chip-updated"></span>
     <a class="chip" href="#other-games" id="chip-others" hidden></a>
-    <div class="tagline">Every attempt, split, and heartbreak — read live off the stream by OCR.</div>
+    <div class="tagline">NES speedruns, read off the stream frame by frame.</div>
   </header>
   <div class="horizon"></div>
+
+  <!-- What is actually on screen, whatever it is. The pane's header is read
+       on every pass whether or not runs are recorded from that board, so
+       this knows about games the rest of the page has nothing to say about. -->
+  <section class="nowcard" id="now-card" hidden>
+    <p class="eyebrow" id="now-label"></p>
+    <div class="nowgame" id="now-game"></div>
+    <div class="nowmeta" id="now-meta"></div>
+  </section>
+  <!-- Everything below is about ONE game. It is the only one this
+       deployment records in full, so it gets the depth; it is not what the
+       site is about. -->
+  <div class="gamehead">
+    <h2 id="tracked-name"></h2>
+    <span class="chip" id="chip-cat"></span>
+    <p class="subnote" id="tracked-note">The game this tracker follows in full: every attempt, split and reset.</p>
+  </div>
+
   <section class="card" id="heartbeat-card" hidden>
     <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">
       <h2>The daily log</h2>
@@ -410,6 +445,11 @@ const fmt = ms => {
 // title would take the whole page down with it.
 const esc = s => String(s ?? '').replace(/[&<>"']/g,
   c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// The same slug scripts/build-site.sh names a game's directory with:
+// lowercase, every run of non-alphanumerics to a hyphen, ends trimmed. The
+// two must stay in step or every game link is a 404.
+const slugOf = g => String(g).toLowerCase().replace(/[^a-z0-9]+/g, '-')
+  .replace(/^-/, '').replace(/-$/, '');
 // Every time on this page is the streamer's local time, whoever is reading:
 // shift by the recording machine's offset and format in UTC.
 const TZ = (D.day_offset_minutes || 0) * 60000;
@@ -432,7 +472,46 @@ const tagPill = r => sessionTag[r.session_id]
   ? `<span class="pill tag">${sessionTag[r.session_id]}</span>` : '';
 
 /* masthead */
-document.getElementById('chip-cat').textContent = `${D.current_category} · NES`;
+document.getElementById('tracked-name').textContent = D.current_game;
+document.getElementById('chip-cat').textContent = D.current_category;
+
+/* what is on screen now */
+(function nowPlaying() {
+  const n = D.now || {};
+  if (!n.game && !n.live) return;                 // nothing to say
+  const card = document.getElementById('now-card');
+  card.hidden = false;
+  card.classList.toggle('on', !!n.live);
+  // "live" means a capture session is open, which is not the same as a
+  // board being legible — an ad break or a waiting screen is live with
+  // nothing on it — so the label says which of the two this is.
+  // Three states, and conflating them reads as a lie. A capture session
+  // being open does not mean a board is on screen: an ad break, a waiting
+  // screen or a webcam scene is live with nothing to read. When the last
+  // board reading is old, saying "LIVE — Uninvited" claims something the
+  // page does not know; the game he played yesterday belongs in the
+  // subtitle, not the headline.
+  const fresh = n.at_ms != null && (Date.now() - n.at_ms) < 15 * 60000;
+  const stale = n.live && !fresh;
+  document.getElementById('now-label').innerHTML = n.live
+    ? '<span class="livedot"></span>' + (fresh ? 'On screen now' : 'Live')
+    : 'Last on screen';
+  document.getElementById('now-game').textContent =
+    stale ? 'no board on screen' : (n.game || '—');
+  const bits = [];
+  if (n.category && !stale) bits.push(n.category);
+  if (stale && n.game) bits.push(`last board read was ${n.game}`);
+  if (n.at_ms) bits.push(fresh ? 'read from the LiveSplit board just now'
+                               : `${dshort(n.at_ms)} ${dtime(n.at_ms)}`);
+  // Link only where a page exists. A game gets one from its recorded runs,
+  // and most of what he plays has none — the tracker reads those boards
+  // and deliberately records nothing from them.
+  const recorded = (D.summaries || []).some(s => s.game === n.game);
+  if (n.game && recorded && !stale && n.game !== D.current_game) {
+    bits.push(`<a href="/game/${slugOf(n.game)}/index.html">its times</a>`);
+  }
+  document.getElementById('now-meta').innerHTML = bits.filter(Boolean).join(' · ');
+})();
 document.getElementById('foot-gen').textContent =
   `Generated ${new Date(D.generated_at_ms).toLocaleString()}`;
 // The page's age, ticking, and whether the grind is on right now. An hls
@@ -1096,13 +1175,8 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
       : '') + '.';
 
   /* ---- by game ---- */
-  // The same slug scripts/build-site.sh writes the directory with: lowercase,
-  // every run of non-alphanumerics collapsed to a hyphen, ends trimmed. The
-  // two must stay in step or every link here is a 404.
-  const slug = g => String(g).toLowerCase().replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-/, '').replace(/-$/, '');
   const gameLink = g => {
-    const s = slug(g);
+    const s = slugOf(g);
     return s ? `<a class="ogev-name" href="/game/${s}/index.html">${esc(g)}</a>` : esc(g);
   };
   const el = document.getElementById('other-table');

@@ -24,9 +24,24 @@
 # four full cycles of his nine numbered events, so each name is a vote across
 # cycles rather than one reading. Names are spelled as the board prints them,
 # abbreviations and all, because that is what a run is filed under. Games are
-# listed in the order the board shows them, which for these events is
+# listed in the order the board shows them, which for eight of the nine is
 # alphabetical. No randomized draw over those broadcasts produced a game
 # outside this list.
+#
+# #7 IS THE EXCEPTION and it is not a mistake here: its board really does put
+# "Déjà Vu" before "D.S. Indy Heat", which no byte order or collation would.
+# The ROM picker in the same frame numbers them 04 then 05 the same way. A
+# validator that checks the sort has to whitelist that pair. #7 also needs
+# CASE-SENSITIVE ordering to pass at all — "LOTW" precedes "Little Mermaid"
+# only because 'O' sorts before 'i'.
+#
+# Every one of the ninety has now been read three ways: the runner's own ROM
+# file picker (found for all nine events, each in a frame that also shows the
+# board and the event banner, so it labels itself), a direct read of the board
+# at high zoom, and board-log OCR across the 3-5 broadcasts of each event.
+# The randomized boards add aliases the folding has to absorb and the prose
+# below did not all mention: "DuckTales", "SMB 2", "SMB2", "SMB3 (Warpless)"
+# and "TMNT II" (which is #3's "TMNT 2").
 
 [[event]]
 name = "#1"
@@ -171,11 +186,24 @@ games = [
 #     read as initialisms of the full title, which is how they are folded
 #     together.
 #   "Kabuki Quantum Fighter" (#5) becomes "Kabuki Q Fighter" when randomized.
-#   "Duck Tales" (#5) and "Duck Tales 2" (#8) are the two of them; the second
-#     is printed "DuckTales 2" as often as not.
+#   "Duck Tales" (#5) and "Duck Tales 2" (#8) are the two of them. Both
+#     numbered boards print them WITH the space, in all 1184 readings of #8's;
+#     "DuckTales" unspaced appears only on the randomized boards and means
+#     #5's, which its 8-9 minute times confirm against #8's 11-12. (This note
+#     used to say the reverse, and was wrong in both directions.)
 #   "Chip N Dale" (#3) and "Chip 'n Dale 2" (#7) are the two Rescue Rangers.
-#   "Adventure Island 4" (#9) read poorly on every pass of every broadcast;
-#     the NUMBER IS A GUESS and is the one name here nothing corroborates.
+#     The ROM picker cannot tell them apart — its filename field clips at 21
+#     characters and both read "Chip 'n Dale - Rescue" — so they are settled
+#     from the games themselves: #3 is the kitchen stage with plain crates,
+#     #7 the sewer with RR-emblem crates. Same for the three TMNTs, which all
+#     clip to "Teenage Mutant Ninja": #2 has an overworld, #3 is the arcade
+#     beat-em-up, #4 the Manhattan Project boardwalk. Those five are the only
+#     prefix collisions among the ninety.
+#   "Adventure Island 4" (#9) is confirmed, and the note that once stood here
+#     calling its number a guess is retired. The board prints a crisp Arabic
+#     4 (811 clean readings), the ROM picker line 01 reads "Takahashi Meijin
+#     no B...", and the game's own title screen carries "©1994 HUDSON SOFT" —
+#     1994 is Bouken Jima IV alone (I 1986, II 1991, III 1992).
 #   "Crystal Palace" (#7) is exactly what the board prints.
 #   "Jackie Chan" (#7) is Jackie Chan's Action Kung Fu.
 #   "Déjà Vu" (#7) is here because a colour crop found it: every OCR pass
