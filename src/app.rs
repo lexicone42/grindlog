@@ -1280,6 +1280,7 @@ fn apply_identity(
     pane_game: &mut Option<String>,
     id: &mut identity::Identity,
     last_shape: &mut Option<String>,
+    seen_shapes: &mut std::collections::HashSet<String>,
     health: &mut db::SessionHealth,
     at_ms: i64,
 ) {
@@ -1318,7 +1319,19 @@ fn apply_identity(
     // are illegible — left no trace at all, which is the one shape that can
     // quietly record another game as this one.
     let shape = format!("{}: {}", verdict.label(), reading.describe());
+    if !seen_shapes.contains(&shape) {
+        // One event per DISTINCT shape, not per change. Two shapes can
+        // alternate pass to pass — a board whose category reads on some
+        // frames and not others gives "header against; category for" and
+        // "header against" by turns — and logging each flip put ~340
+        // events on a broadcast against a cap of 400, crowding out the
+        // layout and title events. There are at most a dozen shapes, and
+        // the tally carries how often each came up.
+        health.event(at_ms, "identity", shape.clone());
+        seen_shapes.insert(shape.clone());
+    }
     if last_shape.as_deref() != Some(shape.as_str()) {
+        // The log keeps the timeline the events no longer carry.
         if verdict == identity::Verdict::Undecided {
             info!(
                 "layout identity undecided on {:?}: {} — not enough to suspend",
@@ -1328,7 +1341,6 @@ fn apply_identity(
         } else {
             debug!("layout identity {shape} on {title:?}");
         }
-        health.event(at_ms, "identity", shape.clone());
         *last_shape = Some(shape);
     }
     let Some(ok) = id.observe(&reading) else {
@@ -2113,6 +2125,9 @@ pub async fn run(cfg: Config) -> Result<()> {
     // The last identity reading logged, so a verdict is reported when it
     // changes rather than once a minute for hours.
     let mut pane_identity_shape: Option<String> = None;
+    // Every distinct reading this session has produced, so each is
+    // recorded once however often it recurs.
+    let mut pane_identity_seen: std::collections::HashSet<String> = Default::default();
     // The board reader's last snapshot, in shadow mode.
     let mut last_board_snapshot: Option<board::Snapshot> = None;
     // The marathon in progress, when the board is one a `[[games]]` entry
@@ -2308,6 +2323,11 @@ pub async fn run(cfg: Config) -> Result<()> {
                 last_timer_seen = None;
                 timer_clock = sanity::Monotone::new();
                 if let Some(id) = session_id.take() {
+                    // The tally goes in with the events, not only in the
+                    // log: reading how often each shape came up across a
+                    // week of broadcasts is the whole point of counting
+                    // them, and the log rotates.
+                    health.event(wall_now, "identity-tally", pane_identity.tally().describe());
                     if let Err(e) = db::update_session_health(&pool, id, &health).await {
                         warn!("failed to update session health: {e:#}");
                     }
@@ -2736,6 +2756,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 &mut pane_game,
                                 &mut pane_identity,
                                 &mut pane_identity_shape,
+                                &mut pane_identity_seen,
                                 &mut health,
                                 at_ms,
                             );
@@ -3445,6 +3466,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         &mut pane_game,
                         &mut pane_identity,
                         &mut pane_identity_shape,
+                        &mut pane_identity_seen,
                         &mut health,
                         at_ms,
                     );
@@ -4061,6 +4083,7 @@ mod tests {
             game,
             id,
             &mut None,
+            &mut Default::default(),
             health,
             0,
         );
