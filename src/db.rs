@@ -841,6 +841,65 @@ pub async fn runs_brief(
         .collect())
 }
 
+/// What the pane was last seen timing, and whether the stream is up.
+///
+/// The bot reads the LiveSplit header on every pane pass and records it as
+/// a `title` session event, whether or not it records runs from that
+/// board. So it knows he is playing Die Hard even though Die Hard has no
+/// runs and never will under this configuration — which is exactly what a
+/// front page should lead with, and what a page built only from `runs`
+/// cannot say.
+#[derive(Debug, Clone, Serialize)]
+pub struct NowPlaying {
+    /// A capture session is open. Not the same as "a game is on screen".
+    pub live: bool,
+    /// The header as the pane last read it, and the category under it.
+    pub game: Option<String>,
+    pub category: Option<String>,
+    /// When that reading was taken. Old means the pane has not been
+    /// legible since, not that he stopped playing.
+    pub at_ms: Option<i64>,
+}
+
+/// The last board the pane reported, looking back through recent sessions
+/// until one has a title. A broadcast that opens on a waiting screen has
+/// no title of its own for a while, and "what he played last time" is a
+/// better answer for a front page than nothing at all.
+pub async fn now_playing(pool: &SqlitePool) -> Result<NowPlaying> {
+    // By WHEN THE BROADCAST WAS, not by row id. Importing a VOD writes a
+    // session with a fresh id and a months-old timestamp, so `ORDER BY id`
+    // makes the newest import look like the newest broadcast — it reported
+    // a July marathon as what was on screen.
+    let rows = sqlx::query(
+        "SELECT ended_at_ms IS NULL AS open, source, COALESCE(events,'[]') AS events \
+         FROM sessions ORDER BY started_at_ms DESC LIMIT 40",
+    )
+    .fetch_all(pool)
+    .await?;
+    // Live is any open capture of the stream, not merely the newest row.
+    let live = rows
+        .iter()
+        .any(|r| r.get::<i64, _>("open") == 1 && r.get::<String, _>("source") == "hls");
+    for r in &rows {
+        let events: Vec<serde_json::Value> =
+            serde_json::from_str(&r.get::<String, _>("events")).unwrap_or_default();
+        if let Some(e) = events.iter().rev().find(|e| e["k"] == "title") {
+            return Ok(NowPlaying {
+                live,
+                game: e["d"].as_str().map(str::to_string),
+                category: None,
+                at_ms: e["t"].as_i64(),
+            });
+        }
+    }
+    Ok(NowPlaying {
+        live,
+        game: None,
+        category: None,
+        at_ms: None,
+    })
+}
+
 /// One run of a game this deployment does not follow, with the broadcast
 /// it belongs to. A marathon puts ten of these in one session, which is
 /// what lets the report group them back into the event they were.

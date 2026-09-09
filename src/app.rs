@@ -4277,9 +4277,15 @@ mod tests {
         );
     }
 
-    /// Left lenient — the deployed setting — the header disagreeing is one
-    /// signal of three and never suspends on its own. The board has to
-    /// corroborate it, which is what `identity` is for.
+    /// Left lenient — the deployed setting — a header disagreeing is one
+    /// signal and never suspends on its own. The board has to corroborate
+    /// it, which is what `identity` is for.
+    ///
+    /// The name matters here: it must be a game on NO shipped roster.
+    /// "Super Mario Bros." used to stand in and stopped working once
+    /// `identity` learned the game lists, because recognising the other
+    /// game IS the corroborating second signal — which is the point of
+    /// that feature, not a problem with this test.
     #[test]
     fn a_lone_disagreeing_header_does_not_suspend_recording() {
         let mut cfg = Config::for_test_with_min_final(660_000);
@@ -4290,7 +4296,7 @@ mod tests {
         let mut health = db::SessionHealth::default();
         for _ in 0..4 {
             assert!(feed_header(
-                Some("Super Mario Bros."),
+                Some("Some Game Nobody Listed"),
                 &cfg,
                 &fp,
                 &mut game,

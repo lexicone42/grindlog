@@ -1,0 +1,49 @@
+# The Big 20: twenty NES games raced back to back, in a fixed order.
+#
+# Source: https://thebig20nes.com/race-23/ (race #23, 2026-10-10). This is
+# somebody else's event with a published list, so unlike the Arcathlon
+# rosters — which were reconstructed from the boards by OCR and voting —
+# these names are ground truth and should be corrected only against that
+# site.
+#
+# SEPARATE FROM assets/arcathlon-rosters.toml on purpose. `Rosters::identify`
+# picks the event whose games most of a board's names fit, and the pool
+# fallback assumes each game belongs to exactly ONE event in the file. Mega
+# Man 6 is in both Arcathlon #9 and this race, so merging the two files would
+# break that assumption for every board either way.
+#
+# What it is FOR, today: the Big 20 is not a marathon board — each game is its
+# own splits file with its own attempt counter — so there is no board to
+# identify. These names are used to recognise a game the pane is timing that
+# is KNOWN NOT TO BE the tracked one, which is stronger evidence than a
+# header simply failing to match (see src/identity.rs). Canonicalising runs
+# under them comes when the tracker records these games at all.
+#
+# The per-game categories are the race's goals, kept here as comments because
+# a roster is a list of names; the goal is a property of the race, not of the
+# game, and it changes between races.
+
+[[event]]
+name = "#23"
+games = [
+  "Die Hard",                                   # Any% Beginner
+  "Pac-Mania",                                  # From Sandbox to End Loop 1
+  "Double Dragon II: The Revenge",              # Beat Game (Normal)
+  "Crisis Force",                               # 3 Stages
+  "Kid Klown in Night Mayor World",             # Any%
+  "Excitebike",                                 # Selection A
+  "Uninvited",                                  # Any%
+  "Steel Legion",                               # Any% All Bosses
+  "Faria",                                      # Save Princess / Dungeon 1
+  "Monster Party",                              # Watch us dance / Round 5
+  "Parallel World",                             # World 3 thru 4
+  "Mega Man 6",                                 # Beat X4 Password Start
+  "New Ghostbusters II",                        # Beat Stage 3
+  "Mini Putt",                                  # Beat Any Course
+  "The Flintstones: Surprise at Dinosaur Peak", # Any% No Manip
+  "Hydlide",                                    # 3 Fairies
+  "Yoshi",                                      # A Type Any%
+  "Celeste Mario's Zap n Dash",                 # Any%
+  "Jaws",                                       # Any%
+  "Moon Crystal",                               # Any%
+]

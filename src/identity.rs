@@ -42,6 +42,22 @@
 //! header, the category and the counter all disagree with Ninja Gaiden at
 //! once, while every way the pane has been seen to lie disagrees in one
 //! field only.
+//!
+//! One case defeated that rule and had to be answered differently. A board
+//! whose category is the same generic "Any%" the tracked game uses, and
+//! whose counter and rows are illegible, disagrees on its header alone —
+//! and so does a REAL broadcast whose header came back "With)" or "Ninja
+//! Gasden (NES)". Same shape, opposite meaning, so no threshold separates
+//! them; counting the passes is what showed that, before a threshold was
+//! changed on a guess.
+//!
+//! What separates them is not how many signals but WHICH game. "Klown in
+//! Night Mayor World" is a game on a list this build ships; "With)" is
+//! nothing at all. So a header matching a known other game contributes a
+//! second signal of its own ([`Signal::NamedAnother`]), and recognising
+//! the other game is positive evidence where failing to recognise this one
+//! is only an absence. The lists are the Arcathlon rosters and the Big 20
+//! race; a deployment with neither simply never fires that signal.
 
 use crate::board::{self, Board};
 use crate::config::Config;
@@ -58,6 +74,9 @@ pub enum Signal {
     Counter,
     /// The names down the left edge of the split rows.
     Rows,
+    /// The header names a game we have a list for, and it is not this
+    /// one. Distinct from Header so a log line says which happened.
+    NamedAnother,
 }
 
 impl Signal {
@@ -67,6 +86,7 @@ impl Signal {
             Signal::Category => "category",
             Signal::Counter => "counter",
             Signal::Rows => "rows",
+            Signal::NamedAnother => "names a known game",
         }
     }
 }
@@ -163,6 +183,29 @@ impl Tally {
     }
 }
 
+/// Every game this build ships a list for, minus the one being tracked.
+///
+/// The Arcathlon pool and the Big 20 race are the two events this streamer
+/// runs, and between them they name the games most likely to appear on a
+/// pane that is not the tracked game's. Compiled in like the rosters
+/// themselves; a deployment following a different streamer ships whatever
+/// lists it has, or none, and then this signal never fires.
+///
+/// The tracked game is removed rather than matched against: Ninja Gaiden
+/// is itself one of Arcathlon #1's ten, and a header reading "Ninja
+/// Gaiden" must never be evidence AGAINST Ninja Gaiden.
+fn known_games(tracked: &str) -> Vec<String> {
+    [
+        include_str!("../assets/arcathlon-rosters.toml"),
+        include_str!("../assets/big20-roster.toml"),
+    ]
+    .iter()
+    .filter_map(|t| crate::roster::Rosters::parse(t).ok())
+    .flat_map(|r| r.all_games())
+    .filter(|g| !board::game_matches(g, tracked))
+    .collect()
+}
+
 /// The tracked game as its board looks: what the header should say, what
 /// the rows should be called, and the highest attempt the game has already
 /// reached.
@@ -172,6 +215,8 @@ pub struct Fingerprint {
     category: String,
     acts: Vec<String>,
     attempts: Option<i64>,
+    /// Games this deployment knows exist and does not track.
+    known: Vec<String>,
 }
 
 impl Fingerprint {
@@ -185,6 +230,7 @@ impl Fingerprint {
             category: cfg.game.category.clone(),
             acts: cfg.game.acts.iter().map(|a| a.name.clone()).collect(),
             attempts: attempts.filter(|&n| n > 0),
+            known: known_games(&cfg.game.name),
         }
     }
 
@@ -234,6 +280,17 @@ impl Fingerprint {
     /// The header names this game, or names another one. A header that
     /// reads as a category names no game and says nothing: "Any%
     /// (Beginner)" is true of a thousand boards.
+    ///
+    /// A header that matches a game on the KNOWN list is worth more than
+    /// one that merely fails to match this game, and the difference is the
+    /// whole reason the list is loaded. Counting passes showed why: a real
+    /// Ninja Gaiden broadcast produces "header against" all by itself,
+    /// from readings like "With)" and "Ninja Gasden (NES)", and so does a
+    /// board that is genuinely another game. Same shape, opposite meaning,
+    /// so no threshold can separate them — but "Klown in Night Mayor
+    /// World" IS Kid Klown, and "With)" is nothing at all. Recognising the
+    /// other game is positive evidence where failing to recognise this one
+    /// is only an absence.
     fn header(&self, title: Option<&str>, r: &mut Reading) {
         let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) else {
             return;
@@ -243,8 +300,12 @@ impl Fingerprint {
         }
         if board::game_matches(t, &self.game) {
             r.for_it.push(Signal::Header);
-        } else {
-            r.against.push(Signal::Header);
+            return;
+        }
+        r.against.push(Signal::Header);
+        // Named a game we know, and it is not this one.
+        if self.known.iter().any(|g| board::game_matches(t, g)) {
+            r.against.push(Signal::NamedAnother);
         }
     }
 
@@ -487,7 +548,12 @@ mod tests {
         );
         assert_eq!(
             r.against,
-            vec![Signal::Header, Signal::Category, Signal::Counter]
+            vec![
+                Signal::Header,
+                Signal::NamedAnother,
+                Signal::Category,
+                Signal::Counter
+            ]
         );
         assert!(Identity::default().convicts(&r));
     }
@@ -505,7 +571,12 @@ mod tests {
         let r = f.read(Some("Die Hard (NES)"), None, &b);
         assert_eq!(
             r.against,
-            vec![Signal::Header, Signal::Counter, Signal::Rows]
+            vec![
+                Signal::Header,
+                Signal::NamedAnother,
+                Signal::Counter,
+                Signal::Rows
+            ]
         );
         assert!(Identity::default().convicts(&r));
     }
@@ -609,7 +680,10 @@ mod tests {
         let blank = board(None, &[None, None, None, None]);
 
         let r = f.read(Some("Die Hard (NES)"), Some("Any% (Beginner)"), &blank);
-        assert_eq!(r.against, vec![Signal::Header, Signal::Category]);
+        assert_eq!(
+            r.against,
+            vec![Signal::Header, Signal::NamedAnother, Signal::Category]
+        );
         assert!(
             Identity::default().convicts(&r),
             "header and category together are enough"
@@ -624,38 +698,50 @@ mod tests {
         }
     }
 
-    /// The shape that can quietly record another game as this one, and
-    /// the reason the tally exists.
+    /// The hole the tally was built to find, and its closure.
     ///
     /// Kid Klown in Night Mayor World, read off the Big 20 stream: its
     /// category is the same generic "Any%" the tracked game uses, its
-    /// board shows no counter, and no row name was legible. The header
-    /// disagrees and the category agrees, which is one signal each way —
-    /// not a conviction, and not an acquittal either. The gate holds
-    /// whatever it already thought, so a bot that restarted onto this
-    /// board would record it as Ninja Gaiden.
+    /// board shows no counter, and no row name was legible. The header was
+    /// the only thing disagreeing and the category was agreeing, so the
+    /// pass was undecided and a bot restarting onto that board would have
+    /// recorded it as Ninja Gaiden.
+    ///
+    /// Knowing the game by name is what closes it. Kid Klown is on the Big
+    /// 20 list, so the header is not merely failing to match Ninja Gaiden,
+    /// it is matching something else — two signals, and it convicts.
     #[test]
-    fn a_generic_category_leaves_a_foreign_board_undecided() {
+    fn a_known_game_under_a_generic_category_now_convicts() {
         let f = Fingerprint::of(&cfg(), None);
         let r = f.read(
             Some("Klown in Night Mayor World"),
             Some("Any%"),
             &board(None, &[]),
         );
-        assert_eq!(r.against, vec![Signal::Header]);
+        assert_eq!(r.against, vec![Signal::Header, Signal::NamedAnother]);
         assert_eq!(r.for_it, vec![Signal::Category]);
-        assert!(!r.acquits(), "a disagreeing header is not an acquittal");
+        assert!(Identity::default().convicts(&r));
+    }
 
+    /// The residual, stated honestly: a game on NO list, whose category is
+    /// the generic one and whose board shows nothing else, is still only
+    /// one signal and still goes undecided. That is the correct answer —
+    /// it is indistinguishable from a damaged reading of the tracked game
+    /// — and it is why the tally still counts this bucket.
+    #[test]
+    fn an_unknown_game_under_a_generic_category_is_still_undecided() {
+        let f = Fingerprint::of(&cfg(), None);
+        let r = f.read(
+            Some("Some Game Nobody Listed"),
+            Some("Any%"),
+            &board(None, &[]),
+        );
+        assert_eq!(r.against, vec![Signal::Header]);
         let mut id = Identity::default();
         assert_eq!(id.verdict(&r), Verdict::Undecided);
         assert_eq!(id.observe(&r), None, "the verdict does not move");
-        assert!(id.ok(), "and it holds whatever it already was");
         assert_eq!(id.tally().undecided, 1, "but it is counted");
-        assert_eq!(
-            r.describe(),
-            "header against; category for",
-            "and it is legible in the log"
-        );
+        assert_eq!(r.describe(), "header against; category for");
     }
 
     /// The tally is the session's own account of itself, so a week of
@@ -674,7 +760,13 @@ mod tests {
             Some("Any% (Beginner)"),
             &board(Some("28971"), &[]),
         );
-        let lone = f.read(Some("Kid Klown"), Some("Any%"), &board(None, &[]));
+        // A game on no list under the generic category: one signal, which
+        // is the shape that still lands undecided.
+        let lone = f.read(
+            Some("Some Game Nobody Listed"),
+            Some("Any%"),
+            &board(None, &[]),
+        );
 
         for r in [&good, &good, &foreign, &lone, &Reading::default()] {
             id.observe(r);
@@ -682,6 +774,73 @@ mod tests {
         let t = id.tally();
         assert_eq!((t.clear, t.convicting, t.undecided, t.silent), (2, 1, 1, 1));
         assert_eq!(t.describe(), "2 clear, 1 convicting, 1 undecided, 1 silent");
+    }
+
+    /// The fix the tally argued for, tested on the strings that argued for
+    /// it — all read off real broadcasts.
+    ///
+    /// A damaged reading of the tracked game and a clean reading of a
+    /// different one produce the SAME shape ("header against") and want
+    /// opposite outcomes, so no threshold separates them. Recognising the
+    /// other game does: "Klown in Night Mayor World" is a game on a list;
+    /// "With)" is nothing at all.
+    #[test]
+    fn a_header_naming_a_known_other_game_convicts_but_damage_does_not() {
+        let f = Fingerprint::of(&cfg(), None);
+        let blank = board(None, &[]);
+
+        // Real Big 20 headers, with the generic "Any%" that used to mask
+        // them. Each names a game we have a list for.
+        for t in [
+            "Klown in Night Mayor World",
+            "Kiown in Night Mayor Word",
+            "ible Dragon Il: The Revenge",
+            "Pac-Mania",
+            "Uninvited",
+            "Crisis Force",
+        ] {
+            let r = f.read(Some(t), Some("Any%"), &blank);
+            assert!(
+                r.against.contains(&Signal::NamedAnother),
+                "{t} should be recognised as another game: {r:?}"
+            );
+            assert!(
+                Identity::default().convicts(&r),
+                "{t} should convict without needing the counter or rows"
+            );
+        }
+
+        // Real Ninja Gaiden headers, damaged. None of these is a game on
+        // any list, so none of them gains the second signal.
+        for t in [
+            "Ninja (NES)",
+            "Ninia (NES)",
+            "Ninja Gasden (NES)",
+            "Ninja Garden (NES)",
+            "With)",
+        ] {
+            let r = f.read(Some(t), Some("Any%"), &blank);
+            assert!(
+                !r.against.contains(&Signal::NamedAnother),
+                "{t} is damage, not another game: {r:?}"
+            );
+            assert!(
+                !Identity::default().convicts(&r),
+                "{t} must not suspend a real broadcast"
+            );
+        }
+    }
+
+    /// Ninja Gaiden is itself one of Arcathlon #1's ten games, so the list
+    /// must have the tracked game removed from it or the pane would
+    /// convict itself.
+    #[test]
+    fn the_tracked_game_is_not_on_its_own_known_list() {
+        let f = Fingerprint::of(&cfg(), None);
+        for t in ["Ninja Gaiden (NES)", "Ninja Gaiden"] {
+            let r = f.read(Some(t), Some("Any%"), &board(None, &[]));
+            assert!(r.against.is_empty(), "{t} is the tracked game: {r:?}");
+        }
     }
 
     /// `require_title_match` lowers the bar to one signal, so a header
@@ -692,7 +851,10 @@ mod tests {
         c.game.require_title_match = true;
         let f = Fingerprint::of(&c, Some(97_080));
         let b = board(Some("97085"), &[Some("Act 1")]);
-        let r = f.read(Some("Die Hard (NES)"), None, &b);
+        // A game on no list, so the header is the ONLY signal — which is
+        // what isolates strict from lenient. A known game would give two
+        // and both settings would convict, testing nothing.
+        let r = f.read(Some("Some Game Nobody Listed"), None, &b);
         assert_eq!(r.against, vec![Signal::Header]);
         assert!(Identity::new(&c).convicts(&r));
         assert!(!Identity::new(&cfg()).convicts(&r), "lenient needs two");

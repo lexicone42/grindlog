@@ -221,6 +221,10 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
                 .await?
                 .and_then(|s| s.parse::<i64>().ok()),
             "summaries": summaries,
+            // What the pane last saw, whatever game it was. The page leads
+            // with this rather than with the tracked game, because on a
+            // Big 20 day the tracked game is not what is happening.
+            "now": db::now_playing(&pool).await?,
             // Every other game, grouped back into the broadcasts it was
             // played in. The page pivots this both ways: by event, and by
             // game across events.
