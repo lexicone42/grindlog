@@ -98,6 +98,12 @@ impl Signal {
 pub struct Reading {
     pub for_it: Vec<Signal>,
     pub against: Vec<Signal>,
+    /// The known game the header matched, canonically spelled, when it
+    /// matched one that is not the tracked game. This is what makes
+    /// tracking another game possible rather than merely refusing to
+    /// mis-record it: the board says "ible Dragon Il: The Revenge" and the
+    /// roster says that is Double Dragon II: The Revenge.
+    pub named: Option<String>,
 }
 
 impl Reading {
@@ -194,15 +200,13 @@ impl Tally {
 /// The tracked game is removed rather than matched against: Ninja Gaiden
 /// is itself one of Arcathlon #1's ten, and a header reading "Ninja
 /// Gaiden" must never be evidence AGAINST Ninja Gaiden.
-fn known_games(tracked: &str) -> Vec<String> {
+fn bundled_rosters() -> Vec<crate::roster::Rosters> {
     [
         include_str!("../assets/arcathlon-rosters.toml"),
         include_str!("../assets/big20-roster.toml"),
     ]
     .iter()
     .filter_map(|t| crate::roster::Rosters::parse(t).ok())
-    .flat_map(|r| r.all_games())
-    .filter(|g| !board::game_matches(g, tracked))
     .collect()
 }
 
@@ -215,8 +219,10 @@ pub struct Fingerprint {
     category: String,
     acts: Vec<String>,
     attempts: Option<i64>,
-    /// Games this deployment knows exist and does not track.
-    known: Vec<String>,
+    /// The game lists this build ships, kept whole rather than flattened:
+    /// their own matcher is what folds a damaged reading onto a canonical
+    /// name, and it is far better at it than a plain name comparison.
+    rosters: Vec<crate::roster::Rosters>,
 }
 
 impl Fingerprint {
@@ -230,7 +236,7 @@ impl Fingerprint {
             category: cfg.game.category.clone(),
             acts: cfg.game.acts.iter().map(|a| a.name.clone()).collect(),
             attempts: attempts.filter(|&n| n > 0),
-            known: known_games(&cfg.game.name),
+            rosters: bundled_rosters(),
         }
     }
 
@@ -303,10 +309,37 @@ impl Fingerprint {
             return;
         }
         r.against.push(Signal::Header);
-        // Named a game we know, and it is not this one.
-        if self.known.iter().any(|g| board::game_matches(t, g)) {
+        if let Some(g) = self.recognise(t) {
             r.against.push(Signal::NamedAnother);
+            r.named = Some(g);
         }
+    }
+
+    /// Which known game this header is, canonically spelled.
+    ///
+    /// Through the ROSTER's matcher rather than a name comparison, because
+    /// the damage is severe and structured: the pane clips leading
+    /// characters, so "Double Dragon II: The Revenge" arrives as "ible
+    /// Dragon Il: The Revenge" and "ble Dragon ll; The Revenge" — 21
+    /// spellings in one afternoon. A plain edit-distance test folds the
+    /// mild ones and misses the rest. The roster net was built for exactly
+    /// this and keeps the sequel number strict, so it will not quietly
+    /// turn a II into a III.
+    ///
+    /// The tracked game is excluded: it appears on these lists too (Ninja
+    /// Gaiden is one of Arcathlon #1's ten), and its own name must never
+    /// come back as "another game".
+    fn recognise(&self, t: &str) -> Option<String> {
+        self.rosters
+            .iter()
+            .find_map(|r| {
+                r.assign(None, &[Some(t)])
+                    .first()
+                    .copied()
+                    .flatten()
+                    .map(str::to_string)
+            })
+            .filter(|g| !board::game_matches(g, &self.game))
     }
 
     /// The counter sits at or above the floor this game has already
@@ -831,6 +864,42 @@ mod tests {
         }
     }
 
+    /// The canonical name comes back, not the damaged reading. Filing runs
+    /// under what OCR produced would give one game a history per spelling
+    /// — Double Dragon II alone made twenty-one in an afternoon, and
+    /// Excitebike's CATEGORY made three in as many minutes.
+    #[test]
+    fn a_recognised_board_reports_the_canonical_name() {
+        let f = Fingerprint::of(&cfg(), None);
+        let blank = board(None, &[]);
+        for (read, want) in [
+            (
+                "ible Dragon Il: The Revenge",
+                "Double Dragon II: The Revenge",
+            ),
+            (
+                "ble Dragon ll; The Revenge",
+                "Double Dragon II: The Revenge",
+            ),
+            (
+                "Kiown in Night Mayor Word",
+                "Kid Klown in Night Mayor World",
+            ),
+            ("Pac-Mana", "Pac-Mania"),
+            ("Excitebike (NES)", "Excitebike"),
+        ] {
+            let r = f.read(Some(read), Some("Any%"), &blank);
+            assert_eq!(r.named.as_deref(), Some(want), "reading {read:?}");
+        }
+        // A damaged reading of the TRACKED game names nothing: there is no
+        // other game to file it under, and claiming one would be worse
+        // than recording nothing.
+        for read in ["Ninja (NES)", "With)", "Ninja Gasden (NES)"] {
+            let r = f.read(Some(read), Some("Any%"), &blank);
+            assert_eq!(r.named, None, "reading {read:?}");
+        }
+    }
+
     /// Ninja Gaiden is itself one of Arcathlon #1's ten games, so the list
     /// must have the tracked game removed from it or the pane would
     /// convict itself.
@@ -875,5 +944,118 @@ mod tests {
         assert_eq!(id.observe(&wrong), None);
         assert_eq!(id.observe(&Reading::default()), None);
         assert_eq!(id.observe(&wrong), Some(false));
+    }
+}
+
+/// Every distinct board header the bot read across 2026-09-08 and 09, and
+/// what the roster makes of each. This is the corpus the folding exists
+/// for: one afternoon of a twenty-game rotation produced 52 spellings of
+/// seven games, because the pane clips leading characters and OCR reads
+/// "II" six different ways.
+///
+/// The property that matters is not the hit rate. It is that NOTHING folds
+/// to the WRONG game — a miss costs a recording, a mis-fold writes a false
+/// one, and only the second is unrecoverable.
+#[cfg(test)]
+mod observed {
+    use super::*;
+
+    fn fp() -> Fingerprint {
+        let mut c = crate::config::Config::for_test_with_min_final(1);
+        c.game.name = "Ninja Gaiden (NES)".into();
+        Fingerprint::of(&c, None)
+    }
+
+    #[test]
+    fn damaged_headers_fold_onto_the_game_they_are() {
+        let f = fp();
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "Double Dragon II: The Revenge",
+                &[
+                    "bie Dragon Il: The Revenge",
+                    "ble Dragon II: The Revenge",
+                    "ble Dragon Il. The Revenge",
+                    "ble Dragon I: The Revenge",
+                    "ble Dragon ll; The Revenge",
+                    "double dragon",
+                    "Dragon Il The Revenge",
+                    "Dragon I! The Revenge",
+                    "Dragon I) The Revenge",
+                    "ibie Dragon Il: The Revenge",
+                    "ible Dragon Ii: The Revenge",
+                    "ible Dragon Ill The Revenge",
+                    "ible Dragon It: The Revenge",
+                    "ible Dragon li: The Revenge",
+                    "ible Dragon ll; The Revenge",
+                ],
+            ),
+            (
+                "Kid Klown in Night Mayor World",
+                &[
+                    "Kfown in Night Mayor World",
+                    "Kiown in Night Mayor Word",
+                    "Kiown in Nig ht Mayor World",
+                    "Kiown in, Night Mayor World",
+                    "Klown in Night Mayor Worid",
+                    "Klown Ta) Night Mayor World",
+                    "Ktown in Night Mayor Word",
+                    "in Night Mayor World",
+                ],
+            ),
+            ("Pac-Mania", &["Pac-Mana", "Pac-Mania"]),
+            (
+                "Excitebike",
+                &[
+                    "Excitebike (NES",
+                    "Excitebike (NES)",
+                    "Excitebike Selection (NES)",
+                    "Excitebske (NES)",
+                ],
+            ),
+            ("Uninvited", &["Uninvited"]),
+            ("Crisis Force", &["Crisis Force"]),
+            ("Steel Legion", &["Steel Legion"]),
+        ];
+        for (want, reads) in cases {
+            for r in *reads {
+                assert_eq!(f.recognise(r).as_deref(), Some(*want), "reading {r:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_that_is_not_a_game_is_taken_for_one() {
+        let f = fp();
+        for t in [
+            // Categories, which sit one line under the header and are read
+            // as the header when the game line goes illegible.
+            "Selection A",
+            "SelectionA",
+            "Any% (Beginner)",
+            // Scene artwork and a raid banner.
+            "fel c",
+            "romedia with raiders",
+            // Too little left to identify anything.
+            "down Mayor",
+            // A real misread of a REAL game we do not have on a list. It
+            // must not become Crisis Force just because it rhymes.
+            "Life Force",
+            // The tracked game, damaged. Never "another game".
+            "Ninja (NES)",
+            "Ninja Gasden (NES)",
+            "With)",
+            "Ninja Gaiden (NES)",
+        ] {
+            assert_eq!(f.recognise(t), None, "reading {t:?}");
+        }
+    }
+
+    /// The strict sequel rule costs one fold and is worth it: "Pac-Mania
+    /// 1}" carries a trailing token the roster will not discard, because
+    /// discarding it is how a II becomes a III. A miss, not a mis-fold.
+    #[test]
+    fn a_trailing_numeral_is_not_guessed_away() {
+        assert_eq!(fp().recognise("Pac-Mania 1}"), None);
     }
 }

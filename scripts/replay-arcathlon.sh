@@ -7,7 +7,7 @@
 # split row per game) is not a Ninja Gaiden day: the pane's big timer is the
 # event's running total, it pauses between games and never resets, so the run
 # state machine has nothing to read. The board does. The config below turns
-# on `[[games]] mode = "board"` (see the README, "Marathon days"), and every
+# on `[[games]] mode = "board"` (see docs/detection.md, "Marathon days"), and every
 # row that gains a time is recorded as a finished run of that game — game
 # "Astyanax", category "Arcathlon" — in its own database, under the name
 # assets/arcathlon-rosters.toml gives that game rather than under whatever OCR
