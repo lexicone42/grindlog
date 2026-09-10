@@ -1318,7 +1318,18 @@ fn apply_identity(
     // whose category is the same generic "Any%" and whose rows and counter
     // are illegible — left no trace at all, which is the one shape that can
     // quietly record another game as this one.
-    let shape = format!("{}: {}", verdict.label(), reading.describe());
+    // The board is part of the shape. Without it a twenty-game day collapses
+    // to a handful of distinct readings, and the log cannot say WHICH game
+    // was undecided — which is the only question worth asking of that
+    // bucket. With it, the cap at 400 events is the limit instead, so the
+    // name is normalised: 21 spellings of one game must not be 21 shapes.
+    let board = reading
+        .named
+        .as_deref()
+        .or(title)
+        .map(board::normalise_title)
+        .unwrap_or_default();
+    let shape = format!("{}: {} [{board}]", verdict.label(), reading.describe());
     if !seen_shapes.contains(&shape) {
         // One event per DISTINCT shape, not per change. Two shapes can
         // alternate pass to pass — a board whose category reads on some
@@ -2783,8 +2794,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                             )
                             .await;
                             // Reference times printed under the timer.
+                            // Only off the tracked game's own board. These rows
+                            // are its PB, Sum of Best and season best, they are
+                            // persisted as GLOBAL settings, and they are
+                            // published as this game's records and adopted as
+                            // the mark to beat. Another game's board carries its
+                            // own, and nothing downstream could tell them apart.
                             for (kind, ms, _) in &readings.refs {
-                                if sane_reference(*kind, *ms, &refs, &cfg)
+                                if pane_identity.ok()
+                                    && sane_reference(*kind, *ms, &refs, &cfg)
                                     && refs.observe(*kind, *ms)
                                 {
                                     record_reference(
@@ -3212,8 +3230,20 @@ pub async fn run(cfg: Config) -> Result<()> {
 
         // Splits panel pass: only while a run is in progress, on a slow
         // cadence (splits change at most once per act).
+        //
+        // Not while the pane is showing another game. The act rectangles are
+        // measured from `shared.acts`, which is the TRACKED game's six, and
+        // a foreign board has its own row count — Die Hard four, Crisis
+        // Force three. Slicing a three-row board into six reads whatever
+        // sits under the missing rows and vets it against Ninja Gaiden's
+        // floors, and a value that clears them lands as a gold: there is a
+        // window a few seconds wide where a foreign row beats the record
+        // and is published as this game's best segment.
         let mut splits_values: Option<Vec<Option<i64>>> = None;
-        if let (Some(st), Some(splits_rect)) = (splits_tracker.as_mut(), reg.splits) {
+        if let (Some(st), Some(splits_rect)) = (
+            splits_tracker.as_mut().filter(|_| pane_identity.ok()),
+            reg.splits,
+        ) {
             if t - last_splits_read_t >= splits_every_ms {
                 last_splits_read_t = t;
                 let rows = shared.acts.len().max(1) as u32;
@@ -3486,8 +3516,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                         marathon_total(last_timer_seen, t),
                     )
                     .await;
+                    // Tracked game only — see the note at the other reference
+                    // loop; these persist as this game's global records.
                     for (kind, ms, _) in &readings.refs {
-                        if sane_reference(*kind, *ms, &refs, &cfg) && refs.observe(*kind, *ms) {
+                        if pane_identity.ok()
+                            && sane_reference(*kind, *ms, &refs, &cfg)
+                            && refs.observe(*kind, *ms)
+                        {
                             record_reference(
                                 &pool,
                                 &shared,
@@ -3502,7 +3537,14 @@ pub async fn run(cfg: Config) -> Result<()> {
                     }
                     // A configured Sum of Best crop still covers layouts whose
                     // rows the pane pass cannot label.
-                    if readings.refs.is_empty() {
+                    //
+                    // Tracked game only, and this one matters most: the guard
+                    // is `refs.is_empty()`, which is exactly what a foreign
+                    // board produces, so without the identity test this
+                    // fallback fires PRECISELY when the pane is showing
+                    // something else — OCRing another game's rows and storing
+                    // the result as this game's Sum of Best.
+                    if pane_identity.ok() && readings.refs.is_empty() {
                         if let Some((bx, by, bw2, bh2)) = reg.sob {
                             let bimg = image::imageops::crop_imm(&union_bright, bx, by, bw2, bh2)
                                 .to_image();
@@ -3706,9 +3748,21 @@ pub async fn run(cfg: Config) -> Result<()> {
     let capture_failed = capture_error.lock().unwrap().clone();
     if let Some(id) = session_id.take() {
         let wall_now = time_base.map(|b| b + last_t).unwrap_or_else(util::unix_ms);
+        // The tally goes in here too, not only on the stream-offline path.
+        // A live broadcast ends by going offline; a VOD replay and every
+        // backfill end by running out of input and came through here, so
+        // the tally was written for exactly the sessions nobody inspects
+        // by hand and missing from every one it is easy to check. That is
+        // backwards, and it made `scripts/identity-report.sh` print a
+        // blank "passes:" line for all of them.
+        health.event(wall_now, "identity-tally", pane_identity.tally().describe());
         if let Err(e) = db::update_session_health(&pool, id, &health).await {
             warn!("failed to update session health: {e:#}");
         }
+        info!(
+            "session #{id} ending: identity {}",
+            pane_identity.tally().describe()
+        );
         if capture_failed.is_some() {
             warn!("session #{id} left open: the capture did not complete");
         } else if let Err(e) = db::close_session(&pool, id, wall_now).await {
