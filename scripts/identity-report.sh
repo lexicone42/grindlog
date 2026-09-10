@@ -34,13 +34,15 @@ command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
 q() { sqlite3 -cmd '.timeout 10000' "$DB" "$1"; }
 
-# Sessions newest first, with the run count so a session that recorded
-# while disagreeing stands out.
+# Sessions newest first BY BROADCAST TIME, not by row id. Importing a VOD
+# writes a session with a fresh id and a months-old timestamp, so id order
+# stopped being time order the day marathons were imported and this listed
+# July while the bot was capturing today. Third place that bug appeared.
 q "SELECT s.id, COALESCE(date(s.started_at_ms/1000,'unixepoch','localtime'),'?'),
           COALESCE(s.source,'?'), COUNT(r.id),
           COALESCE(s.events,'[]')
      FROM sessions s LEFT JOIN runs r ON r.session_id = s.id
-    GROUP BY s.id ORDER BY s.id DESC LIMIT $N;" \
+    GROUP BY s.id ORDER BY s.started_at_ms DESC, s.id DESC LIMIT $N;" \
 | while IFS='|' read -r id day source runs events; do
     # events is the last field and holds no newlines, but it does hold
     # "|" inside its JSON, so take it as everything after the 4th field.
@@ -59,9 +61,21 @@ q "SELECT s.id, COALESCE(date(s.started_at_ms/1000,'unixepoch','localtime'),'?')
     tally=$(printf '%s' "$events" | jq -r 'last(.[]|select(.k=="identity-tally")|.d) // empty' 2>/dev/null)
     [ -n "$tally" ] && echo "    passes: $tally"
 
-    # The boards it saw, from the title events.
-    boards=$(printf '%s' "$events" | jq -r '[.[]|select(.k=="title")|.d]|unique|join(", ")' 2>/dev/null)
-    [ -n "$boards" ] && [ "$boards" != "" ] && echo "    boards: $boards"
+    # The boards it saw. Capped, because a twenty-game day is not twenty
+    # names: one session produced FIFTY-ONE spellings, forty of them
+    # Double Dragon II, and printing them all buried everything else on
+    # the line. The count is the useful part — it says how hard the pane
+    # was to read — and the `identity` shapes below carry the canonical
+    # name of each board anyway.
+    nboards=$(printf '%s' "$events" | jq -r '[.[]|select(.k=="title")|.d]|unique|length' 2>/dev/null)
+    if [ "${nboards:-0}" -gt 0 ]; then
+      boards=$(printf '%s' "$events" | jq -r '[.[]|select(.k=="title")|.d]|unique|.[:6]|join(", ")' 2>/dev/null)
+      if [ "$nboards" -gt 6 ]; then
+        echo "    boards: $nboards distinct readings, e.g. $boards …"
+      else
+        echo "    boards: $boards"
+      fi
+    fi
 
     # Each distinct reading once. Older sessions logged one per change
     # rather than one per shape, so collapse duplicates either way.
