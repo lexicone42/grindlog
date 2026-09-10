@@ -271,8 +271,29 @@ finishes at 2:01–2:25, five resets) and zero Ninja Gaiden; a Ninja Gaiden
 window is row-for-row identical to the same window under `"log"`, down to
 the attempt numbers; and a Life Force block — an NES game on no shipped
 roster — records nothing at all, which is the narrowness holding.
-`follow_title` ships defaulting to `"log"`, and `live.toml` says `"log"`:
-turning this on is a deliberate config change of its own.
+`follow_title` ships defaulting to `"log"`; the reference deployment turned
+it on on 2026-09-10 (session #192), and back to `"log"` is a one-word edit
+and a rollout — every run it writes carries `category = "Other"` and can be
+removed on its own.
+
+What the first live day showed, all of it as designed:
+
+- A run **started** as Ninja Gaiden two seconds before the gate convicted —
+  the session had only just opened, so no pass had spoken yet — and closed
+  as Kid Klown in Night Mayor World. That is close-time resolution earning
+  its keep on real footage; under a start-time target it would have been
+  another fabricated Ninja Gaiden run.
+- 1225 of 1225 frames of it read, the timer visibly frozen at `22:54.38`,
+  filed with no LiveSplit number and no splits. Ninja Gaiden's count did
+  not move.
+- The next run, Excitebike, was targeted from its first frame and closed as
+  an Excitebike reset at 8:12.7.
+
+And one thing that was not. The finish logged as *"NEW season best for Kid
+Klown in Night Mayor World"* — `record_label` is the tracked game's word,
+and it was the first time ever recorded for that game. Nothing reached his
+channel (announcements are suppressed for a foreign run), but a foreign
+finish now gets its own sentence rather than borrowing Ninja Gaiden's.
 
 **Board signature.** What a pane *is* comes from its split rows, not from
 its title. The title is the least reliable text on screen — on one frame of
