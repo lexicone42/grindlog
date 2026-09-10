@@ -3876,6 +3876,29 @@ struct ForeignRun {
     min_final_ms: i64,
 }
 
+/// How far a recorded time may exceed the run's own wall-clock lifetime
+/// before it is refused.
+///
+/// A run's start is BACK-DATED by the timer value at the moment it started
+/// (`started_unix_ms = now - timer_ms`), so for any healthy run the timer at
+/// the end and the elapsed wall clock are the same number. A timer showing
+/// MORE time than the run has existed for is not a slow reading or a
+/// dropout — a dropout makes the lifetime longer, not shorter — it is a
+/// clock that has been inflated.
+///
+/// Measured across all 3541 runs in the reference database: the largest
+/// legitimate overshoot is **2.3 s** (Ninja Gaiden, 3137 runs), and the
+/// three rows this exists to prevent overshoot by **596-599 s**. Thirty
+/// seconds sits thirteen times above the worst honest case and twenty times
+/// below the defect.
+const IMPOSSIBLE_OVERSHOOT_MS: i64 = 30_000;
+
+/// `Some(overshoot)` when the value cannot be what the timer showed.
+fn impossible_time(value_ms: i64, started_unix_ms: i64, now: i64) -> Option<i64> {
+    let over = value_ms - (now - started_unix_ms);
+    (over > IMPOSSIBLE_OVERSHOOT_MS).then_some(over)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_event(
     pool: &sqlx::SqlitePool,
@@ -3934,6 +3957,36 @@ async fn handle_event(
                 warn!("finish event with no run in progress; ignoring");
                 return Ok(());
             };
+            // A finish is the value that gets published as a record, so it is
+            // the one place an inflated clock does lasting damage. On
+            // 2026-09-10 a Monster Party run that lasted 22:37 was recorded
+            // as a 32:36 FINISH and became that game's best on the site,
+            // because the tracker's baseline was ten minutes ahead after a
+            // burst of desync restarts. Refuse rather than guess: a dropped
+            // run can be recovered by replaying the VOD, a fabricated record
+            // cannot be told from a real one afterwards.
+            if let Some(over) = impossible_time(final_ms, run.started_unix_ms, now) {
+                warn!(
+                    "refusing a {} finish of {}: the run has only existed for {}, \
+                     so the timer is {} ahead of what it can be (clock inflated; \
+                     the run is dropped, not guessed at)",
+                    run.game,
+                    format_ms(final_ms),
+                    format_ms(now - run.started_unix_ms),
+                    format_ms(over),
+                );
+                db::log_transition(
+                    pool,
+                    now,
+                    "RUNNING",
+                    "DROPPED",
+                    &run.game,
+                    &run.category,
+                    &format!("final_ms={final_ms} overshoot_ms={over}"),
+                )
+                .await?;
+                return Ok(());
+            }
             // Same retarget as the Reset arm: game, category and attempt
             // number resolved NOW, no LiveSplit number, no splits.
             if let Some(f) = foreign {
@@ -4100,6 +4153,37 @@ async fn handle_event(
                 warn!("reset event with no run in progress; ignoring");
                 return Ok(());
             };
+            // Same impossibility test as the finish, and for the same
+            // reason one step down: `last_timer_ms` is how far he got, it
+            // draws the death chart, and the three rows that started this
+            // were two resets and a finish. A reset does less damage than a
+            // fabricated record, which is why this only warns about the
+            // finish by name — but a death eleven minutes into a game he
+            // has never survived two minutes of is still a lie.
+            if let Some(over) = impossible_time(last_ms, run.started_unix_ms, now) {
+                warn!(
+                    "refusing a {} reset at {}: the run has only existed for {}, \
+                     so the timer is {} ahead of what it can be",
+                    run.game,
+                    format_ms(last_ms),
+                    format_ms(now - run.started_unix_ms),
+                    format_ms(over),
+                );
+                db::log_transition(
+                    pool,
+                    now,
+                    "RUNNING",
+                    "DROPPED",
+                    &run.game,
+                    &run.category,
+                    &format!(
+                        "last_ms={last_ms} overshoot_ms={over} reason={}",
+                        reason.as_str()
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
             // A foreign run's completion arrives here, not at Finished:
             // the state machine calls a frozen timer under `min_final_ms`
             // too short to be a finish, and that floor is 11 minutes
@@ -4666,6 +4750,69 @@ mod tests {
     /// file". Locally it passed anyway — an already-open inode survives its
     /// directory — and CI failed on the first run. `db::tests::test_pool`
     /// returns the guard for the same reason.
+    /// A timer cannot show more time than the run it belongs to has
+    /// existed for. The start is back-dated by the timer value at the
+    /// moment the run started, so for a healthy run the two are the same
+    /// number; a dropout makes the lifetime LONGER, never shorter.
+    ///
+    /// The numbers are the ones this was measured on. Across all 3541 runs
+    /// in the reference database the largest honest overshoot is 2.3 s
+    /// (Ninja Gaiden, 3137 of them); the three rows that prompted this
+    /// overshoot by 596-599 s, after a burst of desync restarts left the
+    /// tracker's baseline ten minutes ahead of the pixels.
+    #[test]
+    fn a_timer_cannot_show_more_time_than_the_run_has_existed_for() {
+        // Healthy: the finish equals the lifetime, which is the normal case
+        // and the reason the test is cheap.
+        assert_eq!(impossible_time(695_100, 1_000_000, 1_695_100), None);
+        // The worst honest overshoot ever recorded, and an order of
+        // magnitude of room above it.
+        assert_eq!(impossible_time(697_400, 1_000_000, 1_695_100), None, "2.3s");
+        assert_eq!(impossible_time(725_000, 1_000_000, 1_695_100), None, "30s");
+        // A dropout lengthens the lifetime; it can never trip this.
+        assert_eq!(impossible_time(695_100, 1_000_000, 2_000_000), None);
+        // And the three real rows. Monster Party attempt #8: a run that
+        // lasted 22:37 recorded as a 32:36 finish, which became that game's
+        // best on the public page.
+        assert_eq!(
+            impossible_time(1_956_660, 0, 1_357_446),
+            Some(599_214),
+            "the fabricated finish"
+        );
+        assert_eq!(impossible_time(643_350, 0, 47_403), Some(595_947));
+        assert_eq!(impossible_time(669_360, 0, 77_461), Some(591_899));
+    }
+
+    /// And the tracker refuses to write one. Dropping a run is recoverable
+    /// by replaying the VOD; a fabricated record cannot be told from a real
+    /// one afterwards, which is the whole asymmetry.
+    #[tokio::test]
+    async fn an_impossible_finish_is_dropped_rather_than_recorded() {
+        // `foreign_close` starts its run at 1_000_000 and closes it at
+        // 1_200_000, so the run has existed for 200 s. A finish ten minutes
+        // beyond that is the shape of the defect.
+        const LIFETIME: i64 = 200_000;
+        let (_dir, _pool, rows) = foreign_close(Event::Finished {
+            final_ms: LIFETIME + 600_000,
+        })
+        .await;
+        assert!(rows.is_empty(), "nothing is written");
+
+        // The same for a reset, whose last_timer_ms draws the death chart.
+        let (_dir, _pool, rows) = foreign_close(Event::Reset {
+            last_ms: LIFETIME + 600_000,
+            reason: crate::state::ResetReason::Zeroed,
+        })
+        .await;
+        assert!(rows.is_empty());
+
+        // A run at exactly its own lifetime is the ordinary case and is
+        // recorded, so the guard cannot quietly eat good data.
+        let (_dir, _pool, rows) = foreign_close(Event::Finished { final_ms: LIFETIME }).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].final_time_ms, Some(LIFETIME));
+    }
+
     async fn foreign_close(ev: Event) -> (tempfile::TempDir, sqlx::SqlitePool, Vec<db::RunRow>) {
         let dir = tempfile::tempdir().unwrap();
         let pool = db::open(dir.path().join("t.db").to_str().unwrap())
