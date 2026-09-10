@@ -53,7 +53,8 @@ aws s3 cp site/index.html "s3://${DOMAIN}/index.html" \
 # published by accident — but that also means a NEW kind of page has to be
 # added here or it silently never ships.
 event_pages=0
-for page in site/arcathlon/*/index.html site/rando/*/index.html site/game/*/index.html; do
+for page in site/arcathlon/*/index.html site/rando/*/index.html site/game/*/index.html \
+            site/big20/index.html; do
   [ -e "$page" ] || continue
   key=${page#site/}
   aws s3 cp "$page" "s3://${DOMAIN}/${key}" --region "$REGION" --only-show-errors \
@@ -127,7 +128,7 @@ paths=("/index.html" "/")
 # now holds, so a re-import or a roster correction changes them; at
 # max-age=300 an uninvalidated edge would serve the old table for five
 # minutes after a deploy that exists to fix it.
-[ "$event_pages" -gt 0 ] && paths+=("/arcathlon/*" "/rando/*" "/game/*")
+[ "$event_pages" -gt 0 ] && paths+=("/arcathlon/*" "/rando/*" "/game/*" "/big20/*")
 [ "$days_changed" = 1 ] && paths+=("/api/v1/days/*")
 aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "${paths[@]}" \
   --query 'Invalidation.Id' --output text

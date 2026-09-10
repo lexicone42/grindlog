@@ -87,6 +87,22 @@ struct RawFile {
 struct RawEvent {
     name: String,
     games: Vec<String>,
+    /// What each game has to be finished to, in the same order. Optional,
+    /// and only a published race has them: an Arcathlon roster was
+    /// reconstructed from boards by OCR and knows the names, never the
+    /// goals. Nothing in the matcher reads these — they exist so the goals
+    /// of a race live beside its games instead of in a comment nothing can
+    /// use, and the page that tracks preparation for it can show them.
+    #[serde(default)]
+    goals: Option<Vec<String>>,
+    /// Where the list came from, and when it is run. Both optional and both
+    /// only true of a published race: an Arcathlon is his own, has no page
+    /// and happens when he says so. A page about preparing for a race wants
+    /// to say how long is left and to link the source of its rules.
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    date: Option<String>,
 }
 
 /// One event's ten games, with the comparison key of each worked out once.
@@ -94,6 +110,10 @@ struct RawEvent {
 struct Event {
     name: String,
     games: Vec<Game>,
+    /// One per game, in the same order, or empty when the file gave none.
+    goals: Vec<String>,
+    url: Option<String>,
+    date: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +166,18 @@ impl Rosters {
             if e.games.is_empty() {
                 bail!("event {:?} lists no games", e.name);
             }
+            // Positional, so a goals list that has drifted out of step with
+            // the games would silently attach every goal to the wrong game.
+            // Same length or nothing.
+            let goals = e.goals.unwrap_or_default();
+            if !goals.is_empty() && goals.len() != e.games.len() {
+                bail!(
+                    "event {:?} lists {} games but {} goals; they are matched by position",
+                    e.name,
+                    e.games.len(),
+                    goals.len()
+                );
+            }
             let mut games = Vec::new();
             for name in e.games {
                 let key = Key::of(&name);
@@ -165,6 +197,9 @@ impl Rosters {
             events.push(Event {
                 name: e.name,
                 games,
+                goals,
+                url: e.url,
+                date: e.date,
             });
         }
         Ok(Rosters { events, pool })
@@ -189,6 +224,36 @@ impl Rosters {
     /// How many events, and how many games in all — for the startup log.
     pub fn size(&self) -> (usize, usize) {
         (self.events.len(), self.pool.len())
+    }
+
+    /// One event's games in the order the file lists them, each with its
+    /// goal where the file gave one. The ORDER is the point: a race is run
+    /// in a fixed sequence and a page about preparing for it wants the
+    /// games in that sequence, not alphabetically and not by whichever he
+    /// happened to practise first.
+    pub fn lineup(&self, event: usize) -> Vec<(&str, Option<&str>)> {
+        let Some(e) = self.events.get(event) else {
+            return Vec::new();
+        };
+        e.games
+            .iter()
+            .enumerate()
+            .map(|(i, g)| (g.name.as_str(), e.goals.get(i).map(String::as_str)))
+            .collect()
+    }
+
+    /// The event of this file whose name is `name` ("#23"), for a caller
+    /// that knows which race it is asking about.
+    pub fn event_by_name(&self, name: &str) -> Option<usize> {
+        self.events.iter().position(|e| e.name == name)
+    }
+
+    /// Where the event's rules are published, and the day it is run.
+    pub fn event_source(&self, event: usize) -> (Option<&str>, Option<&str>) {
+        match self.events.get(event) {
+            Some(e) => (e.url.as_deref(), e.date.as_deref()),
+            None => (None, None),
+        }
     }
 
     /// Which roster is this board? The one whose games most of these names
@@ -566,6 +631,20 @@ fn roman(t: &str) -> Option<u32> {
 /// the site published "Kiown in Night Mayor World" for an afternoon
 /// because it canonicalised against the Arcathlon file alone, where Kid
 /// Klown does not appear.
+/// The Big 20 race this build carries a list for, if it carries one. The
+/// prep page asks for it by name rather than by position, so adding a race
+/// or reordering the file cannot silently repoint the page at another one.
+pub fn big20() -> Option<(Rosters, usize)> {
+    let r = Rosters::parse(include_str!("../assets/big20-roster.toml")).ok()?;
+    let i = r.event_by_name(BIG20_RACE)?;
+    Some((r, i))
+}
+
+/// Which race the prep page is about. One line to change when he starts
+/// preparing for the next one — and `assets/big20-roster.toml` is where the
+/// games change with it.
+pub const BIG20_RACE: &str = "#23";
+
 pub fn bundled_all() -> Vec<Rosters> {
     [
         include_str!("../assets/arcathlon-rosters.toml"),
@@ -936,5 +1015,70 @@ mod tests {
         assert_eq!(infix_distance("joumeytosilius", "journeytosilius"), 2);
         assert_eq!(infix_distance("", "astyanax"), 0);
         assert_eq!(infix_distance("zzzz", "astyanax"), 4);
+    }
+
+    /// The shipped Big 20 list, as the prep page reads it: twenty games in
+    /// race order, each with the goal beside it, plus where the rules are
+    /// published and when the race is run.
+    #[test]
+    fn the_big20_race_ships_with_its_goals_in_race_order() {
+        let (r, e) = super::big20().expect("the build ships a Big 20 roster");
+        let lineup = r.lineup(e);
+        assert_eq!(lineup.len(), 20, "twenty games make a Big 20");
+        // Order is load-bearing: the page lists them as he will run them.
+        assert_eq!(lineup[0].0, "Die Hard");
+        assert_eq!(lineup[0].1, Some("Any% Beginner"));
+        assert_eq!(lineup[19].0, "Moon Crystal");
+        assert!(
+            lineup.iter().all(|(_, goal)| goal.is_some()),
+            "every game of a published race has a goal"
+        );
+        let (url, date) = r.event_source(e);
+        assert!(url.is_some_and(|u| u.starts_with("https://")));
+        assert_eq!(date, Some("2026-10-10"));
+    }
+
+    /// Goals are matched to games BY POSITION, so a list of the wrong
+    /// length would attach each goal to a game it does not belong to —
+    /// silently, and every one of them wrong from the first mismatch.
+    /// It is refused instead.
+    #[test]
+    fn a_goals_list_of_the_wrong_length_is_refused() {
+        // r##, not r#: the event name is "#1" and the `"#` in it would
+        // close a single-hash raw string right there.
+        let bad = r##"
+            [[event]]
+            name = "#1"
+            games = ["Die Hard", "Jaws", "Faria"]
+            goals = ["Any%", "Any%"]
+        "##;
+        let e = Rosters::parse(bad).expect_err("must not parse");
+        assert!(format!("{e}").contains("by position"), "got: {e}");
+        // And no goals at all stays fine: an Arcathlon roster has none.
+        let ok = Rosters::parse(
+            r##"
+            [[event]]
+            name = "#1"
+            games = ["Die Hard", "Jaws"]
+        "##,
+        )
+        .unwrap();
+        assert_eq!(ok.lineup(0), vec![("Die Hard", None), ("Jaws", None)]);
+    }
+
+    /// The Arcathlon rosters and the Big 20 list are separate files because
+    /// `identify` assumes a game belongs to one event, and Mega Man 6 is in
+    /// both. Nothing here may quietly merge them.
+    #[test]
+    fn the_two_shipped_lists_stay_separate() {
+        let arca = Rosters::bundled().unwrap();
+        let (big, e) = super::big20().unwrap();
+        assert!(arca.event_by_name(super::BIG20_RACE).is_none());
+        assert_eq!(big.size().0, 1, "the race file holds one event");
+        // The overlap is real, which is why they are apart.
+        assert!(big
+            .lineup(e)
+            .iter()
+            .any(|(g, _)| arca.canonical(g) == Some("Mega Man 6")));
     }
 }

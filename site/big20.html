@@ -1,0 +1,204 @@
+<!-- Preparation for one Big 20 race, as its own page. Rendered by
+     scripts/build-site.sh from the report's `big20` block, which is the
+     race's twenty games in RACE ORDER joined against what the database
+     holds for each. Do not write the data placeholder's name in prose
+     anywhere in this file: the splice takes the whole line, and a mention
+     in a comment silently ate the data once already.
+
+     What the page is for: the empty rows. A leaderboard shows what has
+     been done; a prep page has to show what is left, so all twenty are
+     listed whether or not he has touched them, in the sequence he will
+     run them on the day.
+
+     Two columns that look alike and are not:
+       PRACTICE — attempts under his own splits for this race. This is what
+         `game.follow_title = "track"` records, and it is what preparing
+         looks like: many attempts, some finished.
+       ARCATHLON — his time for that game in one of his own marathons. Six
+         of these twenty are also Arcathlon games. A completion from a
+         marathon in July says something real about the game and is not
+         practice for this race, so it sits in its own column and is never
+         added to the other.
+
+     The page names games, never the streamer. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen&family=Martian+Mono:wght@400;600&display=swap">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
+    --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
+    --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
+    --pending: rgba(130,140,255,.10);
+  }
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #f2f2ec; --card: #ffffff; --ink: #171425; --ink2: #4e5170;
+    --muted: #83879f; --hairline: rgba(20,15,60,.11); --series: #2a78d6;
+    --gold: #a9791a; --gold-soft: rgba(169,121,26,.12); --ahead: #1f8f63;
+    --pending: rgba(20,15,60,.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
+      --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
+      --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
+      --pending: rgba(130,140,255,.10);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
+    --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
+    --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
+    --pending: rgba(130,140,255,.10);
+  }
+  body {
+    background: var(--bg); color: var(--ink); margin: 0;
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 28px 20px 60px; }
+  a { color: var(--series); }
+  .back {
+    font-family: "Silkscreen", monospace; font-size: 10px; letter-spacing: .1em;
+    text-transform: uppercase; text-decoration: none; color: var(--muted);
+  }
+  .back:hover { color: var(--ink); }
+  h1 { font-size: clamp(22px, 4vw, 32px); margin: 14px 0 4px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
+  .card { background: var(--card); border: 1px solid var(--hairline); border-radius: 8px; padding: 18px 20px; }
+  /* Twenty cells in race order: which of the twenty he has practised, and
+     where they sit in the running order. Not decoration — the shape of the
+     strip says whether he is working through the list or jumping about. */
+  .strip { display: flex; gap: 3px; margin: 0 0 18px; }
+  .strip i {
+    flex: 1 1 0; height: 7px; border-radius: 2px; background: var(--pending);
+  }
+  .strip i.done { background: var(--ahead); }
+  .strip i.some { background: var(--gold); }
+  .counts {
+    display: flex; gap: 26px; flex-wrap: wrap; margin: 0 0 20px;
+    font-size: 13px; color: var(--ink2);
+  }
+  .counts b { color: var(--ink); font-weight: 600; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th {
+    text-align: left; font-weight: 500; color: var(--muted); font-size: 11px;
+    letter-spacing: .04em; text-transform: uppercase; padding: 0 10px 8px 0;
+    border-bottom: 1px solid var(--hairline); white-space: nowrap;
+  }
+  td { padding: 8px 10px 8px 0; border-top: 1px solid var(--hairline); }
+  /* Five numeric columns in a row read as one block unless they are given
+     room; at the default cell padding the dashes of an untouched game run
+     together. */
+  th.num, td.num { text-align: right; padding-right: 18px; }
+  th.last, td.last { padding-right: 0; }
+  th.game, td.game { padding-right: 18px; }
+  .tnum { font-family: "Martian Mono", monospace; font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .n { color: var(--muted); width: 2em; }
+  .goal { color: var(--ink2); font-size: 12.5px; }
+  .best { color: var(--gold); font-weight: 600; }
+  .none { color: var(--muted); }
+  /* A game with no attempt at all: the row is still there, and quiet. */
+  tr.untouched td { color: var(--muted); }
+  tr.untouched .goal { color: var(--muted); }
+  .note { color: var(--muted); font-size: 12.5px; margin: 18px 0 0; }
+  footer { margin-top: 34px; color: var(--muted); font-size: 12px; }
+</style>
+
+<div class="wrap">
+  <a class="back" href="/">&larr; all games</a>
+  <h1 id="title"></h1>
+  <p class="sub" id="sub"></p>
+  <div class="strip" id="strip"></div>
+  <div class="counts" id="counts"></div>
+  <section class="card scroll"><table id="grid"></table></section>
+  <p class="note" id="note"></p>
+  <footer>Times read off the on-screen LiveSplit board, frame by frame · <a href="/api/v1/README.md">data</a></footer>
+</div>
+
+<script id="data" type="application/json">
+__DATA__
+</script>
+
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+// Game names reach this page from a roster file, the goals with them, but
+// the same escaping applies as everywhere else on the site: nothing here
+// is built by concatenating unescaped text into innerHTML.
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = ms => {
+  if (ms == null) return '—';
+  const t = Math.floor(ms / 100) / 10;
+  const m = Math.floor(t / 60), s = (t - m * 60).toFixed(1).padStart(4, '0');
+  return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${s}` : `${m}:${s}`;
+};
+const TZ = (D.day_offset_minutes || 0) * 60000;
+const dshort = ms => ms == null ? '—' : new Date(ms + TZ).toLocaleDateString(undefined,
+  { month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+const games = D.games || [];
+document.title = D.title;
+document.getElementById('title').textContent = D.title;
+
+// The header line: when the race is, how long is left, and where the rules
+// live. A race whose date has passed says so rather than counting backwards.
+const parts = [];
+if (D.date) {
+  const day = new Date(D.date + 'T00:00:00Z');
+  const days = Math.round((day - new Date(Date.now() + TZ)) / 86400000);
+  const when = day.toLocaleDateString(undefined,
+    { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+  parts.push(days > 1 ? `${when} · ${days} days away`
+           : days === 1 ? `${when} · tomorrow`
+           : days === 0 ? `${when} · today`
+           : when);
+}
+parts.push(`${games.length} games, in race order`);
+const sub = document.getElementById('sub');
+sub.textContent = parts.join(' · ');
+if (D.url) {
+  sub.insertAdjacentHTML('beforeend',
+    ` · <a href="${esc(D.url)}" rel="noopener">the rules</a>`);
+}
+
+// Practised / finished / untouched, and the strip that shows which.
+// "some" is attempted but never finished, which on a prep page is a
+// different state from both done and not started.
+const finished = games.filter(g => g.finished > 0).length;
+const tried = games.filter(g => g.attempts > 0).length;
+const attempts = games.reduce((n, g) => n + (g.attempts || 0), 0);
+document.getElementById('strip').innerHTML = games.map(g =>
+  `<i class="${g.finished > 0 ? 'done' : g.attempts > 0 ? 'some' : ''}" title="${esc(g.n + '. ' + g.game)}"></i>`
+).join('');
+document.getElementById('counts').innerHTML =
+  `<span><b>${finished}</b> of ${games.length} finished</span>` +
+  `<span><b>${tried}</b> practised</span>` +
+  `<span><b>${attempts}</b> attempt${attempts === 1 ? '' : 's'} in all</span>`;
+
+document.getElementById('grid').innerHTML =
+  `<tr><th class="n">#</th><th class="game">Game</th><th>Goal</th>` +
+  `<th class="num">Attempts</th><th class="num">Finished</th>` +
+  `<th class="num">Best</th><th class="num">Arcathlon</th>` +
+  `<th class="num last">Last</th></tr>` +
+  games.map(g => `<tr class="${g.attempts > 0 ? '' : 'untouched'}">
+    <td class="n tnum">${g.n}</td>
+    <td class="game">${esc(g.game)}</td>
+    <td class="goal">${esc(g.goal ?? '')}</td>
+    <td class="num tnum">${g.attempts || '<span class="none">—</span>'}</td>
+    <td class="num tnum">${g.finished || '<span class="none">—</span>'}</td>
+    <td class="num tnum${g.best_ms != null ? ' best' : ' none'}">${fmt(g.best_ms)}</td>
+    <td class="num tnum${g.marathon_ms != null ? '' : ' none'}"
+        title="${g.marathon_ms != null ? 'in an Arcathlon, ' + esc(dshort(g.marathon_at_ms)) : ''}">${fmt(g.marathon_ms)}</td>
+    <td class="num last tnum ${g.last_at_ms == null ? 'none' : ''}">${dshort(g.last_at_ms)}</td>
+  </tr>`).join('');
+
+document.getElementById('note').textContent = tried === 0
+  ? 'Nothing recorded yet. Practice runs are recorded once the tracker is following the board he is timing; his marathon times for these games are shown where he has them.'
+  : 'Attempts and finishes are his own practice for this race. The Arcathlon column is his time for the same game in one of his marathons — a real time, but not practice for this list, so it is never added to the rest.';
+</script>

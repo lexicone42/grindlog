@@ -163,20 +163,20 @@ echo "wrote site/index.html ($(wc -c < site/index.html) bytes)"
 # Pages are generated, never hand-written: a correction to the roster or a
 # re-import changes them on the next build. Paths are stable so a link keeps
 # working — /arcathlon/<n>/ and /rando/<day>/.
-render_event() {          # $1 = directory under site/, $2 = title, $3 = json file
-  local dir="site/$1" title="$2" data="$3" page
+render_event() {          # $1 = dir under site/, $2 = title, $3 = json, $4 = template
+  local dir="site/$1" title="$2" data="$3" tpl="${4:-site/event.html}" page
   mkdir -p "$dir"
   sed -i 's|</|<\\/|g' "$data"
   page=$(mktemp "$dir/index.html.XXXXXX")
-  awk -v data="$data" -v title="$title" '
+  awk -v data="$data" -v title="$title" -v tpl="$tpl" '
     { gsub(/__TITLE__/, title) }
     /^__DATA__$/ { found = 1
                  while ((getline l < data) > 0) { print l; n++ }
                  next }
     { print }
-    END { if (!found) { print "event.html has no __DATA__ placeholder" > "/dev/stderr"; exit 1 }
-          if (!n)     { print "no data spliced into " title            > "/dev/stderr"; exit 1 } }
-  ' site/event.html > "$page"
+    END { if (!found) { print tpl " has no __DATA__ placeholder" > "/dev/stderr"; exit 1 }
+          if (!n)     { print "no data spliced into " title      > "/dev/stderr"; exit 1 } }
+  ' "$tpl" > "$page"
   mv "$page" "$dir/index.html"
 }
 
@@ -234,3 +234,18 @@ while IFS= read -r game; do
 done < <(jq -r '[.other_events[].games[].game] | unique | .[]' site/api/v1/report.json)
 
 echo "wrote $events page(s) under site/arcathlon/, site/rando/ and site/game/"
+
+# ---- preparation for the Big 20 race (site/big20.html)
+# One page, always built, even with nothing recorded: it is a list of twenty
+# and the empty rows are what a prep page is for. The report's `big20` block
+# is null only when the build ships no race roster at all.
+if [ "$(jq -r '.big20 // "null"' site/api/v1/report.json)" != "null" ]; then
+  slice=$(mktemp)
+  jq -c '{title: ("Big 20 " + .big20.race + " · prep"),
+          day_offset_minutes: .day_offset_minutes,
+          date: .big20.date, url: .big20.url, games: .big20.games}' \
+     site/api/v1/report.json > "$slice"
+  render_event "big20" "Big 20 prep" "$slice" site/big20.html
+  rm -f "$slice"
+  echo "wrote site/big20/index.html"
+fi
