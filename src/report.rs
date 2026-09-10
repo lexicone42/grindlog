@@ -159,7 +159,7 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
             v
         })
         .collect();
-    let recent = db::recent_runs(&pool, 15).await?;
+    let recent = db::recent_runs(&pool, &game, &category, 15).await?;
     let brief = db::runs_brief(&pool, &game, &category).await?;
     let acts = cfg.game.act_list();
     let deaths = stats::death_chart(&brief, &acts);

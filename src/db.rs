@@ -376,7 +376,7 @@ pub async fn recent_sessions(
          MIN(CASE WHEN r.outcome = 'finished' THEN r.final_time_ms END) AS best_ms \
          FROM sessions s LEFT JOIN runs r \
            ON r.session_id = s.id AND r.game = ? AND r.category = ? \
-         GROUP BY s.id ORDER BY s.id DESC LIMIT ?",
+         GROUP BY s.id ORDER BY s.started_at_ms DESC, s.id DESC LIMIT ?",
     )
     .bind(game)
     .bind(category)
@@ -604,11 +604,31 @@ pub async fn runs_since(
     Ok(rows)
 }
 
-pub async fn recent_runs(pool: &SqlitePool, limit: i64) -> Result<Vec<RunRow>> {
-    let rows = sqlx::query_as::<_, RunRow>("SELECT * FROM runs ORDER BY id DESC LIMIT ?")
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+/// The last runs of the tracked game, most recent first.
+///
+/// By `started_at_ms`, not by row id, and scoped to the game — this was
+/// the only run query in the module with neither. Importing a VOD writes
+/// rows with fresh ids and months-old timestamps, so id order stopped
+/// being time order the first time a marathon was imported: this returned
+/// fifteen Arcathlon rows from July while the newest actual run was Ninja
+/// Gaiden in September, and published them as "recent runs" in the feed.
+/// Its two siblings, `last_run` and `runs_brief`, already carry comments
+/// about exactly this trap.
+pub async fn recent_runs(
+    pool: &SqlitePool,
+    game: &str,
+    category: &str,
+    limit: i64,
+) -> Result<Vec<RunRow>> {
+    let rows = sqlx::query_as::<_, RunRow>(
+        "SELECT * FROM runs WHERE game = ? AND category = ? \
+         ORDER BY started_at_ms DESC, id DESC LIMIT ?",
+    )
+    .bind(game)
+    .bind(category)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
     Ok(rows)
 }
 
