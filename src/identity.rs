@@ -104,6 +104,11 @@ pub struct Reading {
     /// mis-record it: the board says "ible Dragon Il: The Revenge" and the
     /// roster says that is Double Dragon II: The Revenge.
     pub named: Option<String>,
+    /// What a run of that game is filed under, when the roster that named
+    /// it says (an event's `category`). None means the deployment's
+    /// `game.other_category` — the fallback for a rostered game whose event
+    /// does not name one.
+    pub named_category: Option<String>,
 }
 
 impl Reading {
@@ -309,9 +314,10 @@ impl Fingerprint {
             return;
         }
         r.against.push(Signal::Header);
-        if let Some(g) = self.recognise(t) {
+        if let Some((g, cat)) = self.recognise(t) {
             r.against.push(Signal::NamedAnother);
             r.named = Some(g);
+            r.named_category = cat;
         }
     }
 
@@ -329,17 +335,19 @@ impl Fingerprint {
     /// The tracked game is excluded: it appears on these lists too (Ninja
     /// Gaiden is one of Arcathlon #1's ten), and its own name must never
     /// come back as "another game".
-    fn recognise(&self, t: &str) -> Option<String> {
+    ///
+    /// Returns the name AND what a run of that game is filed under, both
+    /// from the SAME roster: an event's category is a property of the event
+    /// that lists the game, so it has to be read off whichever roster
+    /// actually matched rather than looked up again afterwards.
+    fn recognise(&self, t: &str) -> Option<(String, Option<String>)> {
         self.rosters
             .iter()
             .find_map(|r| {
-                r.assign(None, &[Some(t)])
-                    .first()
-                    .copied()
-                    .flatten()
-                    .map(str::to_string)
+                let g = r.assign(None, &[Some(t)]).first().copied().flatten()?;
+                Some((g.to_string(), r.category_of(g).map(str::to_string)))
             })
-            .filter(|g| !board::game_matches(g, &self.game))
+            .filter(|(g, _)| !board::game_matches(g, &self.game))
     }
 
     /// The counter sits at or above the floor this game has already
@@ -1019,7 +1027,11 @@ mod observed {
         ];
         for (want, reads) in cases {
             for r in *reads {
-                assert_eq!(f.recognise(r).as_deref(), Some(*want), "reading {r:?}");
+                assert_eq!(
+                    f.recognise(r).map(|(g, _)| g).as_deref(),
+                    Some(*want),
+                    "reading {r:?}"
+                );
             }
         }
     }

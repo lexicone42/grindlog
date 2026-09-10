@@ -269,10 +269,16 @@ category = "Any%"
                                 #   can be named; this game's own records, its
                                 #   Sum of Best and its attempt counter are
                                 #   never read off one
-# other_category = "Other"      # the category a "track" run is filed under. One
-                                #   category for every foreign board, because
-                                #   the pane says which GAME it is timing and
-                                #   never which category of it
+# other_category = "Other"      # the category a "track" run is filed under when
+                                #   the roster that named the game gives none.
+                                #   An event may carry its own (`category` in
+                                #   the roster file, e.g. "Big 20 #23") and that
+                                #   wins, so the games of a race he is
+                                #   practising for do not share a bucket with a
+                                #   marathon game he grinds alone. Either way it
+                                #   is the EVENT, not the goal: the pane says
+                                #   which game it is timing and never which
+                                #   category of it
 # other_min_final_ms = 30000    # how long a "track" run must last for a frozen
                                 #   timer to count as a finish rather than a
                                 #   death. `min_final_ms` above is this game's

@@ -1370,7 +1370,16 @@ fn apply_identity(
     *foreign = match (cfg.game.follow_title, reading.named.as_deref()) {
         (crate::config::FollowTitle::Track, Some(g)) if !id.ok() => Some(ForeignRun {
             game: g.to_string(),
-            category: cfg.game.other_category.clone(),
+            // The roster that named the game says what its runs are filed
+            // under — "Big 20 #23" for the race he is practising for — so
+            // that the twenty games of a race and an Arcathlon game he is
+            // grinding on his own do not land in one undifferentiated
+            // bucket. `game.other_category` is the fallback for a rostered
+            // game whose event names none.
+            category: reading
+                .named_category
+                .clone()
+                .unwrap_or_else(|| cfg.game.other_category.clone()),
             min_final_ms: cfg.game.other_min_final_ms,
         }),
         _ => None,
@@ -4447,6 +4456,49 @@ mod tests {
                 None
             );
         }
+    }
+
+    /// A run is filed under the category the ROSTER that named the game
+    /// gives, not one value for every board the deployment ever sees.
+    ///
+    /// The twenty games of the race he is preparing for go under "Big 20
+    /// #23" — that is what those runs have in common, and the pane says
+    /// which GAME it is timing and never which category of it. A game named
+    /// by an Arcathlon roster instead has no category of its own and falls
+    /// back to `game.other_category`, so an Arcathlon game he grinds alone
+    /// does not land in the race's pile.
+    #[test]
+    fn a_run_is_filed_under_the_category_of_the_event_that_names_it() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.follow_title = crate::config::FollowTitle::Track;
+        cfg.game.other_category = "Other".into();
+        let fp = identity::Fingerprint::of(&cfg, None);
+        let target = |title: &str| {
+            let mut id = identity::Identity::new(&cfg);
+            let mut f = None;
+            for _ in 0..2 {
+                feed_header_target(Some(title), &cfg, &fp, &mut id, &mut f);
+            }
+            f.map(|f| (f.game, f.category))
+        };
+        assert_eq!(
+            target("Die Hard"),
+            Some(("Die Hard".into(), "Big 20 #23".into())),
+            "a race game carries the race"
+        );
+        assert_eq!(
+            target("Kiown in Night Mayor World"),
+            Some(("Kid Klown in Night Mayor World".into(), "Big 20 #23".into())),
+            "and so does one whose header the pane mangled"
+        );
+        // Astyanax is an Arcathlon game and is on no race list. Its event
+        // names no category, so the config's fallback applies.
+        assert_eq!(
+            target("Astyanax"),
+            Some(("Astyanax".into(), "Other".into())),
+            "an Arcathlon game is not practice for the race"
+        );
     }
 
     /// And it clears. A target left standing from the last board would file

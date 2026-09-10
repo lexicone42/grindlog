@@ -103,6 +103,17 @@ struct RawEvent {
     url: Option<String>,
     #[serde(default)]
     date: Option<String>,
+    /// What runs of this event's games are FILED under — the category the
+    /// tracker writes when `follow_title = "track"` records one of them.
+    ///
+    /// It belongs to the event and not to the config because the config has
+    /// only one value for every board it will ever see, and the events do
+    /// not share one: a Big 20 practice run and an Arcathlon game he is
+    /// grinding on his own are different things and a single
+    /// `game.other_category` would file them identically. An event without
+    /// one falls back to that config value.
+    #[serde(default)]
+    category: Option<String>,
 }
 
 /// One event's ten games, with the comparison key of each worked out once.
@@ -114,6 +125,7 @@ struct Event {
     goals: Vec<String>,
     url: Option<String>,
     date: Option<String>,
+    category: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -200,6 +212,7 @@ impl Rosters {
                 goals,
                 url: e.url,
                 date: e.date,
+                category: e.category,
             });
         }
         Ok(Rosters { events, pool })
@@ -246,6 +259,33 @@ impl Rosters {
     /// that knows which race it is asking about.
     pub fn event_by_name(&self, name: &str) -> Option<usize> {
         self.events.iter().position(|e| e.name == name)
+    }
+
+    /// What a run of `name` is filed under, when the event it belongs to
+    /// says. `name` is a CANONICAL name — one this file lists — because
+    /// the caller has just folded a damaged reading onto one.
+    ///
+    /// The pool is not consulted: an event's category is a property of the
+    /// event, and a name that fits no event has none.
+    pub fn category_of(&self, name: &str) -> Option<&str> {
+        self.events
+            .iter()
+            .find(|e| e.games.iter().any(|g| g.name == name))
+            .and_then(|e| e.category.as_deref())
+    }
+
+    /// Every category any event of this file files its runs under. What
+    /// counts as HIS OWN PRACTICE, for a reader separating it from a
+    /// marathon completion.
+    pub fn categories(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self
+            .events
+            .iter()
+            .filter_map(|e| e.category.as_deref())
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     /// Where the event's rules are published, and the day it is run.

@@ -44,7 +44,7 @@ use crate::{api, app, db, roster, stats, util};
 fn other_events(
     runs: &[db::OtherRun],
     rosters: &roster::Rosters,
-    practice_cat: &str,
+    practice_cats: &[&str],
 ) -> Vec<serde_json::Value> {
     // Session boundaries first, then the joins.
     let mut groups: Vec<Vec<&db::OtherRun>> = Vec::new();
@@ -84,11 +84,14 @@ fn other_events(
         //
         // The category is what separates them, because it is what separates
         // them in the database: `follow_title = "track"` files practice
-        // under `game.other_category` and a marathon import files
-        // completions under the board's own name.
-        let practice = group
-            .iter()
-            .all(|r| r.category.eq_ignore_ascii_case(practice_cat));
+        // under the category the roster that named the game gives ("Big 20
+        // #23"), or `game.other_category` when it gives none, and a
+        // marathon import files completions under the board's own name.
+        let practice = group.iter().all(|r| {
+            practice_cats
+                .iter()
+                .any(|c| r.category.eq_ignore_ascii_case(c))
+        });
         let distinct: Vec<&str> = {
             let mut v: Vec<&str> = names.clone();
             v.sort_unstable();
@@ -138,6 +141,25 @@ fn other_events(
     out
 }
 
+/// Every category that means "his own practice", as opposed to a completion
+/// in one of his marathons: the category each shipped event files its games
+/// under, plus the deployment's own catch-all.
+///
+/// Both, not one. `game.other_category` was what `track` wrote until
+/// 2026-09-10, and the runs it wrote before the roster took the job over
+/// are still in the database; dropping it here would strand them outside
+/// every page that exists to show them.
+fn practice_categories(cfg: &Config) -> Vec<String> {
+    let mut v: Vec<String> = roster::bundled_all()
+        .iter()
+        .flat_map(|r| r.categories().into_iter().map(str::to_string))
+        .collect();
+    v.push(cfg.game.other_category.clone());
+    v.sort();
+    v.dedup();
+    v
+}
+
 /// The Big 20 race lineup joined against what the database holds, for the
 /// page that tracks his preparation for it.
 ///
@@ -170,7 +192,16 @@ fn big20_prep(summaries: &[db::GameSummary], cfg: &Config) -> serde_json::Value 
     // attempts with a 100% finish rate. The categories runs are actually
     // filed under are the thing to ask about, not the config that would
     // have produced them.
-    let practice_cat = cfg.game.other_category.as_str();
+    //
+    // Since 2026-09-10 that is the race's own category ("Big 20 #23", from
+    // the roster) rather than the config's catch-all, and the config value
+    // is still accepted so the two rows recorded before that change are not
+    // stranded outside the page that exists to show them.
+    let practice_cats: Vec<&str> = rosters
+        .categories()
+        .into_iter()
+        .chain(std::iter::once(cfg.game.other_category.as_str()))
+        .collect();
     let (url, date) = rosters.event_source(event);
     let games: Vec<serde_json::Value> = rosters
         .lineup(event)
@@ -188,7 +219,11 @@ fn big20_prep(summaries: &[db::GameSummary], cfg: &Config) -> serde_json::Value 
                     .map(|c| c.eq_ignore_ascii_case(name))
                     .unwrap_or(false)
             };
-            let is_practice = |s: &db::GameSummary| s.category.eq_ignore_ascii_case(practice_cat);
+            let is_practice = |s: &db::GameSummary| {
+                practice_cats
+                    .iter()
+                    .any(|c| s.category.eq_ignore_ascii_case(c))
+            };
             let practice: Vec<&db::GameSummary> = summaries
                 .iter()
                 .filter(|s| mine(s) && is_practice(s))
@@ -243,6 +278,7 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
         return Ok(());
     }
     let summaries = db::summaries(&pool).await?;
+    let practice = practice_categories(&cfg);
     let today = db::today_stats(&pool, &game, &category, util::local_day_start_ms()).await?;
     // Every run and every split, for the site's per-day log.
     let all_runs = db::runs_since(&pool, &game, &category, 0).await?;
@@ -384,7 +420,7 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
             "other_events": other_events(
                 &db::other_runs(&pool, &game, &category).await?,
                 &roster::Rosters::bundled().unwrap_or_default(),
-                &cfg.game.other_category,
+                &practice.iter().map(String::as_str).collect::<Vec<_>>(),
             ),
             "today": today,
             "runs": all_runs,
@@ -622,7 +658,7 @@ mod tests {
 
         let mut runs = one;
         runs.extend(rando);
-        let out = other_events(&runs, &r, "Other");
+        let out = other_events(&runs, &r, &["Other"]);
         assert_eq!(out.len(), 2, "one event per session");
 
         // Newest first: session 2 leads.
@@ -663,7 +699,7 @@ mod tests {
             .collect();
         runs.push(run(2, "Astyanax", 1_399_000)); // the tail VOD
 
-        let out = other_events(&runs, &r, "Other");
+        let out = other_events(&runs, &r, &["Other"]);
         assert_eq!(out.len(), 1, "one broadcast, not two");
         assert_eq!(out[0]["label"], "Arcathlon #4");
         assert_eq!(out[0]["games"].as_array().unwrap().len(), 10);
@@ -683,7 +719,7 @@ mod tests {
             run(2, "Batman", 710_000),
             run(2, "Zelda", 900_000),
         ];
-        let out = other_events(&runs, &r, "Other");
+        let out = other_events(&runs, &r, &["Other"]);
         assert_eq!(out.len(), 2, "a shared game keeps them apart");
     }
 
@@ -697,7 +733,7 @@ mod tests {
         let mut b = run(2, "Hebereke", 700_000);
         a.tag = None;
         b.tag = None;
-        let out = other_events(&[a, b], &r, "Other");
+        let out = other_events(&[a, b], &r, &["Other"]);
         assert_eq!(out.len(), 2);
     }
 
@@ -706,7 +742,7 @@ mod tests {
     #[test]
     fn a_single_game_session_is_itself() {
         let r = roster::Rosters::bundled().unwrap();
-        let out = other_events(&[run(9, "Die Hard (NES)", 142_000)], &r, "Other");
+        let out = other_events(&[run(9, "Die Hard (NES)", 142_000)], &r, &["Other"]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["label"], "Die Hard (NES)");
         assert_eq!(out[0]["randomized"], false);
@@ -721,7 +757,7 @@ mod tests {
             .iter()
             .map(|g| run(1, g, 600_000))
             .collect();
-        let out = other_events(&runs, &none, "Other");
+        let out = other_events(&runs, &none, &["Other"]);
         assert_eq!(out[0]["label"], "Randomized Arcathlon");
         assert_eq!(out[0]["randomized"], true);
     }
@@ -750,7 +786,7 @@ mod tests {
                 practice("Kid Klown in Night Mayor World", None),
             ],
             &r,
-            "Other",
+            &["Other"],
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["label"], "Die Hard, Kid Klown in Night Mayor World");
@@ -767,7 +803,7 @@ mod tests {
             .iter()
             .map(|g| practice(g, None))
             .collect();
-        let out = other_events(&many, &r, "Other");
+        let out = other_events(&many, &r, &["Other"]);
         assert_eq!(out[0]["label"], "5 games");
         assert_eq!(out[0]["practice"], true);
 
@@ -777,7 +813,7 @@ mod tests {
             .iter()
             .map(|g| run(1, g, 600_000))
             .collect();
-        let out = other_events(&arca, &r, "Other");
+        let out = other_events(&arca, &r, &["Other"]);
         assert_eq!(out[0]["practice"], false);
         assert!(out[0]["total_ms"].is_number());
     }
