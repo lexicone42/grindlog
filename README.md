@@ -119,6 +119,8 @@ gets a new version path.
 |---|---|
 | [docs/detection.md](docs/detection.md) | how video becomes runs, and why each step is shaped that way |
 | [docs/operations.md](docs/operations.md) | running the deployed bot: scripts, schedule, known footguns |
+| [docs/marathons.md](docs/marathons.md) | the ten-game days, and the tooling that is theirs alone |
+| [docs/big20.md](docs/big20.md) | the race he is preparing for, and the practice days that go with it |
 | [docs/install.md](docs/install.md) | getting ffmpeg and tesseract in place, including without root |
 | [CLAUDE.md](CLAUDE.md) | ground rules for changing this repo safely |
 
