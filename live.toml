@@ -95,13 +95,24 @@ illegible_reset_count = 360
 [game]
 name = "Ninja Gaiden (NES)"
 category = "Any%"
-# Shadow mode of the board reader: read the whole pane at each pane pass and
-# log which game the board would be filed under, one "layout" session event
-# per distinct board. Nothing acts on it — runs, splits and counters are
-# recorded exactly as before — so this is a week of evidence about what the
-# reader sees on his real days (and on an Arcathlon day, where the board is
-# ten games rather than six acts) before anything is keyed on it.
-follow_title = "log"
+# Read the whole pane at each pass, log which game the board would be filed
+# under (one "layout" session event per distinct board) — and RECORD the runs
+# of a board that names a game a shipped roster knows, under that game and
+# `other_category`. He is preparing for a Big 20 race, twenty NES games he
+# will spend weeks practising, and under "log" none of it was recorded.
+#
+# What makes this safe to turn on is how narrow it is: a board that convicts
+# WITHOUT naming a game still records nothing, exactly as under "log", so
+# this only ever widens capture to boards the rosters can identify. Measured
+# on VOD 2868800526 — the broadcast that once produced twelve fabricated
+# Ninja Gaiden runs — the Die Hard window records ten Die Hard runs and zero
+# Ninja Gaiden, a Ninja Gaiden window is row-for-row identical to the same
+# window under "log", and a Life Force block (an NES game on no roster)
+# records nothing.
+#
+# Back to "log" is a one-word edit and a rollout; the runs it wrote are all
+# `category = "Other"` and can be removed on their own.
+follow_title = "track"
 # The tracked best only spans what the bot has seen; his LiveSplit comparison
 # is seasonal, so call it what it is.
 record_label = "season best"
