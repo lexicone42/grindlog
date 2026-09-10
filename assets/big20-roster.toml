@@ -19,31 +19,61 @@
 # header simply failing to match (see src/identity.rs). Canonicalising runs
 # under them comes when the tracker records these games at all.
 #
-# The per-game categories are the race's goals, kept here as comments because
-# a roster is a list of names; the goal is a property of the race, not of the
-# game, and it changes between races.
+# `goals` is what each game has to be finished to, matched to `games` BY
+# POSITION (the parser refuses a list of a different length). The goal is a
+# property of the race and not of the game — it changes between races — which
+# is why it lives here, in the file that IS one race, rather than anywhere a
+# game is named. Nothing in the matcher reads it; the Big 20 prep page shows
+# it, which is why it is data now and was a comment before.
+#
+# The order is the race order, and that is also load-bearing: the prep page
+# lists the twenty in the sequence he will run them.
 
 [[event]]
 name = "#23"
+url = "https://thebig20nes.com/race-23/"
+date = "2026-10-10"
 games = [
-  "Die Hard",                                   # Any% Beginner
-  "Pac-Mania",                                  # From Sandbox to End Loop 1
-  "Double Dragon II: The Revenge",              # Beat Game (Normal)
-  "Crisis Force",                               # 3 Stages
-  "Kid Klown in Night Mayor World",             # Any%
-  "Excitebike",                                 # Selection A
-  "Uninvited",                                  # Any%
-  "Steel Legion",                               # Any% All Bosses
-  "Faria",                                      # Save Princess / Dungeon 1
-  "Monster Party",                              # Watch us dance / Round 5
-  "Parallel World",                             # World 3 thru 4
-  "Mega Man 6",                                 # Beat X4 Password Start
-  "New Ghostbusters II",                        # Beat Stage 3
-  "Mini Putt",                                  # Beat Any Course
-  "The Flintstones: Surprise at Dinosaur Peak", # Any% No Manip
-  "Hydlide",                                    # 3 Fairies
-  "Yoshi",                                      # A Type Any%
-  "Celeste Mario's Zap n Dash",                 # Any%
-  "Jaws",                                       # Any%
-  "Moon Crystal",                               # Any%
+  "Die Hard",
+  "Pac-Mania",
+  "Double Dragon II: The Revenge",
+  "Crisis Force",
+  "Kid Klown in Night Mayor World",
+  "Excitebike",
+  "Uninvited",
+  "Steel Legion",
+  "Faria",
+  "Monster Party",
+  "Parallel World",
+  "Mega Man 6",
+  "New Ghostbusters II",
+  "Mini Putt",
+  "The Flintstones: Surprise at Dinosaur Peak",
+  "Hydlide",
+  "Yoshi",
+  "Celeste Mario's Zap n Dash",
+  "Jaws",
+  "Moon Crystal",
+]
+goals = [
+  "Any% Beginner",
+  "From Sandbox to End Loop 1",
+  "Beat Game (Normal)",
+  "3 Stages",
+  "Any%",
+  "Selection A",
+  "Any%",
+  "Any% All Bosses",
+  "Save Princess / Dungeon 1",
+  "Watch us dance / Round 5",
+  "World 3 thru 4",
+  "Beat X4 Password Start",
+  "Beat Stage 3",
+  "Beat Any Course",
+  "Any% No Manip",
+  "3 Fairies",
+  "A Type Any%",
+  "Any%",
+  "Any%",
+  "Any%",
 ]

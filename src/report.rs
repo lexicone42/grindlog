@@ -101,6 +101,91 @@ fn other_events(runs: &[db::OtherRun], rosters: &roster::Rosters) -> Vec<serde_j
     out
 }
 
+/// The Big 20 race lineup joined against what the database holds, for the
+/// page that tracks his preparation for it.
+///
+/// Two numbers per game, kept apart on purpose:
+///
+///   **practice** — attempts under his own splits, which is what `track`
+///   records and what preparing for the race actually looks like: forty
+///   Die Hard attempts and five finishes.
+///   **marathon** — his time for that game in one of his own Arcathlons.
+///   Six of the twenty are also Arcathlon games, and a single completion
+///   from a marathon two months ago is a real data point about the game
+///   and is NOT practice for this race. Summing them together would make
+///   an untouched game look prepared.
+///
+/// A game he has never played carries neither, which is the whole point:
+/// the page is a list of twenty and the empty rows are the news.
+fn big20_prep(summaries: &[db::GameSummary], cfg: &Config) -> serde_json::Value {
+    let Some((rosters, event)) = roster::big20() else {
+        return serde_json::Value::Null;
+    };
+    // Practice is exactly what `follow_title = "track"` writes, which is
+    // this category and nothing else. Everything else under one of these
+    // names is an appearance somewhere else — an Arcathlon completion,
+    // almost always.
+    //
+    // Asked the other way round first (marathon = a category naming a
+    // `[[games]]` entry in board mode) it got every game wrong that
+    // mattered: `mode = "board"` is not enabled in live.toml, so that list
+    // was empty and Jaws' five Arcathlon completions read as five practice
+    // attempts with a 100% finish rate. The categories runs are actually
+    // filed under are the thing to ask about, not the config that would
+    // have produced them.
+    let practice_cat = cfg.game.other_category.as_str();
+    let (url, date) = rosters.event_source(event);
+    let games: Vec<serde_json::Value> = rosters
+        .lineup(event)
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, goal))| {
+            // Fold each summary's game name through the roster before
+            // comparing: a run recorded from a board that read "aws" is
+            // this race's Jaws, and a page that matched on the raw string
+            // would call the game untouched while its runs sat on their
+            // own per-game page.
+            let mine = |s: &db::GameSummary| {
+                rosters
+                    .canonical(&s.game)
+                    .map(|c| c.eq_ignore_ascii_case(name))
+                    .unwrap_or(false)
+            };
+            let is_practice = |s: &db::GameSummary| s.category.eq_ignore_ascii_case(practice_cat);
+            let practice: Vec<&db::GameSummary> = summaries
+                .iter()
+                .filter(|s| mine(s) && is_practice(s))
+                .collect();
+            let elsewhere: Vec<&db::GameSummary> = summaries
+                .iter()
+                .filter(|s| mine(s) && !is_practice(s))
+                .collect();
+            let best = |v: &[&db::GameSummary]| v.iter().filter_map(|s| s.best_ms).min();
+            serde_json::json!({
+                // Its place in the race, which is the order the page lists
+                // them in and the order he will run them on the day.
+                "n": i + 1,
+                "game": name,
+                "goal": goal,
+                "attempts": practice.iter().map(|s| s.attempts).sum::<i64>(),
+                "finished": practice.iter().map(|s| s.finished).sum::<i64>(),
+                "best_ms": best(&practice),
+                "first_at_ms": practice.iter().filter_map(|s| s.first_at_ms).min(),
+                "last_at_ms": practice.iter().filter_map(|s| s.last_at_ms).max(),
+                // His Arcathlon time for it, where there is one.
+                "marathon_ms": best(&elsewhere),
+                "marathon_at_ms": elsewhere.iter().filter_map(|s| s.last_at_ms).max(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "race": rosters.event_name(event),
+        "url": url,
+        "date": date,
+        "games": games,
+    })
+}
+
 pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> {
     let pool = db::open(&cfg.database.path).await?;
     let (game, category) = app::load_game(&pool, &cfg).await?;
@@ -235,6 +320,11 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
                 .await?
                 .and_then(|s| s.parse::<i64>().ok()),
             "summaries": summaries,
+            // The twenty games of the Big 20 race, in race order, each with
+            // whatever this database holds for it. Present whether or not he
+            // has practised any of them: a prep page's job is to show what
+            // is left as much as what is done.
+            "big20": big20_prep(&summaries, &cfg),
             // What the pane last saw, whatever game it was. The page leads
             // with this rather than with the tracked game, because on a
             // Big 20 day the tracked game is not what is happening.
@@ -596,5 +686,84 @@ mod tests {
         let out = other_events(&runs, &none);
         assert_eq!(out[0]["label"], "Randomized Arcathlon");
         assert_eq!(out[0]["randomized"], true);
+    }
+
+    fn summary(
+        game: &str,
+        category: &str,
+        attempts: i64,
+        finished: i64,
+        best: i64,
+    ) -> db::GameSummary {
+        db::GameSummary {
+            game: game.into(),
+            category: category.into(),
+            best_ms: (finished > 0).then_some(best),
+            finished,
+            attempts,
+            first_at_ms: Some(1_780_000_000_000),
+            last_at_ms: Some(1_787_000_000_000),
+        }
+    }
+
+    /// Practice for the race and an appearance in a marathon are different
+    /// things and are counted apart. This is where the first version was
+    /// wrong: it asked the CONFIG which categories were marathons, and
+    /// `mode = "board"` is not enabled in the deployment, so the answer was
+    /// "none" and Jaws' five Arcathlon completions read as five practice
+    /// attempts with a perfect finish rate. The categories runs are FILED
+    /// under are what decides.
+    #[test]
+    fn big20_prep_counts_practice_apart_from_a_marathon_appearance() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.other_category = "Other".into();
+        let out = big20_prep(
+            &[
+                // His practice for the race.
+                summary("Die Hard", "Other", 10, 5, 121_400),
+                // The same game read off a damaged board, which the roster
+                // folds onto the race's name rather than leaving as a game
+                // of its own.
+                summary("aws", "Other", 3, 1, 400_000),
+                // A marathon completion of a game that is also in the race.
+                summary("Jaws", "Arcathlon", 5, 5, 420_000),
+                // Nothing to do with this race.
+                summary("Ninja Gaiden (NES)", "Any%", 3137, 41, 695_100),
+            ],
+            &cfg,
+        );
+        let by = |name: &str| {
+            out["games"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|g| g["game"] == name)
+                .unwrap()
+                .clone()
+        };
+        let dh = by("Die Hard");
+        assert_eq!(dh["n"], 1, "first in the race order");
+        assert_eq!(dh["goal"], "Any% Beginner");
+        assert_eq!(dh["attempts"], 10);
+        assert_eq!(dh["best_ms"], 121_400);
+        assert!(dh["marathon_ms"].is_null());
+
+        let jaws = by("Jaws");
+        assert_eq!(
+            jaws["attempts"], 3,
+            "the damaged spelling is folded in; the Arcathlon row is not"
+        );
+        assert_eq!(jaws["best_ms"], 400_000);
+        assert_eq!(
+            jaws["marathon_ms"], 420_000,
+            "his marathon time, kept apart"
+        );
+
+        // A game he has never touched is still listed, with nothing in it.
+        let untouched = by("Moon Crystal");
+        assert_eq!(untouched["attempts"], 0);
+        assert!(untouched["best_ms"].is_null());
+        assert!(untouched["last_at_ms"].is_null());
+        assert_eq!(out["games"].as_array().unwrap().len(), 20);
     }
 }

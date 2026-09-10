@@ -415,6 +415,7 @@
              aria-label="Filter the other games by name" autocomplete="off" spellcheck="false">
     </div>
     <p class="subnote" id="og-sub"></p>
+    <p class="subnote" id="og-big20" hidden></p>
     <div class="ogwrap" id="og-bygame"><table id="other-table"></table></div>
     <div class="ogwrap" id="og-byevent" hidden></div>
   </section>
@@ -1185,6 +1186,20 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
       ? `, over ${marathons.length} marathon${marathons.length > 1 ? 's' : ''}` +
         (randos.length ? ` (${randos.length} randomized)` : '')
       : '') + '.';
+
+  // The Big 20 race he is preparing for, and how far through the twenty he
+  // is. Its own page, because a race of twenty games practised over weeks
+  // is a different shape from a marathon run once in a day, and this card
+  // is about the latter. The file is named in the href: the origin serves
+  // an index document for the root only, so "/big20/" is a 404.
+  if (D.big20 && Array.isArray(D.big20.games) && D.big20.games.length) {
+    const g = D.big20.games;
+    const done = g.filter(x => x.finished > 0).length;
+    const p = document.getElementById('og-big20');
+    p.innerHTML = `Preparing for <a href="/big20/index.html">Big 20 ` +
+      `${esc(D.big20.race)}</a> — ${done} of ${g.length} games finished so far.`;
+    p.hidden = false;
+  }
 
   /* ---- by game ---- */
   const gameLink = g => {
