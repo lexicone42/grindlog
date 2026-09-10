@@ -256,7 +256,30 @@ category = "Any%"
                                 #   event per distinct board — shadow mode, nothing
                                 #   acts on it, so it pairs with
                                 #   require_title_match: watch every board the
-                                #   broadcast shows, record only this game's
+                                #   broadcast shows, record only this game's.
+                                #   "track": as "log", and additionally RECORD
+                                #   the runs of a board that names a game the
+                                #   rosters below know — under that game and
+                                #   `other_category`, resolved when each run
+                                #   closes, with no LiveSplit number and no
+                                #   splits (they are this game's acts, not
+                                #   that board's rows). A board whose title
+                                #   matches nothing still records nothing, so
+                                #   "track" only widens capture to boards that
+                                #   can be named; this game's own records, its
+                                #   Sum of Best and its attempt counter are
+                                #   never read off one
+# other_category = "Other"      # the category a "track" run is filed under. One
+                                #   category for every foreign board, because
+                                #   the pane says which GAME it is timing and
+                                #   never which category of it
+# other_min_final_ms = 30000    # how long a "track" run must last for a frozen
+                                #   timer to count as a finish rather than a
+                                #   death. `min_final_ms` above is this game's
+                                #   floor and is far too high for another one:
+                                #   an 11-minute floor writes every Big 20 win
+                                #   as a reset. Applies only to runs "track"
+                                #   retargets
 # public_vod_links = false      # publish each session's Twitch VOD id in the
                                 #   report and the site, which links every run to
                                 #   its moment in the VOD. A VOD id names the

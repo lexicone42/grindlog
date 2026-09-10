@@ -158,6 +158,122 @@ before. The page's copy of the report drops the `title` events
 one JSON line per pane pass, which is what explains after the fact what the
 reader saw on a board that went unreadable for a while.
 
+**Whose board is this? (`src/identity.rs`).** Recording the wrong game is
+the one defect the data cannot recover from: a Die Hard attempt written as
+a Ninja Gaiden death is indistinguishable, afterwards, from a Ninja Gaiden
+death. It has happened — twelve fabricated runs from a Die Hard practice
+block and one 45:41 "finish" — so every pane pass now goes through a gate
+that asks whether this board is the tracked game's at all.
+
+Four signals, read off the same pane pass, each of which can speak for the
+game, against it, or not at all:
+
+- **Header** — the title row against `game.name`, fuzzily.
+- **Category** — the line under it against `game.category`. This is the one
+  that carries a fresh replay: a per-VOD database has no attempt history to
+  compare a counter against, and a 480p board often has no legible row
+  names, which on the Big 20 stream left the header alone against the whole
+  rule.
+- **Counter** — the attempt number against the highest this game has
+  reached. His Ninja Gaiden counter is past 94,000; another game's board
+  starts again at 1.
+- **Rows** — the split row names against the configured acts.
+- **NamedAnother** — not a fifth reading but a consequence of the first:
+  the header does not merely fail to match, it matches a game on a list
+  this build ships (the Arcathlon rosters and the Big 20 roster, folded by
+  `roster.rs`'s own matcher, which is far better at damaged names than a
+  string compare). Recognising the other game is *corroboration*, which is
+  why a header alone can convict when it names something and cannot when
+  it does not.
+
+**Two disagreeing signals convict, and two consecutive convicting passes
+suspend.** One garbled read must not stop a six-hour broadcast, and his own
+header misreads often enough that a single-signal rule would fire on real
+Ninja Gaiden footage. **Silence never moves the verdict**: a pane that says
+nothing legible leaves the last decision standing, so an ad break or a dark
+scene neither suspends nor resumes. Suspension is reversible — one pass
+that speaks for the tracked game brings recording straight back.
+
+While suspended, the timer still reads and the board is still re-read; what
+stops is everything that would be *written as this game*: runs, splits, the
+attempt counter, and the reference rows (its PB, Sum of Best and season
+best are stored as global settings and published as this game's records, so
+another board's rows must never reach them — including through the
+configured `lifetime_sob` fallback, which fires precisely when a pane's
+rows cannot be labelled, which is exactly what a foreign board looks like).
+
+`scripts/identity-report.sh` prints, per broadcast, every reading shape and
+what the gate made of it, and the session-close line carries the tally
+(`identity 0 clear, 7 convicting, 0 undecided, 0 silent`). The shape worth
+reading is `undecided` — something disagreed but not enough to act on. It
+is what a board with a generic category and no legible rows or counter
+looks like, and it is also what his own board looks like when the header
+misreads; those two want opposite outcomes, so a rule change has to be
+argued from there.
+
+**Recording the other game (`game.follow_title = "track"`).** Suspension is
+the safe answer and it is also a lossy one: he spends whole broadcasts on
+the twenty games of a Big 20 race, and none of it is recorded. `"track"` is
+`"log"` plus one thing — a board the gate has convicted **and whose header
+names a game on a shipped roster** has its runs recorded, under that game
+and `game.other_category` (default `"Other"`).
+
+The narrowness is the safety argument. A suspension with no *name* — a
+header nobody can place, a category that merely disagrees — still records
+nothing, exactly as under `"log"`. So `track` widens capture only to boards
+that can be identified, never to "something is wrong here", and a misread
+of the tracked game's own header names no game and so cannot produce a
+foreign run.
+
+Three details it must get right, each of which was a bug first:
+
+- **The target is resolved when the run CLOSES, not when it starts.**
+  `Event::Started` fires about 1.5 s in and the header is re-read once a
+  minute, so a target chosen at the start belongs to whatever was on screen
+  up to a minute earlier — which on a twenty-game day files an attempt of
+  the next game under the last one. Closing late can lose a run to a late
+  switch; it cannot misfile one. The other way a run is lost is a pass that
+  convicts without naming: the target is dropped, so a run closing on that
+  pass stays the tracked game's and is not recorded. Live on 2026-09-10 one
+  reading in five was that shape (`convicting: header, category against
+  [uble the revenge]` — the crop cut "Do" off the title and the roster
+  could not place what was left), though on the Die Hard window all ten
+  attempts still landed. **This is the first thing to measure once `track`
+  is on**, and the first thing to look at if runs go missing. Carrying the
+  last name forward through an unnamed pass would close most of that gap
+  and would also let a stale name file the *next* game's runs when the next
+  game is on no roster — which is the unrecoverable defect, so losing the
+  run is the right side to err on until there is data. (The same shape the
+  marathon tracker uses:
+  `Shared.game` is which game this *deployment* is, and about thirteen
+  things are calibrated against it at startup, so it is not something a
+  board may move.)
+- **Nothing of the tracked game rides along.** No LiveSplit number (his
+  counter is Ninja Gaiden's; a different board has its own sequence, and
+  mixing them would let `fill-run-numbers.sh` invent lifetime ordinals
+  across unrelated games), no splits (the acts are Ninja Gaiden's six), no
+  baseline (Ninja Gaiden's is about 11:35 and every Big 20 goal is minutes,
+  so folding it in makes every foreign finish a "new record"), and no chat
+  announcement (`record_label`, the milestones and the season are the
+  tracked game's; the bot has nothing true to say about a Die Hard time
+  yet). Recording it and talking about it are separate decisions.
+- **A foreign run's finish arrives as a reset.** The state machine calls a
+  frozen timer under `detection.min_final_ms` too short to be a finish, and
+  that floor is eleven minutes because a Ninja Gaiden run is 11:35. Every
+  Big 20 goal is shorter, so under the tracked game's floor a Die Hard *win*
+  is written as a death — `replays/diehard` holds five of exactly that.
+  `game.other_min_final_ms` (default 30 s) is the floor that applies to a
+  retargeted run instead.
+
+Measured on `2868800526`, which is the broadcast that produced the
+fabricated runs: the Die Hard window records ten Die Hard runs (five
+finishes at 2:01–2:25, five resets) and zero Ninja Gaiden; a Ninja Gaiden
+window is row-for-row identical to the same window under `"log"`, down to
+the attempt numbers; and a Life Force block — an NES game on no shipped
+roster — records nothing at all, which is the narrowness holding.
+`follow_title` ships defaulting to `"log"`, and `live.toml` says `"log"`:
+turning this on is a deliberate config change of its own.
+
 **Board signature.** What a pane *is* comes from its split rows, not from
 its title. The title is the least reliable text on screen — on one frame of
 this streamer's own pane it read `"Golden (NES)"`, and on his marathon

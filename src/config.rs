@@ -73,6 +73,24 @@ pub enum FollowTitle {
     /// the rows it read, and record a `layout` session event for every
     /// distinct board; nothing changes in what is recorded.
     Log,
+    /// Record runs of OTHER games too, under the name the board gives
+    /// them, when that name canonicalises to a game this build has a
+    /// roster for.
+    ///
+    /// The target is resolved when the run CLOSES, not when it starts,
+    /// and it never changes `[game] name` — the deployment still IS the
+    /// tracked game. A dozen things were calibrated against that identity
+    /// at startup and cannot follow it: `min_final_ms`, the act list, the
+    /// record labels, the baseline, the counter's high-water mark. Moving
+    /// one of them and leaving the rest is how a row comes out wrong and
+    /// looks right, so none of them moves.
+    ///
+    /// What a foreign run therefore gets: a game, a fixed category, a
+    /// start, an end and an outcome. What it deliberately does NOT get:
+    /// the runner's LiveSplit attempt number (that counter belongs to the
+    /// tracked game), splits (the acts are the tracked game's), or any
+    /// influence on records (its board's reference rows are gated out).
+    Track,
 }
 
 /// How a board this entry names is tracked.
@@ -513,6 +531,34 @@ pub struct GameCfg {
     pub name: String,
     #[serde(default = "d_category")]
     pub category: String,
+    /// The category every OTHER game's runs are filed under, with
+    /// `follow_title = "track"`.
+    ///
+    /// A fixed string, deliberately, and NOT the category the board
+    /// prints. That line is as damaged as the rest: on one afternoon
+    /// Excitebike's read back as "Selection A", "SelectionA" and
+    /// "unknown" in three consecutive passes, and Steel Legion's as
+    /// "Any®% All Osses". Keying runs on it would have split one game
+    /// into three histories on its first day. The marathon tracker
+    /// settled this the same way with "Arcathlon".
+    #[serde(default = "d_other_category")]
+    pub other_category: String,
+    /// A frozen timer at or above this is taken for a finish on a game
+    /// this deployment does not track, where `min_final_ms` cannot apply.
+    ///
+    /// `min_final_ms` is 11 minutes here because a Ninja Gaiden run is
+    /// 11:35 and anything shorter is a death. Every Big 20 goal is under
+    /// that — Pac-Mania about a minute, Die Hard about two — so under the
+    /// tracked game's floor a foreign COMPLETION is written as a reset.
+    /// That is not hypothetical: replays/diehard holds five of them, and
+    /// it is the default outcome for a foreign run, not an edge case.
+    ///
+    /// This cannot tell a finish from a long pause, and does not pretend
+    /// to. It rules out the pre-start offset (LiveSplit's -5.00 reads as
+    /// 5.00) and little else, so a foreign row is a weaker claim than a
+    /// tracked one. Per-game floors are what would fix it properly.
+    #[serde(default = "d_other_min_final_ms")]
+    pub other_min_final_ms: i64,
     /// Acts/segments with their *cumulative* end times, used to bucket where
     /// resets happened (death chart). Give the final act no end_ms. Boundaries
     /// are approximate — pad them a bit above typical split times.
@@ -597,6 +643,8 @@ impl Default for GameCfg {
         Self {
             name: d_game(),
             category: d_category(),
+            other_category: d_other_category(),
+            other_min_final_ms: d_other_min_final_ms(),
             acts: Vec::new(),
             record_label: d_record_label(),
             references: Vec::new(),
@@ -912,6 +960,16 @@ fn d_game() -> String {
 }
 fn d_category() -> String {
     "Any%".into()
+}
+fn d_other_category() -> String {
+    "Other".into()
+}
+/// Thirty seconds. Long enough to exclude LiveSplit's pre-start offset
+/// (-5.00, which reads as 5.00) and a scene change caught mid-fade; short
+/// enough for every goal in a twenty-game race, the shortest of which runs
+/// about a minute.
+fn d_other_min_final_ms() -> i64 {
+    30_000
 }
 fn d_db_path() -> String {
     "ngtimer.db".into()
