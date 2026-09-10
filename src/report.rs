@@ -41,7 +41,11 @@ use crate::{api, app, db, roster, stats, util};
 /// makes it safe: an event is ten DISTINCT games, so two genuine events
 /// can never merge without colliding, and the audit leans on the same
 /// invariant. Over the whole corpus this fires exactly once.
-fn other_events(runs: &[db::OtherRun], rosters: &roster::Rosters) -> Vec<serde_json::Value> {
+fn other_events(
+    runs: &[db::OtherRun],
+    rosters: &roster::Rosters,
+    practice_cat: &str,
+) -> Vec<serde_json::Value> {
     // Session boundaries first, then the joins.
     let mut groups: Vec<Vec<&db::OtherRun>> = Vec::new();
     let mut i = 0;
@@ -70,13 +74,39 @@ fn other_events(runs: &[db::OtherRun], rosters: &roster::Rosters) -> Vec<serde_j
     let mut out: Vec<serde_json::Value> = Vec::new();
     for group in &joined {
         let names: Vec<&str> = group.iter().map(|r| r.game.as_str()).collect();
+        // A PRACTICE session is not an event and must never be identified as
+        // one. A marathon is one run of each of ten games; a practice day is
+        // many attempts at one or two, and the two arrive here as the same
+        // shape — a session holding several runs of several games. Without
+        // this test the "more than one game, fits no roster" branch below
+        // takes over and a Big 20 practice day is published as "Randomized
+        // Arcathlon", which is not a thing that happened.
+        //
+        // The category is what separates them, because it is what separates
+        // them in the database: `follow_title = "track"` files practice
+        // under `game.other_category` and a marathon import files
+        // completions under the board's own name.
+        let practice = group
+            .iter()
+            .all(|r| r.category.eq_ignore_ascii_case(practice_cat));
+        let distinct: Vec<&str> = {
+            let mut v: Vec<&str> = names.clone();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
         // One game is a practice day, not an event to identify.
-        let event = (group.len() > 1)
+        let event = (!practice && group.len() > 1)
             .then(|| rosters.identify(&names))
             .flatten();
-        let label = match (event, group.len()) {
-            (Some(e), _) => format!("Arcathlon {}", rosters.event_name(e)),
-            (None, n) if n > 1 => "Randomized Arcathlon".to_string(),
+        let label = match (practice, event, distinct.len()) {
+            // Named by what he actually practised. Beyond three the names
+            // stop being a label and become a list, and the page has the
+            // games themselves right underneath.
+            (true, _, n) if n > 3 => format!("{n} games"),
+            (true, _, _) => distinct.join(", "),
+            (_, Some(e), _) => format!("Arcathlon {}", rosters.event_name(e)),
+            (_, None, n) if n > 1 => "Randomized Arcathlon".to_string(),
             _ => group[0].game.clone(),
         };
         out.push(serde_json::json!({
@@ -85,9 +115,16 @@ fn other_events(runs: &[db::OtherRun], rosters: &roster::Rosters) -> Vec<serde_j
             "label": label,
             // Whether the ten games fit one roster. A reader sorting for
             // the randomized draws wants this, not the label's spelling.
-            "randomized": event.is_none() && group.len() > 1,
+            // Never a practice session: it is not a draw of any kind.
+            "randomized": !practice && event.is_none() && group.len() > 1,
+            // And which of the two this is, said plainly rather than left
+            // to be inferred from the absence of the other flag.
+            "practice": practice,
             "tag": group[0].tag,
-            "total_ms": group.iter().filter_map(|r| r.final_time_ms).sum::<i64>(),
+            // The event's running total, which a practice day does not have:
+            // adding up five Die Hard finishes out of forty attempts gives a
+            // number that is the sum of nothing anyone ran.
+            "total_ms": (!practice).then(|| group.iter().filter_map(|r| r.final_time_ms).sum::<i64>()),
             "games": group.iter().map(|r| serde_json::json!({
                 "game": r.game,
                 "category": r.category,
@@ -347,6 +384,7 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
             "other_events": other_events(
                 &db::other_runs(&pool, &game, &category).await?,
                 &roster::Rosters::bundled().unwrap_or_default(),
+                &cfg.game.other_category,
             ),
             "today": today,
             "runs": all_runs,
@@ -584,7 +622,7 @@ mod tests {
 
         let mut runs = one;
         runs.extend(rando);
-        let out = other_events(&runs, &r);
+        let out = other_events(&runs, &r, "Other");
         assert_eq!(out.len(), 2, "one event per session");
 
         // Newest first: session 2 leads.
@@ -625,7 +663,7 @@ mod tests {
             .collect();
         runs.push(run(2, "Astyanax", 1_399_000)); // the tail VOD
 
-        let out = other_events(&runs, &r);
+        let out = other_events(&runs, &r, "Other");
         assert_eq!(out.len(), 1, "one broadcast, not two");
         assert_eq!(out[0]["label"], "Arcathlon #4");
         assert_eq!(out[0]["games"].as_array().unwrap().len(), 10);
@@ -645,7 +683,7 @@ mod tests {
             run(2, "Batman", 710_000),
             run(2, "Zelda", 900_000),
         ];
-        let out = other_events(&runs, &r);
+        let out = other_events(&runs, &r, "Other");
         assert_eq!(out.len(), 2, "a shared game keeps them apart");
     }
 
@@ -659,7 +697,7 @@ mod tests {
         let mut b = run(2, "Hebereke", 700_000);
         a.tag = None;
         b.tag = None;
-        let out = other_events(&[a, b], &r);
+        let out = other_events(&[a, b], &r, "Other");
         assert_eq!(out.len(), 2);
     }
 
@@ -668,7 +706,7 @@ mod tests {
     #[test]
     fn a_single_game_session_is_itself() {
         let r = roster::Rosters::bundled().unwrap();
-        let out = other_events(&[run(9, "Die Hard (NES)", 142_000)], &r);
+        let out = other_events(&[run(9, "Die Hard (NES)", 142_000)], &r, "Other");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["label"], "Die Hard (NES)");
         assert_eq!(out[0]["randomized"], false);
@@ -683,9 +721,65 @@ mod tests {
             .iter()
             .map(|g| run(1, g, 600_000))
             .collect();
-        let out = other_events(&runs, &none);
+        let out = other_events(&runs, &none, "Other");
         assert_eq!(out[0]["label"], "Randomized Arcathlon");
         assert_eq!(out[0]["randomized"], true);
+    }
+
+    /// A day of Big 20 practice is several games and many attempts in one
+    /// session, which is the SAME SHAPE a randomized marathon arrives in.
+    /// Taken for an event it is published as "Randomized Arcathlon" — a
+    /// marathon that never happened, on the page and in the feed — with a
+    /// total that is the sum of whichever attempts he happened to finish.
+    /// The category is what tells them apart.
+    #[test]
+    fn a_practice_day_is_not_a_marathon_however_many_games_it_holds() {
+        let r = roster::Rosters::bundled().unwrap();
+        let practice = |game: &'static str, ms: Option<i64>| db::OtherRun {
+            category: "Other".into(),
+            final_time_ms: ms,
+            outcome: if ms.is_some() { "finished" } else { "reset" }.into(),
+            tag: None,
+            ..run(7, game, 0)
+        };
+        let out = other_events(
+            &[
+                practice("Die Hard", Some(142_000)),
+                practice("Die Hard", None),
+                practice("Die Hard", Some(121_000)),
+                practice("Kid Klown in Night Mayor World", None),
+            ],
+            &r,
+            "Other",
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["label"], "Die Hard, Kid Klown in Night Mayor World");
+        assert_eq!(out[0]["practice"], true);
+        assert_eq!(out[0]["randomized"], false, "not a draw of anything");
+        assert!(
+            out[0]["total_ms"].is_null(),
+            "a practice day has no running total"
+        );
+        assert_eq!(out[0]["games"].as_array().unwrap().len(), 4);
+
+        // Beyond three games the names stop being a label and become a list.
+        let many: Vec<db::OtherRun> = ["Die Hard", "Jaws", "Faria", "Yoshi", "Hydlide"]
+            .iter()
+            .map(|g| practice(g, None))
+            .collect();
+        let out = other_events(&many, &r, "Other");
+        assert_eq!(out[0]["label"], "5 games");
+        assert_eq!(out[0]["practice"], true);
+
+        // And a real marathon is untouched: its runs are not in that
+        // category, so it identifies exactly as it did before.
+        let arca: Vec<db::OtherRun> = ["Batman", "Castlevania", "Zelda"]
+            .iter()
+            .map(|g| run(1, g, 600_000))
+            .collect();
+        let out = other_events(&arca, &r, "Other");
+        assert_eq!(out[0]["practice"], false);
+        assert!(out[0]["total_ms"].is_number());
     }
 
     fn summary(

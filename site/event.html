@@ -128,10 +128,16 @@ if (D.kind === 'game') {
   const times = runs.map(r => r.final_time_ms).filter(t => t != null);
   const best = times.length ? Math.min(...times) : null;
   const played = runs.length;
-  document.getElementById('sub').textContent =
-    `run ${played} time${played > 1 ? 's' : ''}` +
-    (best != null ? ` · best ${fmt(best)}` : '') +
-    (played > 1 ? ` · ${dshort(runs[runs.length - 1].started_at_ms)} to ${dshort(runs[0].started_at_ms)}` : '');
+  // A marathon row is a COMPLETION, so "run 5 times" is five finishes. A
+  // practice session's rows are ATTEMPTS, most of which end in a reset, and
+  // the same phrase over forty of them would claim forty runs of the game.
+  // When any row is unfinished the two numbers are given separately.
+  const span = played > 1
+    ? ` · ${dshort(runs[runs.length - 1].started_at_ms)} to ${dshort(runs[0].started_at_ms)}` : '';
+  document.getElementById('sub').textContent = (times.length < played
+    ? `${played} attempt${played > 1 ? 's' : ''}, ${times.length} finished`
+    : `run ${played} time${played > 1 ? 's' : ''}`) +
+    (best != null ? ` · best ${fmt(best)}` : '') + span;
   document.getElementById('grid').innerHTML =
     `<tr><th>Date</th><th>Event</th><th class="num">Time</th></tr>` +
     runs.map(r => `<tr>

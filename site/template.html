@@ -1229,6 +1229,40 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
   // A marathon's games are listed in the order he played them, which is
   // the order the board's rows completed, not the order they are printed.
   const evEl = document.getElementById('og-byevent');
+
+  // A marathon is ONE run of each of ten games, so a row per run is a row
+  // per game and reads as the event. A practice session is FORTY runs of
+  // one or two, where a row per run is forty rows of mostly dashes and the
+  // numbering counts attempts as though they were positions in a lineup.
+  // So a practice session collapses to a row per game: how many attempts,
+  // how many finished, and the best of them — which is what practising
+  // that day amounted to.
+  const rowsFor = (e, games) => {
+    if (!e.practice) {
+      return games.map(g => `<tr>
+        <td class="n tnum">${e.games.indexOf(g) + 1}</td>
+        <td>${gameLink(g.game)}</td>
+        <td class="num tnum">${g.final_time_ms != null ? fmt(g.final_time_ms) : '—'}</td>
+      </tr>`).join('');
+    }
+    const by = new Map();
+    for (const g of games) {
+      const seen = by.get(g.game) || { n: 0, done: 0, best: null };
+      seen.n++;
+      if (g.final_time_ms != null) {
+        seen.done++;
+        if (seen.best == null || g.final_time_ms < seen.best) seen.best = g.final_time_ms;
+      }
+      by.set(g.game, seen);
+    }
+    return [...by].map(([game, s]) => `<tr>
+      <td class="n tnum">${s.n}&times;</td>
+      <td>${gameLink(game)}</td>
+      <td class="num tnum">${s.best != null
+        ? `${fmt(s.best)}<span class="ogev-meta"> · ${s.done} finished</span>`
+        : '<span class="ogev-meta">none finished</span>'}</td>
+    </tr>`).join('');
+  };
   const drawEvents = needle => {
     const shown = events
       .map(e => ({ e, games: needle
@@ -1261,15 +1295,12 @@ document.getElementById('daily').innerHTML = D.daily.map(x => {
         <div class="ogev-h">
           ${name}
           ${e.randomized ? '<span class="ogev-rand">random draw</span>' : ''}
+          ${e.practice ? '<span class="ogev-rand">practice</span>' : ''}
           <span class="ogev-meta">${dshort(e.started_at_ms)}</span>
           ${part}
           <span class="ogev-total tnum">${e.total_ms ? fmt(e.total_ms) : ''}</span>
         </div>
-        <table>${games.map((g, i) => `<tr>
-          <td class="n tnum">${e.games.indexOf(g) + 1}</td>
-          <td>${gameLink(g.game)}</td>
-          <td class="num tnum">${g.final_time_ms != null ? fmt(g.final_time_ms) : '—'}</td>
-        </tr>`).join('')}</table>
+        <table>${rowsFor(e, games)}</table>
       </div>`;
     }).join('');
   };
