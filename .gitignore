@@ -49,6 +49,7 @@ nohup.out
 # the directory, so a second pass over the same broadcasts lands beside the
 # first rather than over it.
 /arcathlon-db*/
+/big20-db/
 
 # Database backups (scripts/backup-db.sh) and retired copies
 /backups/

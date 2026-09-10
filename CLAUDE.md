@@ -8,7 +8,9 @@ Deeper detail lives in `docs/`: [detection](docs/detection.md) (how video
 becomes runs, and why each step is shaped that way),
 [operations](docs/operations.md) (running the deployed bot),
 [marathons](docs/marathons.md) (the ten-game days and their own tooling),
-[install](docs/install.md) (ffmpeg and tesseract, including without root).
+[big20](docs/big20.md) (the race he is preparing for, and the practice days
+that go with it), [install](docs/install.md) (ffmpeg and tesseract,
+including without root).
 
 ## What this is
 
