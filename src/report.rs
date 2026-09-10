@@ -169,6 +169,20 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
     let golds = db::golds(&pool, &game, &category).await?;
 
     if json {
+        // What the pane last read, with the game canonicalised before it is
+        // shown to a person. The stored title event is the RAW header —
+        // that is where "Kiown in Night Mayor World" comes from, and the
+        // twenty-one spellings of Double Dragon II. The tracker already
+        // folds those onto canonical names; the page was not getting the
+        // benefit and published the damaged reading. Falls back to the raw
+        // text when nothing on the shipped rosters fits, which is the
+        // honest answer: better a damaged name than a confident wrong one.
+        let mut now = db::now_playing(&pool).await?;
+        if let Some(raw) = now.game.as_deref() {
+            if let Some(c) = roster::canonical_any(raw) {
+                now.game = Some(c);
+            }
+        }
         // Every finished run, oldest first — the site's finish-times chart.
         let finishes: Vec<serde_json::Value> = brief
             .iter()
@@ -224,7 +238,7 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
             // What the pane last saw, whatever game it was. The page leads
             // with this rather than with the tracked game, because on a
             // Big 20 day the tracked game is not what is happening.
-            "now": db::now_playing(&pool).await?,
+            "now": now,
             // The channel, so the live panel can link to the stream it is
             // reading.
             //

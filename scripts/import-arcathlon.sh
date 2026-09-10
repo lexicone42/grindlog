@@ -60,6 +60,18 @@ for id in "${ids[@]}"; do
   runs=$(q "$src" "SELECT COUNT(*) FROM runs WHERE category = 'Arcathlon'")
   [ "${runs:-0}" -gt 0 ] || { echo "!!! $src holds no Arcathlon runs" >&2; exit 1; }
 
+  # Never touch a session that is still capturing. The delete below is
+  # scoped to source = 'vod' so this cannot fire on the live row any more,
+  # but an open session sharing this VOD means the bot is watching the very
+  # broadcast being imported — replacing it underneath itself is not
+  # something to do on a technicality.
+  live=$(q "$LIVE" "SELECT COUNT(*) FROM sessions WHERE vod_id = '$id' AND ended_at_ms IS NULL")
+  if [ "${live:-0}" -gt 0 ]; then
+    echo "!!! vod $id is still being captured (an open session carries it)" >&2
+    echo "    import it once the broadcast has ended" >&2
+    exit 2
+  fi
+
   # One field per query: sqlite3 separates columns with "|", which `read`
   # would hand to the first variable whole — and a $day of
   # "2026-07-23|10|Arcathlon" made the guard below compare 0 with 0 and
@@ -91,6 +103,16 @@ for id in "${ids[@]}"; do
     CREATE TEMP TABLE mine AS
       SELECT s.id FROM sessions s
        WHERE s.vod_id = '$id'
+         -- POSITIVE ownership, not a residual test. The first version asked
+         -- 'does this session hold a run of another category?' and took
+         -- silence for consent -- but db::set_session_vod stamps the
+         -- broadcast's VOD id on the LIVE hls session too, and a session
+         -- that has recorded nothing yet holds no run of any category. So
+         -- the predicate selected the session capturing the stream at that
+         -- moment. Deleting it strands every run of the rest of the
+         -- broadcast on a dangling session_id, and silences healthcheck.sh
+         -- and deploy-if-live.sh, both of which look for an open hls row.
+         AND s.source = 'vod'
          AND NOT EXISTS (SELECT 1 FROM runs r
                           WHERE r.session_id = s.id AND r.category <> 'Arcathlon');
     DELETE FROM splits WHERE run_id IN
