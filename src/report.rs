@@ -328,7 +328,14 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
 
     if json {
         // What the pane last read, with the game canonicalised before it is
-        // shown to a person. The stored title event is the RAW header —
+        // shown to a person.
+        //
+        // The tracker now writes the canonical name onto the title event
+        // itself and `now_playing` prefers it, so this is the fallback for
+        // events written before it did — and for a board named on no pass at
+        // all, where it will fail too and the raw reading stands.
+        //
+        // The stored title event is the RAW header —
         // that is where "Kiown in Night Mayor World" comes from, and the
         // twenty-one spellings of Double Dragon II. The tracker already
         // folds those onto canonical names; the page was not getting the

@@ -38,6 +38,12 @@ q() { sqlite3 -cmd '.timeout 10000' "$DB" "$1"; }
 # writes a session with a fresh id and a months-old timestamp, so id order
 # stopped being time order the day marathons were imported and this listed
 # July while the bot was capturing today. Third place that bug appeared.
+# The tracked game, taken as the one with by far the most runs — this
+# database holds 3137 of it against 370 marathon completions and a handful of
+# race practice. The script has no config to ask, and the warning at the
+# bottom needs to know which runs are ITS.
+TRACKED=$(q "SELECT game FROM runs GROUP BY game ORDER BY COUNT(*) DESC LIMIT 1;")
+
 q "SELECT s.id, COALESCE(date(s.started_at_ms/1000,'unixepoch','localtime'),'?'),
           COALESCE(s.source,'?'), COUNT(r.id),
           COALESCE(s.events,'[]')
@@ -87,9 +93,18 @@ q "SELECT s.id, COALESCE(date(s.started_at_ms/1000,'unixepoch','localtime'),'?')
     # because the header misreads and the pass goes undecided while the
     # run carries on correctly. What is actually suspect is recording
     # without the board EVER having spoken for the tracked game.
-    if [ "$runs" -gt 0 ] && printf '%s' "$events" | jq -e \
+    # Runs OF THE TRACKED GAME, not runs. Since follow_title = "track" a
+    # session that recorded only other games while the gate was convicting
+    # is doing exactly what it is meant to — the whole Big 20 practice day
+    # looks like that — and warning about it trains a reader to skip the
+    # line that matters.
+    mine=$(q "SELECT COUNT(*) FROM runs WHERE session_id = $id AND game = '$(printf '%s' "$TRACKED" | sed "s/'/''/g")';")
+    if [ "${mine:-0}" -gt 0 ] && printf '%s' "$events" | jq -e \
          '[.[]|select(.k=="identity")|select(.d|startswith("clear"))]|length == 0' >/dev/null 2>&1; then
-      echo "    !!! recorded $runs run(s) and no pass ever spoke FOR the tracked game"
+      echo "    !!! recorded $mine $TRACKED run(s) and no pass ever spoke FOR it"
+    fi
+    if [ "$runs" -gt "${mine:-0}" ]; then
+      echo "    ($((runs - ${mine:-0})) run(s) of another game, which is what \"track\" is for)"
     fi
   done
 

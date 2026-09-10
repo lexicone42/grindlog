@@ -1290,6 +1290,10 @@ fn apply_identity(
         .subtitle
         .as_deref()
         .or(readings.category.as_deref());
+    // Read the pane BEFORE recording the title, so the title event can carry
+    // the canonical name the reading worked out. Nothing below depends on
+    // the order the other way round.
+    let reading = fp.read(title, category, board_read);
     // A change of title is a change of what it says, not of how tesseract
     // spelled it this minute: "(NES" and "(NES)" flipping every read filled
     // the session's event list (thousands of "title" events a day against
@@ -1307,11 +1311,29 @@ fn apply_identity(
                     " — NOT the tracked game"
                 }
             );
-            health.event(at_ms, "title", name.to_string());
+            // The RAW reading stays in `d` — the identity report counts
+            // spellings and one session producing fifty-one of them is worth
+            // seeing — with the canonical name beside it in `c` for anything
+            // showing this to a person.
+            //
+            // This is what the live panel on the site needs. It shows the
+            // last title read, and a single bad spelling is all it takes:
+            // the header came back "Stee! Leg:on" and the page said so,
+            // while the tracker was recording runs under Steel Legion from
+            // its other passes. Canonicalising the raw string at report time
+            // cannot fix that — the roster matcher forgives one edit per
+            // five characters and that spelling is two out at nine — but the
+            // tracker already knew, and now it says so.
+            match (&reading.named, game_matches(name, &cfg.game.name)) {
+                (Some(c), _) => health.event_named(at_ms, "title", name.to_string(), c),
+                (None, true) => {
+                    health.event_named(at_ms, "title", name.to_string(), &cfg.game.name)
+                }
+                (None, false) => health.event(at_ms, "title", name.to_string()),
+            }
             *pane_game = Some(name.to_string());
         }
     }
-    let reading = fp.read(title, category, board_read);
     let verdict = id.verdict(&reading);
     // What the pass actually saw, once per distinct shape rather than once
     // a minute. Without this the only thing the log ever showed was the
