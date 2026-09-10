@@ -41,7 +41,22 @@ cargo test --release 2>&1 | grep -E 'test result|FAILED|panicked' | head -5
 cargo test --release >/dev/null 2>&1 || { echo "tests failed; not rolling out" >&2; exit 1; }
 # Smoke replay: the most recent VOD session in the live database unless given.
 if [ -z "$smoke_vod" ]; then
-  smoke_vod=$(sqlite3 ninja-gaiden.db "select label from sessions where source='vod' order by started_at_ms desc limit 1" | grep -oE '[0-9]+' || true)
+  # The newest VOD session that actually holds runs OF THE TRACKED GAME.
+  #
+  # "The newest vod session" was enough until practice days started being
+  # backfilled: the first import of one put a Big 20 broadcast at the top of
+  # that list, the smoke replay pointed at 40 minutes into a Monster Party
+  # block, the Ninja Gaiden crop read 0% of frames and a perfectly good
+  # build was refused. The gate asks whether the binary reads THIS GAME's
+  # timer, so it has to be shown this game.
+  smoke_vod=$(sqlite3 ninja-gaiden.db "
+    select s.label from sessions s
+     where s.source='vod'
+       and exists (select 1 from runs r
+                    where r.session_id = s.id
+                      and r.game = (select game from runs
+                                     group by game order by count(*) desc limit 1))
+     order by s.started_at_ms desc limit 1" | grep -oE '[0-9]+' || true)
 fi
 if [ -n "$smoke_vod" ]; then
   # Two minutes: a fresh process spends its first frames finding the layout,
