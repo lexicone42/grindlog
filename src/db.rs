@@ -311,6 +311,27 @@ impl SessionHealth {
                 .push(serde_json::json!({"t": at_ms, "k": kind, "d": detail.into()}));
         }
     }
+
+    /// An event that also knows the canonical name of what it read.
+    ///
+    /// `d` stays the RAW reading, because that is the diagnostic record —
+    /// the identity report counts spellings, and one session producing
+    /// fifty-one of them is the thing worth seeing. `c` is what to show a
+    /// person. Only a `title` event carries it, and only when the tracker
+    /// managed to place the board.
+    pub fn event_named(
+        &mut self,
+        at_ms: i64,
+        kind: &str,
+        detail: impl Into<String>,
+        canonical: &str,
+    ) {
+        if self.events.len() < 400 {
+            self.events.push(
+                serde_json::json!({"t": at_ms, "k": kind, "d": detail.into(), "c": canonical}),
+            );
+        }
+    }
 }
 
 pub async fn update_session_health(pool: &SqlitePool, id: i64, h: &SessionHealth) -> Result<()> {
@@ -903,12 +924,34 @@ pub async fn now_playing(pool: &SqlitePool) -> Result<NowPlaying> {
     for r in &rows {
         let events: Vec<serde_json::Value> =
             serde_json::from_str(&r.get::<String, _>("events")).unwrap_or_default();
-        if let Some(e) = events.iter().rev().find(|e| e["k"] == "title") {
+        let titles: Vec<&serde_json::Value> =
+            events.iter().rev().filter(|e| e["k"] == "title").collect();
+        if let Some(last) = titles.first() {
+            // WHEN comes from the newest title event; WHAT comes from the
+            // newest one the tracker managed to name.
+            //
+            // Not the same event, and that is the point. One board is read
+            // many ways and only some of them place: Steel Legion arrived as
+            // "Steel Leg:on", "Stee! Leg:on", "Steel Le" and "Any% All
+            // osses" within a minute, and the roster folds the first and
+            // third and not the others. Taking the name off the newest event
+            // alone is a coin flip, and it came up "Stee! Leg:on" on the
+            // page while the tracker was recording runs under Steel Legion.
+            //
+            // Walking back is bounded to this session and stops at the first
+            // name found, so a board change replaces it as soon as ONE
+            // reading of the new board places. What it can be wrong about is
+            // a nameable board followed by an unnameable one, where it keeps
+            // saying the old name — a stale label on a panel. The runs
+            // themselves never inherit it: `ForeignRun` is cleared on a pass
+            // that names nothing, precisely so a stale name cannot become a
+            // wrong row.
+            let named = titles.iter().find_map(|e| e["c"].as_str());
             return Ok(NowPlaying {
                 live,
-                game: e["d"].as_str().map(str::to_string),
+                game: named.or(last["d"].as_str()).map(str::to_string),
                 category: None,
-                at_ms: e["t"].as_i64(),
+                at_ms: last["t"].as_i64(),
             });
         }
     }
@@ -1344,5 +1387,63 @@ mod tests {
         assert_eq!(s[0].best_ms, Some(300_000));
         assert_eq!(s[1].game, "zelda");
         assert_eq!(s[1].best_ms, None);
+    }
+
+    /// The live panel names the board from the newest reading the tracker
+    /// managed to PLACE, not from the newest reading.
+    ///
+    /// These are the eight readings session #194 actually recorded of one
+    /// Steel Legion board inside a minute. The roster folds some and not
+    /// others, and which one lands last is a coin flip — it came up "Stee!
+    /// Leg:on" on the public page while the tracker was recording runs
+    /// under Steel Legion the whole time.
+    #[tokio::test]
+    async fn the_live_panel_names_a_board_from_its_best_reading() {
+        let (_dir, pool) = test_pool().await;
+        let sid = open_session(&pool, 1000, "hls", "arcus", None, None)
+            .await
+            .unwrap();
+        let mut h = SessionHealth::default();
+        for (t, raw, canonical) in [
+            (10, "Steel Leg:on", Some("Steel Legion")),
+            (20, "Stee! Leg:on", None),
+            (30, "Steel Le", Some("Steel Legion")),
+            (40, "Any% All osses", None),
+            (50, "Stee! Leg:on", None),
+        ] {
+            match canonical {
+                Some(c) => h.event_named(t, "title", raw.to_string(), c),
+                None => h.event(t, "title", raw.to_string()),
+            }
+        }
+        update_session_health(&pool, sid, &h).await.unwrap();
+
+        let now = now_playing(&pool).await.unwrap();
+        assert_eq!(now.game.as_deref(), Some("Steel Legion"));
+        assert_eq!(now.at_ms, Some(50), "seen just now, named from earlier");
+        assert!(now.live, "an open hls session is a live broadcast");
+
+        // One reading of a new board is enough to replace it: the walk back
+        // stops at the first name it finds.
+        h.event_named(60, "title", "Excitebi<e".to_string(), "Excitebike");
+        h.event(70, "title", "Excitebi<e".to_string());
+        update_session_health(&pool, sid, &h).await.unwrap();
+        let now = now_playing(&pool).await.unwrap();
+        assert_eq!(now.game.as_deref(), Some("Excitebike"));
+        assert_eq!(now.at_ms, Some(70));
+
+        // A board nothing ever placed keeps its raw reading rather than
+        // inventing one — an honest damaged name beats a confident wrong.
+        let (_dir2, pool2) = test_pool().await;
+        let sid2 = open_session(&pool2, 1000, "hls", "arcus", None, None)
+            .await
+            .unwrap();
+        let mut h2 = SessionHealth::default();
+        h2.event(10, "title", "Some Homebrew".to_string());
+        update_session_health(&pool2, sid2, &h2).await.unwrap();
+        assert_eq!(
+            now_playing(&pool2).await.unwrap().game.as_deref(),
+            Some("Some Homebrew")
+        );
     }
 }
