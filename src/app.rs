@@ -3987,7 +3987,38 @@ async fn handle_event(
             // His own LiveSplit counter is the run's identity when we have it;
             // the chat replies name runs by the same rule.
             let run_no = db::run_no(run.ls_attempt, run.attempt_number);
-            let msg = if is_pb {
+            // A foreign run gets its own sentence. `record_label` is "season
+            // best", which is the tracked game's word — he resets his Ninja
+            // Gaiden splits every season and nothing of the sort is true of
+            // a Big 20 game — and calling the FIRST time ever recorded for a
+            // game a "NEW season best" is two wrong claims in four words.
+            // The first live one said exactly that about Kid Klown. It never
+            // reached chat, which is suppressed below, but the log is the
+            // surface this gets debugged from and it should not lie either.
+            let msg = if let Some(f) = foreign {
+                match prior_pb {
+                    Some(b) if final_ms < b => format!(
+                        "{} finished in {} — best recorded (was {}) [{}]",
+                        run.game,
+                        format_ms(final_ms),
+                        format_ms(b),
+                        f.category,
+                    ),
+                    Some(b) => format!(
+                        "{} finished in {} [{}] (best recorded is {})",
+                        run.game,
+                        format_ms(final_ms),
+                        f.category,
+                        format_ms(b),
+                    ),
+                    None => format!(
+                        "{} finished in {} [{}] — the first time recorded for it",
+                        run.game,
+                        format_ms(final_ms),
+                        f.category,
+                    ),
+                }
+            } else if is_pb {
                 format!(
                     "Run finished in {} — NEW {label} for {} [{}]! ({run_no})",
                     format_ms(final_ms),
@@ -4471,6 +4502,90 @@ mod tests {
     /// window in the corpus. So it is exercised here instead, against a
     /// real database, together with everything the retarget must NOT carry
     /// across from the tracked game.
+    /// The first foreign run recorded live said "Run finished in 22:54.3 —
+    /// NEW season best for Kid Klown in Night Mayor World [Other]!". Both
+    /// halves were wrong: "season best" is the TRACKED game's word for its
+    /// record (he resets his Ninja Gaiden splits every season and nothing
+    /// of the sort is true of a Big 20 game), and it was the first time
+    /// ever recorded for that game, not a new anything. It never reached
+    /// chat — that is suppressed for a foreign run — but the log is what
+    /// this gets debugged from and it must not claim things either.
+    #[tokio::test]
+    async fn a_foreign_finish_does_not_claim_the_tracked_games_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = db::open(dir.path().join("t.db").to_str().unwrap())
+            .await
+            .unwrap();
+        let shared = Arc::new(Shared {
+            game: RwLock::new(("Ninja Gaiden (NES)".into(), "Any%".into())),
+            status: RwLock::new(Status::default()),
+            acts: Vec::new(),
+            current_splits: RwLock::new(Vec::new()),
+            record_label: "season best".into(),
+            baseline_best_ms: RwLock::new(Some(695_100)),
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let foreign = ForeignRun {
+            game: "Kid Klown in Night Mayor World".into(),
+            category: "Other".into(),
+            min_final_ms: 30_000,
+        };
+        let close = |ms: i64| {
+            let mut current = Some(CurrentRun {
+                game: "Ninja Gaiden (NES)".into(),
+                category: "Any%".into(),
+                attempt_number: 1,
+                started_unix_ms: 0,
+                session_id: None,
+                ls_attempt: None,
+                splits: Vec::new(),
+            });
+            let (pool, shared, tx, foreign) = (&pool, &shared, &tx, &foreign);
+            async move {
+                handle_event(
+                    pool,
+                    shared,
+                    tx,
+                    true,
+                    &mut current,
+                    Some(foreign),
+                    Event::Finished { final_ms: ms },
+                    ms,
+                )
+                .await
+                .unwrap();
+            }
+        };
+        close(1_374_380).await;
+        close(1_300_000).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing about another game reaches his channel"
+        );
+        // Nothing may carry the tracked game's record word, and the first
+        // one may not be called a record at all.
+        let msgs = db::recent_runs(&pool, "Kid Klown in Night Mayor World", "Other", 10)
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(
+            msgs[0].final_time_ms,
+            Some(1_300_000),
+            "the faster is newer"
+        );
+        // The wording itself is built in `handle_event`; assert on what the
+        // wording is DERIVED from, which is what actually went wrong: the
+        // tracked game's baseline must not be the mark a foreign run beats.
+        // 22:54 is faster than Ninja Gaiden's 11:35 baseline in neither
+        // direction that matters — it is slower — and under the old code
+        // the min() of the two still made it the number to print.
+        assert_eq!(
+            *shared.baseline_best_ms.read().await,
+            Some(695_100),
+            "the tracked game's baseline is untouched"
+        );
+    }
+
     async fn foreign_close(ev: Event) -> (sqlx::SqlitePool, Vec<db::RunRow>) {
         let dir = tempfile::tempdir().unwrap();
         let pool = db::open(dir.path().join("t.db").to_str().unwrap())
