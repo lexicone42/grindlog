@@ -33,6 +33,16 @@
 name = "#23"
 url = "https://thebig20nes.com/race-23/"
 date = "2026-10-10"
+# What a run of one of these twenty is FILED under when the tracker records
+# it (`follow_title = "track"`). It names the race rather than the game's own
+# goal: the pane says which game it is timing and never which category of it,
+# and what these runs have in common is the race they are practice for.
+#
+# It lives here rather than in `game.other_category` because the config has
+# one value for every board the deployment will ever see, and a Big 20
+# practice run and an Arcathlon game he is grinding on his own are not the
+# same thing. An event without this falls back to the config's value.
+category = "Big 20 #23"
 games = [
   "Die Hard",
   "Pac-Mania",

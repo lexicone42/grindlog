@@ -216,7 +216,15 @@ the safe answer and it is also a lossy one: he spends whole broadcasts on
 the twenty games of a Big 20 race, and none of it is recorded. `"track"` is
 `"log"` plus one thing — a board the gate has convicted **and whose header
 names a game on a shipped roster** has its runs recorded, under that game
-and `game.other_category` (default `"Other"`).
+and the category the roster that named it gives.
+
+That category comes from the **event**, not the config: `assets/big20-roster.toml`
+carries `category = "Big 20 #23"`, so the twenty games of the race he is
+practising for are filed under the race. `game.other_category` (default
+`"Other"`) is the fallback for a rostered game whose event names none — an
+Arcathlon game he grinds on his own, which is not practice for the race and
+should not share a pile with it. One config value could not tell those apart,
+which is the whole reason it moved.
 
 The narrowness is the safety argument. A suspension with no *name* — a
 header nobody can place, a category that merely disagrees — still records
