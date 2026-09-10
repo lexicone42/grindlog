@@ -115,9 +115,29 @@ sqlite3 -bail "$LIVE" <<SQL
   PRAGMA busy_timeout = 20000;
   BEGIN IMMEDIATE;
   ATTACH '$f' AS s;
-  DELETE FROM splits WHERE run_id IN (SELECT id FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days));
-  DELETE FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days);
-  DELETE FROM sessions WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days);
+  -- Replace this pass of the day, not the whole day.
+  --
+  -- These three deletes were keyed on the local date alone, and the pass
+  -- that follows only restores the games THIS per-VOD database holds. Since
+  -- marathon runs were imported that is no longer everything: 30 days carry
+  -- both a Ninja Gaiden grind and a ten-game Arcathlon FROM THE SAME
+  -- BROADCAST, so replacing a day here deletes ten games that no Ninja
+  -- Gaiden pass can put back. The mirror case is documented — it is why
+  -- import-arcathlon.sh exists and says "this is NOT import-vod.sh" — but
+  -- nobody wrote down that the ordinary direction is destructive too, and
+  -- the thinner-pass gate does not catch it: on 2026-08-24 the marathon
+  -- rows pad the day enough that the gate PASSES and ten games go.
+  --
+  -- So: only the (game, category) pairs this VOD's pass actually restores.
+  DELETE FROM splits WHERE run_id IN (
+    SELECT id FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days)
+      AND (game, category) IN (SELECT DISTINCT game, category FROM s.runs));
+  DELETE FROM runs WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days)
+    AND (game, category) IN (SELECT DISTINCT game, category FROM s.runs);
+  -- A session only goes if nothing of it survived the delete above; a
+  -- marathon session shares the day and must keep its rows.
+  DELETE FROM sessions WHERE date(started_at_ms/1000,'unixepoch','localtime') IN ($days)
+    AND id NOT IN (SELECT session_id FROM runs WHERE session_id IS NOT NULL);
   INSERT INTO sessions (started_at_ms, ended_at_ms, source, label, tag, frames, parsed, probing, relocks, counter_reads, events, vod_id, vod_created_at_ms)
     SELECT started_at_ms, ended_at_ms, source, label, tag, $hc FROM s.sessions ORDER BY id;
   -- Sessions/runs are matched back by start time (unique within one VOD).
@@ -139,16 +159,35 @@ sqlite3 -bail "$LIVE" <<SQL
   -- column's reading for that row (a misread comparison value), which made
   -- an impossible gold; normalise every finished run's last row to its
   -- finish time, and drop last-row splits on runs that never finished.
+  -- Scoped three ways, and it was scoped none of them:
+  --   * MAX(act_index) PER RUN, not over the whole splits table. A run that
+  --     recorded fewer acts had a middle row treated as its last.
+  --   * only runs of the DAYS being replaced. Without that this rewrote
+  --     every finished run in the database, including live-captured rows
+  --     from months later: six runs still carry a final segment equal to
+  --     the whole run because a July import reached a September row.
+  --   * segment_ms stays NULL when the previous act is unknown. The
+  --     producer (db::insert_splits) writes NULL there ON PURPOSE so an
+  --     unknown segment is absent rather than wrong; COALESCE(...,0) turned
+  --     that deliberate NULL into "the segment is the entire run".
   UPDATE splits SET
     cumulative_ms = (SELECT r.final_time_ms FROM runs r WHERE r.id = splits.run_id),
-    segment_ms = (SELECT r.final_time_ms FROM runs r WHERE r.id = splits.run_id)
-               - COALESCE((SELECT p.cumulative_ms FROM splits p WHERE p.run_id = splits.run_id
-                           AND p.act_index = (SELECT MAX(act_index) FROM splits) - 1), 0)
-  WHERE act_index = (SELECT MAX(act_index) FROM splits)
-    AND run_id IN (SELECT id FROM runs WHERE outcome = 'finished' AND final_time_ms IS NOT NULL);
+    segment_ms = CASE
+      WHEN (SELECT p.cumulative_ms FROM splits p WHERE p.run_id = splits.run_id
+             AND p.act_index = (SELECT MAX(x.act_index) FROM splits x WHERE x.run_id = splits.run_id) - 1) IS NULL
+      THEN NULL
+      ELSE (SELECT r.final_time_ms FROM runs r WHERE r.id = splits.run_id)
+         - (SELECT p.cumulative_ms FROM splits p WHERE p.run_id = splits.run_id
+             AND p.act_index = (SELECT MAX(x.act_index) FROM splits x WHERE x.run_id = splits.run_id) - 1)
+    END
+  WHERE act_index = (SELECT MAX(x.act_index) FROM splits x WHERE x.run_id = splits.run_id)
+    AND run_id IN (SELECT id FROM runs WHERE outcome = 'finished' AND final_time_ms IS NOT NULL
+                     AND date(started_at_ms/1000,'unixepoch','localtime') IN ($days));
   DELETE FROM splits WHERE id IN (
     SELECT s.id FROM splits s JOIN runs r ON r.id = s.run_id
-    WHERE s.act_index = (SELECT MAX(act_index) FROM splits) AND r.outcome != 'finished');
+    WHERE s.act_index = (SELECT MAX(x.act_index) FROM splits x WHERE x.run_id = s.run_id)
+      AND r.outcome != 'finished'
+      AND date(r.started_at_ms/1000,'unixepoch','localtime') IN ($days));
   -- chronological attempt numbers across the whole db
   UPDATE runs SET attempt_number = (
     SELECT COUNT(*) FROM runs r2 WHERE r2.game = runs.game AND r2.category = runs.category

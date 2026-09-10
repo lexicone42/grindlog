@@ -171,6 +171,17 @@ impl Rosters {
     }
 
     /// Is there anything here to canonicalise against?
+    /// The canonical name for one damaged reading, matched across this
+    /// file's pool with the sequel number kept strict. `None` when nothing
+    /// fits.
+    ///
+    /// The same fold the tracker uses on a board row, exposed for a single
+    /// name — the pane's header is read as "Kiown in Night Mayor World" and
+    /// anything showing it to a person should say Kid Klown.
+    pub fn canonical(&self, read: &str) -> Option<&str> {
+        self.assign(None, &[Some(read)]).first().copied().flatten()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.pool.is_empty()
     }
@@ -544,6 +555,32 @@ fn roman(t: &str) -> Option<u32> {
         "viii" => Some(8),
         _ => None,
     }
+}
+
+/// Every roster this build ships, in one place.
+///
+/// There are two files and they must stay separate — `identify` assumes a
+/// game belongs to exactly one event in a file, and Mega Man 6 is in both
+/// Arcathlon #9 and the Big 20 race. But anything asking "what game is
+/// this reading?" has to consult both, and getting that wrong is silent:
+/// the site published "Kiown in Night Mayor World" for an afternoon
+/// because it canonicalised against the Arcathlon file alone, where Kid
+/// Klown does not appear.
+pub fn bundled_all() -> Vec<Rosters> {
+    [
+        include_str!("../assets/arcathlon-rosters.toml"),
+        include_str!("../assets/big20-roster.toml"),
+    ]
+    .iter()
+    .filter_map(|t| Rosters::parse(t).ok())
+    .collect()
+}
+
+/// The canonical name for a damaged reading, across every shipped roster.
+pub fn canonical_any(read: &str) -> Option<String> {
+    bundled_all()
+        .iter()
+        .find_map(|r| r.canonical(read).map(str::to_string))
 }
 
 #[cfg(test)]

@@ -28,7 +28,25 @@ trap 'exit 0' EXIT
 start=$(date -d "$day 00:00" +%s)
 end=$(date -d "$(date -d "$day + 1 day" +%F) 00:00" +%s)
 s_ms=$((start * 1000)) e_ms=$((end * 1000))
-in_day="started_at_ms >= $s_ms AND started_at_ms < $e_ms"
+# The tracked game, taken from live.toml the same way `channel` is below.
+# WITHOUT THIS the day filter matches every game in the database, and since
+# marathon runs were imported that is 90 of them on 37 shared days. The
+# summary then counted another game's runs as attempts and, worse, took the
+# day's fastest finish from whichever game was quickest: on 2026-08-27 that
+# is King Kong 2 at 3:47, which beats Ninja Gaiden's 11:35.1 season best and
+# is faster than the world record the config itself cites. Line 173 pipes
+# the headline through notify.sh, so with NG_ALERT_URL set that fabricated
+# record is what reaches the owner's phone.
+game=$(grep -E '^[[:space:]]*name[[:space:]]*=' live.toml 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)".*/\1/')
+category=$(grep -E '^[[:space:]]*category[[:space:]]*=' live.toml 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)".*/\1/')
+if [ -z "$game" ] || [ -z "$category" ]; then
+  echo "daily-summary: could not read [game] name/category from live.toml; refusing to" >&2
+  echo "  summarise every game at once (that is how a marathon time becomes a season best)" >&2
+  exit 1
+fi
+esc() { printf '%s' "$1" | sed "s/'/''/g"; }
+of_game="game = '$(esc "$game")' AND category = '$(esc "$category")'"
+in_day="$of_game AND started_at_ms >= $s_ms AND started_at_ms < $e_ms"
 
 q() { sqlite3 -readonly -cmd '.timeout 5000' "$DB" "$1" 2>/dev/null; }
 fmt() { # ms -> M:SS.t like the log and LiveSplit (H:MM:SS.t past an hour)
