@@ -4586,7 +4586,13 @@ mod tests {
         );
     }
 
-    async fn foreign_close(ev: Event) -> (sqlx::SqlitePool, Vec<db::RunRow>) {
+    /// The `TempDir` comes back with the pool and MUST be held by the
+    /// caller: dropping it deletes the directory the database lives in, and
+    /// a later query on that pool then fails with "unable to open database
+    /// file". Locally it passed anyway — an already-open inode survives its
+    /// directory — and CI failed on the first run. `db::tests::test_pool`
+    /// returns the guard for the same reason.
+    async fn foreign_close(ev: Event) -> (tempfile::TempDir, sqlx::SqlitePool, Vec<db::RunRow>) {
         let dir = tempfile::tempdir().unwrap();
         let pool = db::open(dir.path().join("t.db").to_str().unwrap())
             .await
@@ -4642,12 +4648,12 @@ mod tests {
         let rows = db::recent_runs(&pool, "Die Hard", "Other", 10)
             .await
             .unwrap();
-        (pool, rows)
+        (dir, pool, rows)
     }
 
     #[tokio::test]
     async fn a_foreign_finish_keeps_nothing_of_the_tracked_game() {
-        let (pool, rows) = foreign_close(Event::Finished { final_ms: 200_000 }).await;
+        let (_dir, pool, rows) = foreign_close(Event::Finished { final_ms: 200_000 }).await;
         assert_eq!(rows.len(), 1);
         let r = &rows[0];
         assert_eq!(r.game, "Die Hard");
@@ -4670,7 +4676,7 @@ mod tests {
     /// minute game. Same retarget, plus the reclassification.
     #[tokio::test]
     async fn a_short_foreign_run_that_froze_is_a_finish_not_a_death() {
-        let (_pool, rows) = foreign_close(Event::Reset {
+        let (_dir, _pool, rows) = foreign_close(Event::Reset {
             last_ms: 142_250,
             reason: crate::state::ResetReason::TooShort,
         })
@@ -4686,7 +4692,7 @@ mod tests {
     /// on any board. Thirty seconds is not a Big 20 run either.
     #[tokio::test]
     async fn a_foreign_run_under_its_own_floor_is_still_a_death() {
-        let (_pool, rows) = foreign_close(Event::Reset {
+        let (_dir, _pool, rows) = foreign_close(Event::Reset {
             last_ms: 12_000,
             reason: crate::state::ResetReason::TooShort,
         })
