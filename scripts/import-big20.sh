@@ -65,11 +65,6 @@ MINE="NOT (game = '$G' AND category = '$C')"
 # will ever delete. See the note on the DELETE below for why "a session that
 # holds no run of the tracked game" is not good enough.
 TAG=${BIG20_TAG:-big20-import}
-# How close two runs of the same game must start to be the same attempt.
-# Both the live capture and a replay back-date a start from the timer value
-# at the run's first frame, so the same attempt agrees to within a frame or
-# two; a different attempt of the same game is minutes away.
-DUP_MS=${BIG20_DUP_MS:-10000}
 
 echo "tracking $tracked_game [$tracked_cat]; everything else in a pass is practice"
 
@@ -162,11 +157,17 @@ for id in "${ids[@]}"; do
         -- morning is missing. A replay finds the whole day, and without this
         -- the afternoon would land a second time.
         --
-        -- Matched on the game and the start, within \$DUP_MS. Both passes
-        -- back-date a run's start from the timer value at its first frame,
-        -- so the same attempt gets the same start to within a frame or two
-        -- whichever pass saw it; a different attempt of the same game is
-        -- minutes away, never seconds.
+        -- Matched by OVERLAP, not by how close the starts are. Two attempts
+        -- of the same game cannot overlap in time; the same attempt seen
+        -- twice must. That is the whole rule, and it needs no tolerance.
+        --
+        -- A start-time epsilon was the first version and it let a duplicate
+        -- through on the first day it was used: the live capture JOINED a
+        -- Kid Klown run mid-way after a restart and back-dated its start
+        -- from a reading 12:46 into the run, so its start sat 10 s from the
+        -- replay's — just outside a 10 s window, for two rows with the same
+        -- 1374.38 final time. Back-dating is only as good as the reading it
+        -- starts from; the interval is not.
         --
         -- Additive, like everything else here: what is already recorded
         -- wins and nothing is deleted to make room. That does mean a day
@@ -177,7 +178,8 @@ for id in "${ids[@]}"; do
         AND NOT EXISTS (
           SELECT 1 FROM runs e
            WHERE e.game = r.game
-             AND ABS(e.started_at_ms - r.started_at_ms) <= $DUP_MS)
+             AND e.started_at_ms < r.ended_at_ms
+             AND e.ended_at_ms > r.started_at_ms)
       ORDER BY r.started_at_ms;
     DROP TABLE target;
     COMMIT;
