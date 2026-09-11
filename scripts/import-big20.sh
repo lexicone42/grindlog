@@ -182,6 +182,19 @@ for id in "${ids[@]}"; do
              AND e.ended_at_ms > r.started_at_ms)
       ORDER BY r.started_at_ms;
     DROP TABLE target;
+    -- Renumber every (game, category) this batch touched, from scratch and
+    -- in time order. The INSERT above numbers a row by counting what the
+    -- table held BEFORE the batch, so twelve Die Hard attempts from one VOD
+    -- all landed as attempt 1 — and importing a morning ALSO shifts the
+    -- numbers of the live-captured afternoon after it. Ordinals per game by
+    -- start time is the definition; this makes them true again for the
+    -- games involved and touches nothing else.
+    UPDATE runs SET attempt_number = (
+        SELECT COUNT(*) FROM runs x
+         WHERE x.game = runs.game AND x.category = runs.category
+           AND (x.started_at_ms < runs.started_at_ms
+                OR (x.started_at_ms = runs.started_at_ms AND x.id < runs.id))) + 1
+     WHERE (game, category) IN (SELECT DISTINCT game, category FROM src.runs WHERE );
     COMMIT;
     DETACH DATABASE src;"
 
