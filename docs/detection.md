@@ -254,18 +254,19 @@ Three details it must get right, each of which was a bug first:
   minute, so a target chosen at the start belongs to whatever was on screen
   up to a minute earlier — which on a twenty-game day files an attempt of
   the next game under the last one. Closing late can lose a run to a late
-  switch; it cannot misfile one. The other way a run is lost is a pass that
-  convicts without naming: the target is dropped, so a run closing on that
-  pass stays the tracked game's and is not recorded. Live on 2026-09-10 one
-  reading in five was that shape (`convicting: header, category against
-  [uble the revenge]` — the crop cut "Do" off the title and the roster
-  could not place what was left), though on the Die Hard window all ten
-  attempts still landed. **This is the first thing to measure once `track`
-  is on**, and the first thing to look at if runs go missing. Carrying the
-  last name forward through an unnamed pass would close most of that gap
-  and would also let a stale name file the *next* game's runs when the next
-  game is on no roster — which is the unrecoverable defect, so losing the
-  run is the right side to err on until there is data. (The same shape the
+  switch; it cannot misfile one. A pass that convicts
+  without naming — one reading in five on a damaged header, `convicting:
+  header, category against [uble the revenge]` — drops the *pane's* target,
+  and a run closing on such a pass has no current target to take. It was
+  going to be filed as the tracked game: a run begins as `Shared.game` and
+  the target is only applied at the close. It never was, because the next
+  pass usually re-named the board inside the 90 s illegible window —
+  "usually" is not a rule, and this was found by reading the code rather
+  than by a wrong row. So the run *carries* its target (`CurrentRun::foreign`),
+  set at its start and refreshed on every pass that names a board, and a
+  close with no current target uses that. The pane's current target still
+  wins when there is one, so a board change is followed; a stale carried
+  name can only ever apply to a run that once had it. (The same shape the
   marathon tracker uses:
   `Shared.game` is which game this *deployment* is, and about thirteen
   things are calibrated against it at startup, so it is not something a

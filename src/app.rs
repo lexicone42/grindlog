@@ -96,6 +96,20 @@ struct CurrentRun {
     session_id: Option<i64>,
     ls_attempt: Option<i64>,
     splits: Vec<crate::splits::RecordedSplit>,
+    /// The target this run has had: set when it starts under one, refreshed on
+    /// every frame the pane names a board while it is under way.
+    ///
+    /// A run BEGINS as the tracked game whatever the board says (`game` above
+    /// is `Shared.game`; the target is applied when it closes), and a target
+    /// is dropped by any pane pass that convicts without naming — one reading
+    /// in five on a damaged header. Without this, a run that started as Die
+    /// Hard, lost its target to one such pass and was then closed by the
+    /// illegible timeout would have been filed as a Ninja Gaiden reset. It
+    /// never was, because the next pass usually re-named the board inside
+    /// the 90 s window; "usually" is not a rule, and it was found by reading
+    /// the code, not by a wrong row. The close uses the pane's current target
+    /// when there is one and this otherwise.
+    foreign: Option<ForeignRun>,
 }
 
 /// The ffmpeg-side crop and the sub-rectangles inside it. ffmpeg always
@@ -2360,9 +2374,10 @@ pub async fn run(cfg: Config) -> Result<()> {
                         &announce_tx,
                         announce,
                         &mut current,
-                        // The stream ended: whatever board was up is gone,
-                        // and a run closed by its absence belongs to the
-                        // deployment, not to a game we can no longer see.
+                        // The stream ended: whatever board was up is gone. No
+                        // current target, so the close uses the one the run has
+                        // carried — a Die Hard attempt cut off by the stream
+                        // ending is a Die Hard reset, not a Ninja Gaiden one.
                         None,
                         ev,
                         wall_now,
@@ -3746,6 +3761,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
             }
         }
+        // Carry the target on the run. A pane pass that cannot name the board
+        // drops `foreign_target`; the run keeps what it had, and a close with no
+        // current target files under that rather than under the tracked game.
+        // See `CurrentRun::foreign`.
+        if let (Some(cr), Some(f)) = (current.as_mut(), foreign_target.as_ref()) {
+            if cr.foreign.as_ref().is_none_or(|c| c.game != f.game) {
+                cr.foreign = Some(f.clone());
+            }
+        }
         for ev in events {
             // Splits tracker follows the run lifecycle: fresh baseline per
             // run, dropped when the run ends.
@@ -3899,6 +3923,31 @@ fn impossible_time(value_ms: i64, started_unix_ms: i64, now: i64) -> Option<i64>
     (over > IMPOSSIBLE_OVERSHOOT_MS).then_some(over)
 }
 
+/// The log line for a finish of another game. Not the tracked game's
+/// "NEW season best": that label, the milestones and the season are Ninja
+/// Gaiden's, and the first time ever recorded for a game is not a record of
+/// anything. Shared by the two paths a foreign finish arrives on — the
+/// finish event, and the reset the state machine calls a frozen timer under
+/// the tracked game's floor — which had drifted apart in wording.
+fn foreign_finish_line(game: &str, category: &str, final_ms: i64, prior: Option<i64>) -> String {
+    match prior {
+        Some(b) if final_ms < b => format!(
+            "{game} finished in {} — best recorded (was {}) [{category}]",
+            format_ms(final_ms),
+            format_ms(b)
+        ),
+        Some(b) => format!(
+            "{game} finished in {} [{category}] (best recorded is {})",
+            format_ms(final_ms),
+            format_ms(b)
+        ),
+        None => format!(
+            "{game} finished in {} [{category}] — the first time recorded for it",
+            format_ms(final_ms)
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_event(
     pool: &sqlx::SqlitePool,
@@ -3950,6 +3999,7 @@ async fn handle_event(
                 session_id: None, // patched in by the frame loop
                 ls_attempt: None,
                 splits: Vec::new(),
+                foreign: foreign.cloned(),
             });
         }
         Event::Finished { final_ms } => {
@@ -3957,6 +4007,9 @@ async fn handle_event(
                 warn!("finish event with no run in progress; ignoring");
                 return Ok(());
             };
+            // The pane's current target, else the one the run has carried.
+            let target = foreign.cloned().or_else(|| run.foreign.clone());
+            let target = target.as_ref();
             // A finish is the value that gets published as a record, so it is
             // the one place an inflated clock does lasting damage. On
             // 2026-09-10 a Monster Party run that lasted 22:37 was recorded
@@ -3968,7 +4021,7 @@ async fn handle_event(
             // Named as it will be FILED, not as it started: under `track` the
             // run began as the tracked game and is retargeted below, and the
             // first refusals logged "Ninja Gaiden" for Monster Party rows.
-            let (named_game, named_cat) = foreign
+            let (named_game, named_cat) = target
                 .map(|f| (f.game.as_str(), f.category.as_str()))
                 .unwrap_or((run.game.as_str(), run.category.as_str()));
             if let Some(over) = impossible_time(final_ms, run.started_unix_ms, now) {
@@ -3995,7 +4048,7 @@ async fn handle_event(
             }
             // Same retarget as the Reset arm: game, category and attempt
             // number resolved NOW, no LiveSplit number, no splits.
-            if let Some(f) = foreign {
+            if let Some(f) = target {
                 run.game = f.game.clone();
                 run.category = f.category.clone();
                 run.ls_attempt = None;
@@ -4014,7 +4067,7 @@ async fn handle_event(
             // named anyway, because that is the guard being right by accident
             // and any edit that reorders the two would ship the bug.
             let n_acts = shared.acts.len();
-            if foreign.is_none() && n_acts > 0 && !run.splits.is_empty() {
+            if target.is_none() && n_acts > 0 && !run.splits.is_empty() {
                 run.splits.retain(|s| s.act_index != n_acts - 1);
                 run.splits.push(crate::splits::RecordedSplit {
                     act_index: n_acts - 1,
@@ -4034,7 +4087,7 @@ async fn handle_event(
             // five Die Hard finishes in replays/diehard a "new record",
             // announced in his channel. A foreign game's record is whatever
             // it has done under its own name, and nothing before that.
-            let baseline = match foreign {
+            let baseline = match target {
                 Some(_) => None,
                 None => *shared.baseline_best_ms.read().await,
             };
@@ -4085,29 +4138,8 @@ async fn handle_event(
             // The first live one said exactly that about Kid Klown. It never
             // reached chat, which is suppressed below, but the log is the
             // surface this gets debugged from and it should not lie either.
-            let msg = if let Some(f) = foreign {
-                match prior_pb {
-                    Some(b) if final_ms < b => format!(
-                        "{} finished in {} — best recorded (was {}) [{}]",
-                        run.game,
-                        format_ms(final_ms),
-                        format_ms(b),
-                        f.category,
-                    ),
-                    Some(b) => format!(
-                        "{} finished in {} [{}] (best recorded is {})",
-                        run.game,
-                        format_ms(final_ms),
-                        f.category,
-                        format_ms(b),
-                    ),
-                    None => format!(
-                        "{} finished in {} [{}] — the first time recorded for it",
-                        run.game,
-                        format_ms(final_ms),
-                        f.category,
-                    ),
-                }
+            let msg = if let Some(f) = target {
+                foreign_finish_line(&run.game, &f.category, final_ms, prior_pb)
             } else if is_pb {
                 format!(
                     "Run finished in {} — NEW {label} for {} [{}]! ({run_no})",
@@ -4132,7 +4164,7 @@ async fn handle_event(
             // true to say in his channel about a Die Hard time yet. It goes
             // in the log and the database; talking about it is a separate
             // decision from recording it.
-            if announce && foreign.is_none() {
+            if announce && target.is_none() {
                 let _ = announce_tx.send(msg);
             }
         }
@@ -4159,6 +4191,8 @@ async fn handle_event(
                 warn!("reset event with no run in progress; ignoring");
                 return Ok(());
             };
+            let target = foreign.cloned().or_else(|| run.foreign.clone());
+            let target = target.as_ref();
             // Same impossibility test as the finish, and for the same
             // reason one step down: `last_timer_ms` is how far he got, it
             // draws the death chart, and the three rows that started this
@@ -4169,7 +4203,7 @@ async fn handle_event(
             // Named as it will be FILED, not as it started: under `track` the
             // run began as the tracked game and is retargeted below, and the
             // first refusals logged "Ninja Gaiden" for Monster Party rows.
-            let (named_game, named_cat) = foreign
+            let (named_game, named_cat) = target
                 .map(|f| (f.game.as_str(), f.category.as_str()))
                 .unwrap_or((run.game.as_str(), run.category.as_str()));
             if let Some(over) = impossible_time(last_ms, run.started_unix_ms, now) {
@@ -4204,7 +4238,7 @@ async fn handle_event(
             // is written as a Ninja Gaiden death — replays/diehard holds
             // five of exactly that, and it is the default for a foreign
             // run rather than an edge case.
-            if let Some(f) = foreign {
+            if let Some(f) = target {
                 run.game = f.game.clone();
                 run.category = f.category.clone();
                 // The runner's LiveSplit counter belongs to the tracked
@@ -4218,11 +4252,12 @@ async fn handle_event(
                 run.attempt_number =
                     db::next_attempt_number(pool, &run.game, &run.category).await?;
                 if reason == crate::state::ResetReason::TooShort && last_ms >= f.min_final_ms {
+                    let prior = db::personal_best(pool, &run.game, &run.category)
+                        .await?
+                        .and_then(|r| r.final_time_ms);
                     info!(
-                        "{} finished in {} (not the tracked game; the {} floor does not apply)",
-                        run.game,
-                        format_ms(last_ms),
-                        shared.game.read().await.0,
+                        "{}",
+                        foreign_finish_line(&run.game, &f.category, last_ms, prior)
                     );
                     let run_id = db::insert_run(
                         pool,
@@ -4707,6 +4742,7 @@ mod tests {
                 attempt_number: 1,
                 started_unix_ms: 0,
                 session_id: None,
+                foreign: None,
                 ls_attempt: None,
                 splits: Vec::new(),
             });
@@ -4825,6 +4861,123 @@ mod tests {
         assert_eq!(rows[0].final_time_ms, Some(LIFETIME));
     }
 
+    /// A run that lost its target mid-run is still filed under it, the pane's
+    /// current target wins when there is one, and a run that never had one is
+    /// the tracked game's. The middle case guards against a stale carried name
+    /// following a board change.
+    #[tokio::test]
+    async fn a_run_keeps_the_target_it_had_when_the_pane_cannot_name_the_board() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = db::open(dir.path().join("t.db").to_str().unwrap())
+            .await
+            .unwrap();
+        let shared = Arc::new(Shared {
+            game: RwLock::new(("Ninja Gaiden (NES)".into(), "Any%".into())),
+            status: RwLock::new(Status::default()),
+            acts: Vec::new(),
+            current_splits: RwLock::new(Vec::new()),
+            record_label: "season best".into(),
+            baseline_best_ms: RwLock::new(None),
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let target = |game: &str| ForeignRun {
+            game: game.into(),
+            category: "Big 20 #23".into(),
+            min_final_ms: 30_000,
+        };
+        let run = |carried: Option<ForeignRun>| CurrentRun {
+            game: "Ninja Gaiden (NES)".into(),
+            category: "Any%".into(),
+            attempt_number: 1,
+            started_unix_ms: 1_000_000,
+            session_id: None,
+            ls_attempt: None,
+            splits: Vec::new(),
+            foreign: carried,
+        };
+        let reset = || Event::Reset {
+            last_ms: 90_000,
+            reason: crate::state::ResetReason::Zeroed,
+        };
+        // Started under a target records it on the run.
+        let mut current = None;
+        let die_hard = target("Die Hard");
+        handle_event(
+            &pool,
+            &shared,
+            &tx,
+            false,
+            &mut current,
+            Some(&die_hard),
+            Event::Started { timer_ms: 1_600 },
+            1_001_600,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            current
+                .as_ref()
+                .and_then(|c| c.foreign.as_ref())
+                .map(|f| f.game.as_str()),
+            Some("Die Hard")
+        );
+        // Target cleared by an unnamed pass, run closed with none: the carried one.
+        let mut current = Some(run(Some(target("Die Hard"))));
+        handle_event(
+            &pool,
+            &shared,
+            &tx,
+            false,
+            &mut current,
+            None,
+            reset(),
+            1_090_000,
+        )
+        .await
+        .unwrap();
+        // The pane names a different board by the close: that wins.
+        let mut current = Some(run(Some(target("Die Hard"))));
+        let kid = target("Kid Klown in Night Mayor World");
+        handle_event(
+            &pool,
+            &shared,
+            &tx,
+            false,
+            &mut current,
+            Some(&kid),
+            reset(),
+            1_090_000,
+        )
+        .await
+        .unwrap();
+        // Never had one: the tracked game's own.
+        let mut current = Some(run(None));
+        handle_event(
+            &pool,
+            &shared,
+            &tx,
+            false,
+            &mut current,
+            None,
+            reset(),
+            1_090_000,
+        )
+        .await
+        .unwrap();
+        let n = |g: &str, c: &str| {
+            let pool = &pool;
+            let (g, c) = (g.to_string(), c.to_string());
+            async move { db::recent_runs(pool, &g, &c, 10).await.unwrap().len() }
+        };
+        assert_eq!(n("Die Hard", "Big 20 #23").await, 1, "carried target");
+        assert_eq!(
+            n("Kid Klown in Night Mayor World", "Big 20 #23").await,
+            1,
+            "current target wins"
+        );
+        assert_eq!(n("Ninja Gaiden (NES)", "Any%").await, 1, "no target at all");
+    }
+
     async fn foreign_close(ev: Event) -> (tempfile::TempDir, sqlx::SqlitePool, Vec<db::RunRow>) {
         let dir = tempfile::tempdir().unwrap();
         let pool = db::open(dir.path().join("t.db").to_str().unwrap())
@@ -4855,6 +5008,7 @@ mod tests {
             // Both of these belong to the tracked game and neither may
             // survive the retarget: the number is his Ninja Gaiden counter,
             // and the split is an act of a game this run is not.
+            foreign: None,
             ls_attempt: Some(94_200),
             splits: vec![crate::splits::RecordedSplit {
                 act_index: 0,
