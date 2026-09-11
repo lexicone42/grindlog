@@ -3965,12 +3965,18 @@ async fn handle_event(
             // burst of desync restarts. Refuse rather than guess: a dropped
             // run can be recovered by replaying the VOD, a fabricated record
             // cannot be told from a real one afterwards.
+            // Named as it will be FILED, not as it started: under `track` the
+            // run began as the tracked game and is retargeted below, and the
+            // first refusals logged "Ninja Gaiden" for Monster Party rows.
+            let (named_game, named_cat) = foreign
+                .map(|f| (f.game.as_str(), f.category.as_str()))
+                .unwrap_or((run.game.as_str(), run.category.as_str()));
             if let Some(over) = impossible_time(final_ms, run.started_unix_ms, now) {
                 warn!(
                     "refusing a {} finish of {}: the run has only existed for {}, \
                      so the timer is {} ahead of what it can be (clock inflated; \
                      the run is dropped, not guessed at)",
-                    run.game,
+                    named_game,
                     format_ms(final_ms),
                     format_ms(now - run.started_unix_ms),
                     format_ms(over),
@@ -3980,8 +3986,8 @@ async fn handle_event(
                     now,
                     "RUNNING",
                     "DROPPED",
-                    &run.game,
-                    &run.category,
+                    named_game,
+                    named_cat,
                     &format!("final_ms={final_ms} overshoot_ms={over}"),
                 )
                 .await?;
@@ -4160,11 +4166,17 @@ async fn handle_event(
             // fabricated record, which is why this only warns about the
             // finish by name — but a death eleven minutes into a game he
             // has never survived two minutes of is still a lie.
+            // Named as it will be FILED, not as it started: under `track` the
+            // run began as the tracked game and is retargeted below, and the
+            // first refusals logged "Ninja Gaiden" for Monster Party rows.
+            let (named_game, named_cat) = foreign
+                .map(|f| (f.game.as_str(), f.category.as_str()))
+                .unwrap_or((run.game.as_str(), run.category.as_str()));
             if let Some(over) = impossible_time(last_ms, run.started_unix_ms, now) {
                 warn!(
                     "refusing a {} reset at {}: the run has only existed for {}, \
                      so the timer is {} ahead of what it can be",
-                    run.game,
+                    named_game,
                     format_ms(last_ms),
                     format_ms(now - run.started_unix_ms),
                     format_ms(over),
@@ -4174,8 +4186,8 @@ async fn handle_event(
                     now,
                     "RUNNING",
                     "DROPPED",
-                    &run.game,
-                    &run.category,
+                    named_game,
+                    named_cat,
                     &format!(
                         "last_ms={last_ms} overshoot_ms={over} reason={}",
                         reason.as_str()

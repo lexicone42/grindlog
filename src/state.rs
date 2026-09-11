@@ -223,6 +223,43 @@ fn truncated_read(expected: i64, v: i64) -> bool {
     expected > v && ((v - expected % 60_000).abs() <= 300 || (v - expected % 10_000).abs() <= 300)
 }
 
+/// A reading that is the expected value with a digit PREPENDED: "0:38"
+/// shown as "10:38", "1:04" as "11:04". The dual of [`truncated_read`].
+///
+/// This is a display artefact, not a desync, and LiveSplit really does it:
+/// on 2026-09-10 his Monster Party timer showed value+10:00 in twenty-second
+/// bursts, then dropped back — the crop for the frame after "0:37.85" reads
+/// "10:38.35" in the same font, right-aligned, one glyph wider (see
+/// docs/detection.md). Three such readings agree with each other and sit
+/// ten minutes ahead of the clock, which is exactly what the desync branch
+/// takes for a stream slip, so it re-anchored onto the phantom and every
+/// true reading afterwards looked like a restart: two resets carrying an
+/// eleven-minute "how far he got" and a 32:36 finish for a 22:37 run.
+///
+/// A prepended digit lands in the tens-of-minutes place under ten minutes
+/// and in the hours place from ten to sixty, so the offset is a whole
+/// multiple of 10:00 or 1:00:00 to within a frame. A CDN slip of exactly
+/// that, to the second, is not a thing that happens.
+fn prefixed_read(expected: i64, v: i64) -> bool {
+    let over = v - expected;
+    if over <= 0 {
+        return false;
+    }
+    let place = if expected < 600_000 {
+        600_000
+    } else {
+        3_600_000
+    };
+    let d = (over + place / 2) / place;
+    (1..=9).contains(&d) && (over - d * place).abs() <= 1_500
+}
+
+/// How long the tracker keeps skipping prefixed readings before it lets the
+/// desync logic have them after all. A burst measured twenty seconds; three
+/// minutes without a single accepted reading is no longer a burst, and at
+/// that point a value the clock really did jump to should win.
+const PREFIXED_MAX_MS: i64 = 180_000;
+
 impl Run {
     fn seed(t: i64, v: i64, cfg: &TrackerConfig) -> Self {
         let mut smoother = Smoother::new(cfg.smoothing_window);
@@ -483,6 +520,10 @@ impl Tracker {
         // "7:22" reading as "1:22" for frames on end) is OCR, not a desync;
         // it must not accumulate as evidence of one.
         if glyph_confusion(expected, v) {
+            return Phase::Running(run);
+        }
+        // Likewise a digit gained, for as long as it plausibly is one.
+        if prefixed_read(expected, v) && t - run.last_good_at < PREFIXED_MAX_MS {
             return Phase::Running(run);
         }
         // "1:56.71" with the "1:5" lost reads "6.71", the next frame "7.72":
@@ -900,6 +941,104 @@ mod tests {
                                                      // Under a minute is never a glyph confusion: 6:03 vs 0:03 is a restart.
         assert!(!glyph_confusion(363_000, 3_000));
         assert!(!glyph_confusion(483_000, 3_000)); // 8:03 vs 0:03
+    }
+
+    /// The real flips, from the frame log of 2026-09-10 (live and replay
+    /// agree frame for frame): the value gains a leading digit and loses
+    /// it again, and nothing else about it changes.
+    #[test]
+    fn a_prepended_digit_is_a_display_artefact() {
+        assert!(prefixed_read(37_850, 638_350)); // 0:37.85 -> 10:38.35 next frame
+        assert!(prefixed_read(21_370, 622_870)); // 0:21.37 -> 10:22.87
+        assert!(prefixed_read(63_370, 664_860)); // 1:03.37 -> 11:04.86
+        assert!(prefixed_read(63_370, 1_264_000)); // and a 2 would be 21:04
+                                                   // Past ten minutes the digit lands in the hours place.
+        assert!(prefixed_read(643_000, 4_243_000)); // 10:43 -> 1:10:43
+                                                    // Not the same shape: dropped digits are truncated_read, backwards
+                                                    // is never this, and a slip of some other size is a real desync.
+        assert!(!prefixed_read(638_350, 37_850));
+        assert!(!prefixed_read(37_850, 37_850));
+        assert!(!prefixed_read(37_850, 400_000)); // +6:02: not a place value
+        assert!(!prefixed_read(37_850, 637_850 + 5_000)); // 10:00 and five seconds
+    }
+
+    /// The whole episode in the state machine: a run under way, the display
+    /// gaining a digit for twenty seconds, and losing it again. Nothing
+    /// fires, and the smoothed clock never leaves the true one.
+    #[test]
+    fn a_prefixed_burst_neither_resyncs_nor_restarts() {
+        let mut s = Sim::new(cfg());
+        s.start_run(21_000);
+        let mut v = 22_000;
+        while v <= 41_000 {
+            assert_eq!(s.time(v + 600_000), vec![], "prefixed reading at {v}");
+            v += 1000;
+        }
+        let now = s.tr.smoothed_now(s.t).unwrap();
+        assert!(
+            (now - 41_000).abs() < 3_000,
+            "smoothed {now} should sit near 0:41, not 10:41"
+        );
+        // The true value is accepted straight back; no restart, no resync.
+        s.advance_quietly(42_000, 60_000);
+        assert_eq!(s.tr.phase_name(), "RUNNING");
+    }
+
+    /// But not for ever. Past PREFIXED_MAX_MS without an accepted reading the
+    /// desync logic gets them, and a value the clock really did jump to wins.
+    #[test]
+    fn a_prefix_that_never_drops_is_believed_after_the_bound() {
+        let mut s = Sim::new(cfg());
+        s.start_run(21_000);
+        let mut fired = Vec::new();
+        let mut v = 22_000;
+        while v <= 22_000 + PREFIXED_MAX_MS + 10_000 {
+            fired.extend(s.time(v + 600_000));
+            v += 1000;
+        }
+        assert!(
+            fired.iter().any(|e| matches!(e, Event::Resynced { .. })),
+            "a prefix held for three minutes is a value the clock jumped to: {fired:?}"
+        );
+    }
+
+    /// A run that STARTS while the digit is shown is anchored on the phantom,
+    /// and when the digit drops the true readings look like a restart: Reset
+    /// on the phantom, Started on the truth. That reset carries an impossible
+    /// time and app.rs refuses to write it (`impossible_time`); the new run
+    /// is right. Pinned so the residual is a known one.
+    #[test]
+    fn a_run_that_started_prefixed_restarts_when_the_digit_drops() {
+        let mut s = Sim::new(cfg());
+        let mut fired = Vec::new();
+        for v in [605_000, 606_000, 607_000, 608_000] {
+            fired.extend(s.time(v));
+        }
+        assert!(
+            matches!(fired.as_slice(), [Event::Started { .. }]),
+            "joined mid-run: {fired:?}"
+        );
+        s.advance_quietly(609_000, 620_000);
+        // The first two dropped readings are set aside as truncated reads
+        // (10:21 -> 0:21 IS a lost leading digit); the next three agree with
+        // each other and fire the restart.
+        let mut fired = Vec::new();
+        for v in (21_000..=27_000).step_by(1000) {
+            fired.extend(s.time(v));
+        }
+        assert!(
+            matches!(
+                fired.as_slice(),
+                [
+                    Event::Reset {
+                        reason: ResetReason::Desync,
+                        ..
+                    },
+                    Event::Started { .. }
+                ]
+            ),
+            "{fired:?}"
+        );
     }
 
     #[test]

@@ -49,7 +49,21 @@ the expected value with its leading digits lost (`1:56.71` read as `6.71` or
 seconds, the countdown or zero a real restart passes through, was seen in
 the last 15 s; and a reading rescued at one of the `[timer]
 retry_thresholds` fallbacks, which is trusted only within `max_jump_ms`
-(±5 s) of the running clock.
+(±5 s) of the running clock. A fourth, found on 2026-09-10: a reading that is
+the expected value with a digit *gained* in front (`0:38` shown as `10:38`,
+`1:04` as `11:04`). LiveSplit itself displayed value+10:00 in twenty-second
+bursts on his Monster Party board — the crops show it in the timer's own
+font, right-aligned, one glyph wider — and three such readings agree with
+each other ten minutes ahead of the clock, which is exactly what the desync
+branch takes for a stream slip. It re-anchored onto the phantom, every true
+reading afterwards looked like a restart, and the day produced two resets
+carrying an eleven-minute "how far he got" and a 32:36 finish for a 22:37
+run. A gained digit is now skipped like a lost one, for up to three minutes
+without an accepted reading; past that a value the clock really did jump to
+wins. Downstream of all of this, `app.rs` refuses to write any run whose
+recorded time exceeds its own wall-clock lifetime by more than 30 s: a
+run's start is back-dated by the timer, so for a healthy run those are the
+same number, and the largest honest overshoot across 3541 runs is 2.3 s.
 
 **Layouts and drift.** Streamers switch OBS scenes and nudge the LiveSplit
 window. Every `[[layouts]]` entry is a set of rectangles for one scene; the
