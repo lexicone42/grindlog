@@ -973,6 +973,11 @@ pub struct OtherRun {
     pub started_at_ms: i64,
     pub final_time_ms: Option<i64>,
     pub outcome: String,
+    /// The attempt number and how far the timer got: what a PRACTICE game's
+    /// page is about, where most rows are resets. A marathon row has a
+    /// final time and these add nothing to it.
+    pub attempt_number: i64,
+    pub last_timer_ms: Option<i64>,
     /// The session, so runs can be grouped by broadcast without exposing
     /// anything else about it.
     pub session: i64,
@@ -991,6 +996,7 @@ pub struct OtherRun {
 pub async fn other_runs(pool: &SqlitePool, game: &str, category: &str) -> Result<Vec<OtherRun>> {
     let rows = sqlx::query(
         "SELECT r.game, r.category, r.started_at_ms, r.final_time_ms, r.outcome, \
+         r.attempt_number, r.last_timer_ms, \
          r.session_id, s.tag, \
          date(r.started_at_ms/1000,'unixepoch','localtime') AS day \
          FROM runs r LEFT JOIN sessions s ON r.session_id = s.id \
@@ -1009,6 +1015,8 @@ pub async fn other_runs(pool: &SqlitePool, game: &str, category: &str) -> Result
             started_at_ms: r.get("started_at_ms"),
             final_time_ms: r.get("final_time_ms"),
             outcome: r.get("outcome"),
+            attempt_number: r.get("attempt_number"),
+            last_timer_ms: r.get("last_timer_ms"),
             session: r.get::<Option<i64>, _>("session_id").unwrap_or(0),
             tag: r.get("tag"),
             day: r.get("day"),

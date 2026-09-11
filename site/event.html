@@ -121,35 +121,63 @@ document.getElementById('title').innerHTML =
   esc(D.title) + (D.kind === 'draw' ? '<span class="badge">random draw</span>' : '');
 
 if (D.kind === 'game') {
-  // One game, every running of it, oldest last. The event column matters:
-  // a game can reach the board both on its own numbered event's schedule
-  // and again in a random draw, and those are different occasions.
+  // One game, every running of it. Two shapes share this page:
+  //   a MARATHON game: one completion per event, oldest last. The event
+  //     column matters, because a game can reach the board on its own
+  //     numbered event's schedule and again in a random draw.
+  //   a PRACTICE game: every attempt, most of them resets, newest first.
+  //     The event column is meaningless here — it would be the practice-day
+  //     card's label, "5 games" — and what matters is the attempt number
+  //     and, for a reset, how far the timer got. This is what the Big 20
+  //     pages are.
   const runs = D.runs;
+  const practice = runs.some(r => r.practice);
   const times = runs.map(r => r.final_time_ms).filter(t => t != null);
   const best = times.length ? Math.min(...times) : null;
   const played = runs.length;
-  // A marathon row is a COMPLETION, so "run 5 times" is five finishes. A
-  // practice session's rows are ATTEMPTS, most of which end in a reset, and
-  // the same phrase over forty of them would claim forty runs of the game.
-  // When any row is unfinished the two numbers are given separately.
+  const byTime = [...runs].sort((a, b) => a.started_at_ms - b.started_at_ms);
   const span = played > 1
-    ? ` · ${dshort(runs[runs.length - 1].started_at_ms)} to ${dshort(runs[0].started_at_ms)}` : '';
-  document.getElementById('sub').textContent = (times.length < played
+    ? ` · ${dshort(byTime[0].started_at_ms)} to ${dshort(byTime[byTime.length - 1].started_at_ms)}` : '';
+  // A marathon row is a COMPLETION, so "run 5 times" is five finishes. A
+  // practice game's rows are ATTEMPTS, most of which end in a reset, and
+  // the same phrase over forty of them would claim forty runs of the game.
+  const counts = times.length < played
     ? `${played} attempt${played > 1 ? 's' : ''}, ${times.length} finished`
-    : `run ${played} time${played > 1 ? 's' : ''}`) +
-    (best != null ? ` · best ${fmt(best)}` : '') + span;
-  document.getElementById('grid').innerHTML =
-    `<tr><th>Date</th><th>Event</th><th class="num">Time</th></tr>` +
-    runs.map(r => `<tr>
-      <td class="tnum">${dshort(r.started_at_ms)}</td>
-      <td>${r.href ? `<a href="${r.href}">${esc(r.event)}</a>` : esc(r.event)}</td>
-      <td class="num tnum${r.final_time_ms != null && r.final_time_ms === best ? ' best' : ''}">${
-        r.final_time_ms != null ? fmt(r.final_time_ms) : '<span class="none">—</span>'}</td>
-    </tr>`).join('');
-  document.getElementById('note').textContent = played > 1
-    ? 'The fastest running is marked. Times are the game’s own segment of the marathon, as its board recorded it.'
-    : 'Run once so far. The time is the game’s own segment of the marathon, as its board recorded it.';
+    : `run ${played} time${played > 1 ? 's' : ''}`;
+  const race = D.race
+    ? `Big 20 ${D.race.name} · game ${D.race.n}${D.race.goal ? ' · ' + D.race.goal : ''} · ` : '';
+  document.getElementById('sub').textContent =
+    race + counts + (best != null ? ` · best ${fmt(best)}` : '') + span;
+  if (practice) {
+    const rows = [...byTime].reverse();
+    document.getElementById('grid').innerHTML =
+      `<tr><th>Date</th><th class="n">#</th><th class="num">Result</th></tr>` +
+      rows.map(r => `<tr>
+        <td class="tnum">${dshort(r.started_at_ms)}</td>
+        <td class="n tnum">${r.attempt_number ?? ''}</td>
+        <td class="num tnum${r.final_time_ms != null && r.final_time_ms === best ? ' best' : ''}">${
+          r.final_time_ms != null ? fmt(r.final_time_ms)
+          : r.last_timer_ms != null ? `<span class="none">reset at ${fmt(r.last_timer_ms)}</span>`
+          : '<span class="none">—</span>'}</td>
+      </tr>`).join('');
+    document.getElementById('note').textContent =
+      'Every attempt, newest first. A finish shows its time, with the fastest marked; a reset shows how far the timer had got.' +
+      (D.race ? ` Practice for Big 20 ${D.race.name}.` : '');
+  } else {
+    document.getElementById('grid').innerHTML =
+      `<tr><th>Date</th><th>Event</th><th class="num">Time</th></tr>` +
+      runs.map(r => `<tr>
+        <td class="tnum">${dshort(r.started_at_ms)}</td>
+        <td>${r.href ? `<a href="${r.href}">${esc(r.event)}</a>` : esc(r.event)}</td>
+        <td class="num tnum${r.final_time_ms != null && r.final_time_ms === best ? ' best' : ''}">${
+          r.final_time_ms != null ? fmt(r.final_time_ms) : '<span class="none">—</span>'}</td>
+      </tr>`).join('');
+    document.getElementById('note').textContent = played > 1
+      ? 'The fastest running is marked. Times are the game’s own segment of the marathon, as its board recorded it.'
+      : 'Run once so far. The time is the game’s own segment of the marathon, as its board recorded it.';
+  }
 } else if (D.kind === 'draw') {
+
   // One day, one draw, ten games in the order they came up. Nothing to
   // compare it to by design: these ten were pulled from all ninety and
   // this combination happened once.

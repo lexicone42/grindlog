@@ -221,13 +221,15 @@ while IFS= read -r game; do
   slice=$(mktemp)
   jq -c --arg g "$game" \
     '{kind: "game", title: $g, day_offset_minutes: .day_offset_minutes,
+      race: ((.big20 // {}) as $b | (($b.games // []) | map(select(.game == $g)) | .[0]) as $r
+             | if $r then {name: $b.race, n: $r.n, goal: $r.goal} else null end),
       runs: [.other_events[] as $e | $e.games[] | select(.game == $g)
-             | {day: $e.day, started_at_ms, event: $e.label,
+             | {day: $e.day, started_at_ms, event: $e.label, practice: ($e.practice // false),
                 href: (if ($e.label | startswith("Arcathlon #"))
                        then "/arcathlon/" + ($e.label | ltrimstr("Arcathlon #")) + "/index.html"
                        elif $e.randomized then "/rando/" + $e.day + "/index.html"
                        else null end),
-                final_time_ms}]}' site/api/v1/report.json > "$slice"
+                final_time_ms, last_timer_ms, outcome, attempt_number}]}' site/api/v1/report.json > "$slice"
   render_event "game/$slug" "$game" "$slice"
   rm -f "$slice"
   events=$((events + 1))
