@@ -65,6 +65,11 @@ MINE="NOT (game = '$G' AND category = '$C')"
 # will ever delete. See the note on the DELETE below for why "a session that
 # holds no run of the tracked game" is not good enough.
 TAG=${BIG20_TAG:-big20-import}
+# How close two runs of the same game must start to be the same attempt.
+# Both the live capture and a replay back-date a start from the timer value
+# at the run's first frame, so the same attempt agrees to within a frame or
+# two; a different attempt of the same game is minutes away.
+DUP_MS=${BIG20_DUP_MS:-10000}
 
 echo "tracking $tracked_game [$tracked_cat]; everything else in a pass is practice"
 
@@ -149,6 +154,30 @@ for id in "${ids[@]}"; do
              r.started_at_ms, r.ended_at_ms, r.outcome, r.reset_reason, r.final_time_ms,
              r.last_timer_ms, (SELECT id FROM target), r.ls_attempt
       FROM src.runs r WHERE $MINE
+        -- Skip a run the live capture already has.
+        --
+        -- A day can be BOTH captured live and replayed afterwards, and today
+        -- was: \`track\` was enabled halfway through 2026-09-10, so the
+        -- afternoon is in the database from the hls sessions and only the
+        -- morning is missing. A replay finds the whole day, and without this
+        -- the afternoon would land a second time.
+        --
+        -- Matched on the game and the start, within \$DUP_MS. Both passes
+        -- back-date a run's start from the timer value at its first frame,
+        -- so the same attempt gets the same start to within a frame or two
+        -- whichever pass saw it; a different attempt of the same game is
+        -- minutes away, never seconds.
+        --
+        -- Additive, like everything else here: what is already recorded
+        -- wins and nothing is deleted to make room. That does mean a day
+        -- captured across several restarts keeps the fragmented version
+        -- rather than the replay's single clean pass. Re-import it properly
+        -- by removing the live rows first, deliberately, and not as a side
+        -- effect of a backfill.
+        AND NOT EXISTS (
+          SELECT 1 FROM runs e
+           WHERE e.game = r.game
+             AND ABS(e.started_at_ms - r.started_at_ms) <= $DUP_MS)
       ORDER BY r.started_at_ms;
     DROP TABLE target;
     COMMIT;
