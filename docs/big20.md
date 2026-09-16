@@ -58,6 +58,66 @@ the same VOD, whose ten completions are not the tracked game's either.
 Ownership is now the session `tag` this import stamps, and a planted
 marathon session on the same VOD is part of the rehearsal.
 
+## Where the pane is
+
+The LiveSplit window is top-anchored, so a game's timer sits as far down as
+its split rows push it. Seven rows put it where the two Ninja Gaiden layouts
+expect (y ≈ 820), and those games — Double Dragon II, Kid Klown, Steel
+Legion, the Flintstones — recorded from the first day. One to four rows
+leave it 100–180 px higher, with smaller digits, and the probe reaches
+36 px; so Crisis Force, Uninvited, Faria, Monster Party, Parallel World,
+Mega Man 6, New Ghostbusters II, Mini Putt and Yoshi were never even *seen*:
+no lock, no pane pass, no title read, no run, and nothing in the session
+events to say so. The obs log's parse rate is the only place it showed.
+
+Measured with `locate` on VOD 2875828002 (2026-09-16). The timer's right
+edge sat at x = 595–604 on every sample; only its top moved:
+
+| rows | game | digits (x, y, w, h) |
+|---|---|---|
+| 1 | Mini Putt | 408, 560, 194, 70 |
+| 1 | New Ghostbusters II | 437, 619, 167, 64 |
+| 2 | Crisis Force | 359, 626, 245, 65 |
+| 3 | Uninvited | 435, 666, 167, 65 |
+| 4 | Faria … Mega Man 6 | 389, 677, 211, 59 |
+| 4 | a wider-pitch pane | 296, 786, 299, 80 |
+| 6 | Kid Klown | 410, 819, 189, 71 |
+| 7 | Flintstones | 423, 829, 177, 66 |
+
+`live.toml` carries three `[[layouts]]` for them — `big20-top`, `big20-short`,
+`big20-mid` — each holding its class with 20 px of slack at zero offset. One
+crop for the whole 560–736 span was tried first and was worse: with the
+four-row panes at its bottom edge, Uninvited and Faria stopped recording.
+Validated by replaying every unrecorded stretch of that VOD: Crisis Force
+finished 11:25.8, Uninvited 12:51.4, Parallel World, Monster Party and Yoshi
+all record, Kid Klown still records, and the Ninja Gaiden window is
+row-for-row its baseline.
+
+Two boards lock now and still record nothing, and both are **naming**
+problems, not layout ones:
+
+- **New Ghostbusters II** reads "New Ghostbusters" on many passes — the "II"
+  is lost — and the roster's pool matcher keeps a trailing sequel number
+  strict, so it refuses (`roster.rs`, "wide inside a roster, strict outside
+  it"; that rule is what stops "Ninja Gaiden Ill" becoming Ninja Gaiden II).
+  It could relax when the pool holds exactly one game of that stem, which
+  is the case here and not for Zelda / Zelda II.
+- **Mini Putt**'s one-row pane reads "Traditional" for its title — the
+  course, or the category — and nothing on any roster is called that.
+
+A board that locks, convicts, and names nothing is what the drop rule in
+`app.rs` is for (`close_would_fabricate`, see [detection.md](detection.md)):
+a run that starts in the two-pass hysteresis window before suspension
+starts as the tracked game, and with no target to carry would close as a
+Ninja Gaiden reset carrying Mini Putt's attempt counter. It is dropped
+instead. That path was unreachable until these layouts made the pane lock.
+
+The robust version of all this is not more crops: it is finding the pane
+when no layout fits — what `locate` does in one frame — and locking there.
+The decoded frame is the union of the configured rectangles, which the
+three layouts now make large enough to hold every pane seen; the finder
+would have to run inside it.
+
 ## Reading the result
 
 `/big20/` on the site (`site/big20.html`, built by `build-site.sh` from the
