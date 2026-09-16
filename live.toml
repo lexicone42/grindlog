@@ -197,6 +197,56 @@ splits = { crop_x = 515, crop_y = 513, crop_w = 100, crop_h = 252 }
 attempts_counter = { crop_x = 540, crop_y = 487, crop_w = 80, crop_h = 30 }
 lifetime_sob = { crop_x = 505, crop_y = 897, crop_w = 110, crop_h = 34 }
 
+# His Big 20 practice panes. The LiveSplit window is top-anchored, so a
+# game's timer sits as far down as its split rows push it: seven rows put it
+# where the two layouts above expect (y~820), and those games recorded from
+# the first day. One to four rows leave it 100-180 px HIGHER, with smaller
+# digits, and the probe reaches 36 px — so Crisis Force, Uninvited, Faria,
+# Monster Party, Parallel World, Mega Man 6, New Ghostbusters II and the rest
+# were never even seen: no lock, no pane pass, no title read, no run. Found
+# by `locate` on VOD 2875828002 (2026-09-16); the timer's right edge sat at
+# x=595-604 on every sample and only its top moved.
+#
+# Measured timer digit boxes, 1080p canvas: (x, y, w, h)
+#   1 row   408, 560, 194, 70   Mini Putt
+#   1 row   437, 619, 167, 64   New Ghostbusters II
+#   2 rows  359, 626, 245, 65   Crisis Force
+#   3 rows  435, 666, 167, 65   Uninvited
+#   4 rows  389, 677, 211, 59   the Faria .. Mega Man 6 block
+#   4 rows  296, 786, 299, 80   a wider-pitch pane (clipped 1 px by ng-theme)
+#   6 rows  410, 819, 189, 71   Kid Klown            (default: inside)
+#   7 rows  423, 829, 177, 66   Flintstones          (default: inside)
+# The attempt counter sits at the right end of the category line, in the
+# title block at the top of the pane — top-anchored, so at the same place
+# for every game whatever its row count. One rectangle serves all three; it
+# is what gives the identity gate its second signal on a one-row pane whose
+# rows cannot place the counter and whose header names nothing ("Traditional"
+# on Mini Putt): 6 against a floor past 94,000.
+# Three classes, three crops. One crop for the whole 560-736 span was tried
+# and was worse: with the four-row panes at its bottom edge Uninvited and
+# Faria stopped recording. Each crop below holds its class with 20+ px of
+# slack at zero offset, and none takes in a whole split column, which is
+# what a timer crop must never do. A crop that
+# spanned all three classes would take in the split rows' own times above
+# the timer, which is what a crop must never do.
+[[layouts]]
+name = "big20-top"
+timer = { crop_x = 300, crop_y = 530, crop_w = 340, crop_h = 120 }
+splits = { crop_x = 470, crop_y = 440, crop_w = 150, crop_h = 100 }
+attempts_counter = { crop_x = 545, crop_y = 448, crop_w = 90, crop_h = 50 }
+
+[[layouts]]
+name = "big20-short"
+timer = { crop_x = 300, crop_y = 598, crop_w = 340, crop_h = 162 }
+splits = { crop_x = 470, crop_y = 462, crop_w = 150, crop_h = 216 }
+attempts_counter = { crop_x = 545, crop_y = 448, crop_w = 90, crop_h = 50 }
+
+[[layouts]]
+name = "big20-mid"
+timer = { crop_x = 250, crop_y = 755, crop_w = 470, crop_h = 160 }
+splits = { crop_x = 480, crop_y = 480, crop_w = 135, crop_h = 300 }
+attempts_counter = { crop_x = 545, crop_y = 448, crop_w = 90, crop_h = 50 }
+
 # His marathon days: the pane's title reads "Randomized Arcathlon",
 # "Arcathlon #6" and, when OCR damages it, "Randomized Areathion" or
 # "Arcathton £4". Both words are listed because the second falls under the

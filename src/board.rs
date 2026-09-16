@@ -276,18 +276,32 @@ pub(crate) fn title_lines(
         .filter(|s| s.chars().any(|c| c.is_alphabetic()))
         .collect();
     let letters_in = |s: &str| s.chars().filter(|c| c.is_alphabetic()).count();
-    let title_idx = lines
+    // LiveSplit's title component is POSITIONAL: the game on its first line,
+    // the category on its second, the attempt count at the right of the
+    // second. So of the header lines with enough letters to be a name, the
+    // lowest two are (game, category) and a lone one is the game. Density
+    // decided this until 2026-09-16, yielding to the line above only when the
+    // denser line read as a category by its words; "Traditional" does not, so
+    // Mini Putt's pane answered "what is this timing?" with its category and
+    // the game one line up went unread. Density cannot be the tie-break
+    // either: "Faria" over "Save Princess / Dungeon 1" is a short game over a
+    // wordy category with no category word in it. What does tell a game from
+    // a line above it is a category UNDER it — a candidate followed by a
+    // line that reads as a category is the game, whatever sits above.
+    let candidates: Vec<usize> = lines
         .iter()
         .enumerate()
         .filter(|(_, s)| letters_in(s) >= 4)
-        .max_by_key(|(_, s)| letters_in(s))
-        .map(|(i, _)| i);
-    // The densest line is the category on a board whose category is wordier
-    // than its game; the game is then the line directly above.
-    let title_idx = title_idx.map(|i| match i.checked_sub(1) {
-        Some(above) if reads_as_category(&lines[i]) && letters_in(&lines[above]) >= 4 => above,
-        _ => i,
-    });
+        .map(|(i, _)| i)
+        .collect();
+    let title_idx = match candidates.as_slice() {
+        [] => None,
+        [one] => Some(*one),
+        [.., upper, lower] => {
+            let lower_is_game = lines.get(lower + 1).is_some_and(|s| reads_as_category(s));
+            Some(if lower_is_game { *lower } else { *upper })
+        }
+    };
     (
         title_idx.map(|i| lines[i].clone()),
         title_idx.and_then(|i| lines.get(i + 1).cloned()),
@@ -540,7 +554,11 @@ pub fn read_board(words: &[ocr::Word], letters: &[ocr::Word], scale: u32, timer:
     // Above the rows: the title lines (bounded by the first row's top — the
     // same boundary `measure_pane` hands `pane_readings`, so the two read
     // one title; its centre would let the row's own words in) and the
-    // attempt counter (a bare integer of three digits or more, the lowest).
+    // attempt counter (a bare integer, the lowest). Any width: his Ninja
+    // Gaiden counter is five digits, a Big 20 splits file's is one or two —
+    // "6" at the right of Mini Putt's category line — and "three digits or
+    // more" threw those away, which left the identity gate with nothing but
+    // a header on a one-row pane.
     let rows_top = rows.first().map(|r| r.top).unwrap_or(tm.y);
     let (title, subtitle) = title_lines(letters, scale, timer, rows_top / sc);
     let counter = words
@@ -549,7 +567,7 @@ pub fn read_board(words: &[ocr::Word], letters: &[ocr::Word], scale: u32, timer:
             let t = w.text.trim();
             let b = Bx::of(w);
             w.conf >= 30.0
-                && t.len() >= 3
+                && !t.is_empty()
                 && t.chars().all(|c| c.is_ascii_digit())
                 && b.bottom() <= rows_top + 4 * sc
                 && b.h < tm.h
@@ -1060,6 +1078,36 @@ mod tests {
         let (title, sub) = title_lines(&letters, 2, (100, 200, 100, 40), 60);
         assert_eq!(title.as_deref(), Some("Any% (Beginner)"));
         assert_eq!(sub, None);
+    }
+
+    /// Mini Putt's pane, 2026-09-16: "Mini Putt" over "Traditional". The
+    /// category is the wordier line and nothing about the word says
+    /// category, so the densest-line rule read it as the game and the pane
+    /// named nothing; the run underneath was filed as Ninja Gaiden. Position
+    /// decides: the lower of the two header lines is the category.
+    #[test]
+    fn the_title_is_the_upper_line_even_when_the_category_is_wordier_and_plain() {
+        let letters = header(&[&["Mini", "Putt"], &["Traditional"]]);
+        let (title, sub) = title_lines(&letters, 2, (100, 200, 100, 40), 60);
+        assert_eq!(title.as_deref(), Some("Mini Putt"));
+        assert_eq!(sub.as_deref(), Some("Traditional"));
+    }
+
+    /// A line with letters above a two-line header is artwork, and the
+    /// category under the game is what says so — whatever the line counts.
+    #[test]
+    fn a_game_with_its_category_under_it_is_the_title_whatever_sits_above() {
+        let letters = header(&[&["Golden"], &["Ninja", "Gaiden", "(NES)"], &["Any%"]]);
+        let (title, sub) = title_lines(&letters, 2, (100, 200, 100, 40), 60);
+        assert_eq!(title.as_deref(), Some("Ninja Gaiden (NES)"));
+        assert_eq!(sub.as_deref(), Some("Any%"));
+        // And a short game over a wordy, plain category is the game.
+        let letters = header(&[&["Faria"], &["Save", "Princess", "/", "Dungeon", "1"]]);
+        let (title, sub) = title_lines(&letters, 2, (100, 200, 100, 40), 60);
+        assert_eq!(title.as_deref(), Some("Faria"));
+        // "/" carries no letters and "1" is digits alone (a counter candidate),
+        // so neither is part of the line as read.
+        assert_eq!(sub.as_deref(), Some("Save Princess Dungeon"));
     }
 
     #[test]

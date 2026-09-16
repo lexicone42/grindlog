@@ -110,6 +110,11 @@ struct CurrentRun {
     /// the code, not by a wrong row. The close uses the pane's current target
     /// when there is one and this otherwise.
     foreign: Option<ForeignRun>,
+    /// Set while the run is open if the gate convicts the board and nothing
+    /// names it. From then on no name may adopt the run: the board it was
+    /// on could not be identified, and a name that turns up later belongs
+    /// to whatever he switched to. Such a run is dropped at its close.
+    orphaned: bool,
 }
 
 /// The ffmpeg-side crop and the sub-rectangles inside it. ffmpeg always
@@ -2145,6 +2150,9 @@ pub async fn run(cfg: Config) -> Result<()> {
     };
     // Which attempt-counter reading to believe (see counter.rs), seeded with
     // the highest number already recorded.
+    // The run loop's latest adopted counter and when: what the identity gate
+    // falls back to when the pane pass cannot see the counter (`with_counter`).
+    let mut last_counter_seen: Option<(i64, i64)> = None;
     let mut counter = crate::counter::CounterTracker::new(
         sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(ls_attempt) FROM runs")
             .fetch_one(&pool)
@@ -2368,12 +2376,24 @@ pub async fn run(cfg: Config) -> Result<()> {
                         last_ms,
                         reason: crate::state::ResetReason::Disappeared,
                     };
-                    if let Err(e) = handle_event(
+                    if close_would_fabricate(
+                        pane_identity.ok(),
+                        current.as_ref().is_some_and(|c| c.orphaned),
+                        current.as_ref().and_then(|c| c.foreign.as_ref()),
+                        &ev,
+                    ) {
+                        warn!("dropping the run open at stream end: the gate had convicted the board and nothing names it");
+                        current = None;
+                    } else if let Err(e) = handle_event(
                         &pool,
                         &shared,
                         &announce_tx,
                         announce,
                         &mut current,
+                        // Same rule as the frame loop: a run the gate has
+                        // convicted with nothing to file it under is dropped,
+                        // not written as the tracked game's.
+                        //
                         // The stream ended: whatever board was up is gone. No
                         // current target, so the close uses the one the run has
                         // carried — a Die Hard attempt cut off by the stream
@@ -2836,6 +2856,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                             let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
                             // What the pane says it is timing, and whether
                             // that is still this deployment's game.
+                            let board = with_counter(board, last_counter_seen, t);
                             apply_identity(
                                 &readings,
                                 &board,
@@ -3471,11 +3492,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                         match counter.observe(v, t) {
                             CounterEvent::Ignore => {}
                             CounterEvent::Adopt(v) => {
+                                last_counter_seen = Some((v, t));
                                 info!("livesplit attempt counter: {v}");
                                 health.counter_reads += 1;
                                 cr.ls_attempt = Some(v);
                             }
                             CounterEvent::Rebase(v) => {
+                                last_counter_seen = Some((v, t));
                                 warn!(
                                     "attempt counter restarted at {v} (a new splits file?); numbering follows it"
                                 );
@@ -3584,6 +3607,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         }
                     }
                     let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
+                    let board = with_counter(board, last_counter_seen, t);
                     apply_identity(
                         &readings,
                         &board,
@@ -3761,16 +3785,59 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
             }
         }
-        // Carry the target on the run. A pane pass that cannot name the board
-        // drops `foreign_target`; the run keeps what it had, and a close with no
-        // current target files under that rather than under the tracked game.
-        // See `CurrentRun::foreign`.
-        if let (Some(cr), Some(f)) = (current.as_mut(), foreign_target.as_ref()) {
-            if cr.foreign.as_ref().is_none_or(|c| c.game != f.game) {
-                cr.foreign = Some(f.clone());
+        // The run's identity is the FIRST board named while it is open, and it
+        // is fixed the moment it is known. A pane pass that cannot name the
+        // board drops `foreign_target`; the run keeps what it had. A board
+        // change before the close is the runner switching games — the run
+        // belongs to the game it was on, not to the one that follows, which
+        // "the pane's current target wins" got backwards. And a run open while
+        // the gate convicts a board nothing names is orphaned: its board could
+        // not be identified, and no later name may adopt it. See
+        // `CurrentRun::foreign`, `CurrentRun::orphaned`.
+        if let Some(cr) = current.as_mut() {
+            match (
+                cr.foreign.is_some(),
+                foreign_target.as_ref(),
+                pane_identity.ok(),
+            ) {
+                (false, Some(f), _) if !cr.orphaned => cr.foreign = Some(f.clone()),
+                (false, None, false) => cr.orphaned = true,
+                _ => {}
             }
         }
         for ev in events {
+            // Not the tracked game's, and not anyone else's either: drop it.
+            // See `close_would_fabricate`.
+            if close_would_fabricate(
+                pane_identity.ok(),
+                current.as_ref().is_some_and(|c| c.orphaned),
+                current
+                    .as_ref()
+                    .and_then(|c| c.foreign.as_ref())
+                    .or(foreign_target.as_ref()),
+                &ev,
+            ) {
+                warn!(
+                    "dropping a run closing on a board the gate could not name: \
+                     not {:?}, and nothing to file it under",
+                    cfg.game.name
+                );
+                if let Err(e) = db::log_transition(
+                    &pool,
+                    wall_now,
+                    "RUNNING",
+                    "DROPPED",
+                    &cfg.game.name,
+                    &cfg.game.category,
+                    "gate convicted, board unnamed",
+                )
+                .await
+                {
+                    warn!("failed to record the drop: {e:#}");
+                }
+                current = None;
+                continue;
+            }
             // Splits tracker follows the run lifecycle: fresh baseline per
             // run, dropped when the run ends.
             match &ev {
@@ -3923,6 +3990,55 @@ fn impossible_time(value_ms: i64, started_unix_ms: i64, now: i64) -> Option<i64>
     (over > IMPOSSIBLE_OVERSHOOT_MS).then_some(over)
 }
 
+/// Whether closing this run now would write a row for a game the gate has
+/// decided is NOT on screen.
+///
+/// The gate suspends after two convicting passes. A run can start in the
+/// window between the first and the second — the timer is still fed until
+/// suspension — and it starts as the tracked game, because that is what
+/// `Shared.game` is. If the board names a game, the target is set at
+/// suspension and the run carries it to its close. If the board names
+/// NOTHING (a one-row Mini Putt pane whose title row reads "Traditional"),
+/// there is no target to carry, the feed goes illegible, and three minutes
+/// later the run closes as `disappeared` — and would be filed as a Ninja
+/// Gaiden reset with Mini Putt's attempt counter on it. That is the
+/// wrong-data defect this whole gate exists to prevent, one step removed.
+///
+/// So: convicted, and nothing to file it under, means the row is not
+/// written. The cost is a real run of the tracked game lost when his own
+/// header misreads twice in a row, which a replay recovers; a fabricated
+/// row cannot be told from a real one afterwards.
+/// The board as the pane pass read it, with the attempt counter filled in
+/// from the run loop's own read when the pass could not see one.
+///
+/// The identity gate takes its Counter signal from the board pass, and on a
+/// one-row pane that pass sees no counter at all — while the run loop, two
+/// seconds earlier, read "6" off the same screen and logged it. Without
+/// this the gate had one signal against a Mini Putt board (a header reading
+/// "Traditional") and stayed undecided; a 4:43 Mini Putt run was filed as a
+/// Ninja Gaiden reset. With it, 6 against a floor of 94 000 is the second
+/// signal, the gate convicts, and the run is orphaned and dropped. Only a
+/// read from the last two minutes counts, and only when the pass saw
+/// nothing: a board that reads its own counter is believed over a memory.
+fn with_counter(mut board: Board, seen: Option<(i64, i64)>, t: i64) -> Board {
+    if board.counter.is_none() {
+        if let Some((v, _)) = seen.filter(|&(_, at)| t - at <= 120_000) {
+            board.counter = Some(v.to_string());
+        }
+    }
+    board
+}
+
+fn close_would_fabricate(
+    gate_ok: bool,
+    orphaned: bool,
+    target: Option<&ForeignRun>,
+    ev: &Event,
+) -> bool {
+    let closing = matches!(ev, Event::Reset { .. } | Event::Finished { .. });
+    closing && (orphaned || (!gate_ok && target.is_none()))
+}
+
 /// The log line for a finish of another game. Not the tracked game's
 /// "NEW season best": that label, the milestones and the season are Ninja
 /// Gaiden's, and the first time ever recorded for a game is not a record of
@@ -4000,6 +4116,7 @@ async fn handle_event(
                 ls_attempt: None,
                 splits: Vec::new(),
                 foreign: foreign.cloned(),
+                orphaned: false,
             });
         }
         Event::Finished { final_ms } => {
@@ -4007,8 +4124,9 @@ async fn handle_event(
                 warn!("finish event with no run in progress; ignoring");
                 return Ok(());
             };
-            // The pane's current target, else the one the run has carried.
-            let target = foreign.cloned().or_else(|| run.foreign.clone());
+            // The board the run was on — carried from the first pass that named
+            // one — else the pane's current target, for a run that never had one.
+            let target = run.foreign.clone().or_else(|| foreign.cloned());
             let target = target.as_ref();
             // A finish is the value that gets published as a record, so it is
             // the one place an inflated clock does lasting damage. On
@@ -4191,7 +4309,7 @@ async fn handle_event(
                 warn!("reset event with no run in progress; ignoring");
                 return Ok(());
             };
-            let target = foreign.cloned().or_else(|| run.foreign.clone());
+            let target = run.foreign.clone().or_else(|| foreign.cloned());
             let target = target.as_ref();
             // Same impossibility test as the finish, and for the same
             // reason one step down: `last_timer_ms` is how far he got, it
@@ -4743,6 +4861,7 @@ mod tests {
                 started_unix_ms: 0,
                 session_id: None,
                 foreign: None,
+                orphaned: false,
                 ls_attempt: None,
                 splits: Vec::new(),
             });
@@ -4861,10 +4980,10 @@ mod tests {
         assert_eq!(rows[0].final_time_ms, Some(LIFETIME));
     }
 
-    /// A run that lost its target mid-run is still filed under it, the pane's
-    /// current target wins when there is one, and a run that never had one is
-    /// the tracked game's. The middle case guards against a stale carried name
-    /// following a board change.
+    /// A run that lost its target mid-run is still filed under it; a board
+    /// named LATER, while the run is still open, does not take it — the run
+    /// was on the first board, and the later name is the game he switched
+    /// to; and a run that never had one is the tracked game's.
     #[tokio::test]
     async fn a_run_keeps_the_target_it_had_when_the_pane_cannot_name_the_board() {
         let dir = tempfile::tempdir().unwrap();
@@ -4894,6 +5013,7 @@ mod tests {
             ls_attempt: None,
             splits: Vec::new(),
             foreign: carried,
+            orphaned: false,
         };
         let reset = || Event::Reset {
             last_ms: 90_000,
@@ -4935,7 +5055,8 @@ mod tests {
         )
         .await
         .unwrap();
-        // The pane names a different board by the close: that wins.
+        // The pane names a different board by the close: the run was on the
+        // first one, and stays there.
         let mut current = Some(run(Some(target("Die Hard"))));
         let kid = target("Kid Klown in Night Mayor World");
         handle_event(
@@ -4969,13 +5090,84 @@ mod tests {
             let (g, c) = (g.to_string(), c.to_string());
             async move { db::recent_runs(pool, &g, &c, 10).await.unwrap().len() }
         };
-        assert_eq!(n("Die Hard", "Big 20 #23").await, 1, "carried target");
+        assert_eq!(
+            n("Die Hard", "Big 20 #23").await,
+            2,
+            "the carried board, both times"
+        );
         assert_eq!(
             n("Kid Klown in Night Mayor World", "Big 20 #23").await,
-            1,
-            "current target wins"
+            0,
+            "a board named after the run began does not take it"
         );
         assert_eq!(n("Ninja Gaiden (NES)", "Any%").await, 1, "no target at all");
+    }
+
+    /// The four corners of the rule. Convicted with nothing to file under
+    /// is the only combination that drops; a target of either kind, or a
+    /// gate that has not convicted, writes the row as before; and a start
+    /// is never dropped, since it writes nothing.
+    #[test]
+    fn a_close_is_dropped_only_when_convicted_and_unnamed() {
+        let reset = Event::Reset {
+            last_ms: 90_000,
+            reason: crate::state::ResetReason::Zeroed,
+        };
+        let finish = Event::Finished { final_ms: 90_000 };
+        let start = Event::Started { timer_ms: 1_600 };
+        let target = ForeignRun {
+            game: "Die Hard".into(),
+            category: "Big 20 #23".into(),
+            min_final_ms: 30_000,
+        };
+        assert!(close_would_fabricate(false, false, None, &reset));
+        assert!(close_would_fabricate(false, false, None, &finish));
+        assert!(
+            !close_would_fabricate(false, false, Some(&target), &reset),
+            "named: filed under it"
+        );
+        assert!(
+            !close_would_fabricate(true, false, None, &reset),
+            "the tracked game's own run"
+        );
+        assert!(
+            !close_would_fabricate(false, false, None, &start),
+            "a start writes nothing"
+        );
+        // Orphaned: convicted while open with nothing naming the board. A name
+        // that turns up afterwards is the next game, and does not adopt it.
+        assert!(close_would_fabricate(false, true, Some(&target), &reset));
+        assert!(
+            close_would_fabricate(true, true, None, &finish),
+            "even if the gate has since cleared"
+        );
+    }
+
+    /// The gate believes a board that reads its own counter; the run loop's
+    /// read fills in only where the pass saw nothing, and only while fresh.
+    #[test]
+    fn the_run_loops_counter_fills_in_only_where_the_pass_saw_none() {
+        let blank = || Board::default();
+        assert_eq!(with_counter(blank(), None, 10_000).counter, None);
+        assert_eq!(
+            with_counter(blank(), Some((6, 9_000)), 10_000)
+                .counter
+                .as_deref(),
+            Some("6")
+        );
+        assert_eq!(
+            with_counter(blank(), Some((6, 0)), 130_000).counter,
+            None,
+            "two minutes old"
+        );
+        let mut seen = blank();
+        seen.counter = Some("94154".into());
+        assert_eq!(
+            with_counter(seen, Some((6, 9_000)), 10_000)
+                .counter
+                .as_deref(),
+            Some("94154")
+        );
     }
 
     async fn foreign_close(ev: Event) -> (tempfile::TempDir, sqlx::SqlitePool, Vec<db::RunRow>) {
@@ -5009,6 +5201,7 @@ mod tests {
             // survive the retarget: the number is his Ninja Gaiden counter,
             // and the split is an act of a game this run is not.
             foreign: None,
+            orphaned: false,
             ls_attempt: Some(94_200),
             splits: vec![crate::splits::RecordedSplit {
                 act_index: 0,

@@ -147,7 +147,16 @@ read on its own as the Sum of Best.
 
 **Board reader (shadow mode).** The same two passes also read the pane as a
 board (`src/board.rs`): the title lines, the attempt counter and every
-split row above the timer with its name and its time cells — whatever game
+split row above the timer with its name and its time cells. The title is
+positional — LiveSplit draws the game on the header's first line and the
+category on its second, so of the header lines with enough letters to be a
+name the lowest two are (game, category), and a candidate with a
+category-reading line directly under it is the game whatever sits above.
+Until 2026-09-16 the densest line was the title, yielding to the line above
+only when it read as a category by its words: Mini Putt's "Traditional" did
+not, the pane answered with its category, and the game one line up went
+unread. The counter is any bare integer above the rows, the lowest; "three
+digits or more" threw away every Big 20 splits file's — whatever game
 the rows belong to, six acts of one game or the ten games of a marathon
 with `???` for the ones not drawn yet and `-` where a time is missing. With
 `game.follow_title = "log"` the bot says, at each pane pass, which game it
@@ -190,7 +199,10 @@ game, against it, or not at all:
   rule.
 - **Counter** — the attempt number against the highest this game has
   reached. His Ninja Gaiden counter is past 94,000; another game's board
-  starts again at 1.
+  starts again at 1. When the pane pass cannot see the counter — a one-row
+  pane — the run loop's own read of it from the last two minutes stands in
+  (`with_counter`); a header reading "Traditional" alone left the gate
+  undecided on Mini Putt, and "6 against 94,000" is the second signal.
 - **Rows** — the split row names against the configured acts.
 - **NamedAnother** — not a fifth reading but a consequence of the first:
   the header does not merely fail to match, it matches a game on a list
@@ -263,10 +275,12 @@ Three details it must get right, each of which was a bug first:
   pass usually re-named the board inside the 90 s illegible window —
   "usually" is not a rule, and this was found by reading the code rather
   than by a wrong row. So the run *carries* its target (`CurrentRun::foreign`),
-  set at its start and refreshed on every pass that names a board, and a
-  close with no current target uses that. The pane's current target still
-  wins when there is one, so a board change is followed; a stale carried
-  name can only ever apply to a run that once had it. (The same shape the
+  fixed by the first pass that names a board while the run is open, and a
+  close files under that. Not the pane's *current* target: a run still open
+  when the board changes was on the earlier board, and the later name is
+  the game he switched to. A run open while the gate convicts a board that
+  nothing names is orphaned and dropped at its close (`close_would_fabricate`),
+  so a name that turns up afterwards cannot adopt it either. (The same shape the
   marathon tracker uses:
   `Shared.game` is which game this *deployment* is, and about thirteen
   things are calibrated against it at startup, so it is not something a
@@ -280,6 +294,16 @@ Three details it must get right, each of which was a bug first:
   announcement (`record_label`, the milestones and the season are the
   tracked game's; the bot has nothing true to say about a Die Hard time
   yet). Recording it and talking about it are separate decisions.
+- **A close the gate has convicted, with nothing to file it under, is
+  dropped.** A run can start between the first convicting pass and the
+  second (the feed runs until suspension), and it starts as the tracked
+  game. A named board sets the target at suspension and the run carries it;
+  an unnamed one — a one-row Mini Putt pane whose title reads "Traditional"
+  — leaves nothing, and the close would be filed as a Ninja Gaiden reset
+  carrying Mini Putt's attempt counter. `close_would_fabricate` refuses it
+  (`RUNNING -> DROPPED`, "gate convicted, board unnamed"). The cost is a
+  real run lost when his own header misreads twice running, which a replay
+  recovers.
 - **A foreign run's finish arrives as a reset.** The state machine calls a
   frozen timer under `detection.min_final_ms` too short to be a finish, and
   that floor is eleven minutes because a Ninja Gaiden run is 11:35. Every
