@@ -197,6 +197,14 @@ elif [ "$age" -gt 1200 ]; then
   check deploy 0 "last deploy $((age / 60)) min ago"
 elif printf '%s' "$entry" | grep -q '^!!!'; then
   check deploy 1 "deploy $((age / 60)) min ago: $(printf '%s' "$entry" | grep -m1 '^!!!' | cut -c1-200)"
+elif printf '%s' "$entry" | grep -qi 'not building\|^error\|command not found\|No such file'; then
+  # A deploy that dies in its first seconds leaves neither "!!!" nor "live:",
+  # and "started N min ago did not reach live:" below waits five minutes —
+  # which two ten-minute crons can straddle every time. 2026-09-17: the
+  # report's JSON had a log line in front of it and every deploy for two and
+  # a half hours failed at "report JSON is not valid; not building" with no
+  # alert. The failure text is the signal.
+  check deploy 1 "deploy $((age / 60)) min ago failed: $(printf '%s' "$entry" | grep -mi1 'not building\|^error\|command not found\|No such file' | cut -c1-160)"
 elif printf '%s' "$entry" | grep -q '^live: '; then
   check deploy 0 "deploy $((age / 60)) min ago finished"
 elif [ "$age" -gt 300 ]; then
@@ -205,7 +213,60 @@ else
   check deploy 0 "deploy in progress, started ${age}s ago"
 fi
 
-# --- deliver what changed, as one message.
+# --- board tracker: churn and stall on a marathon board (the race board, an
+# Arcathlon). "board replaced" is the tracker rebuilt under the same event;
+# once or twice a day is a board really replaced, three in an hour is one
+# bad pane read in five rebuilding it and nothing ever recorded (2026-09-17,
+# the first live run). A marathon in force whose last completion is over an
+# hour old while a session is open is stuck — his longest game is under an
+# hour — or he walked away from the run, which is worth a look either way.
+# The log carries colour codes; they are stripped before the timestamps are
+# compared.
+plain() { sed 's/\x1b\[[0-9;]*m//g' logs/live.log 2>/dev/null; }
+replaced=$(plain | awk -v since="$(date -u -d "@$((now - 3600))" +%Y-%m-%dT%H:%M:%S)" '$1 >= since && /board replaced/' | wc -l)
+if [ "$replaced" -ge 3 ]; then
+  check tracker-churn 1 "the board tracker was rebuilt $replaced times in the last hour (logs/live.log 'board replaced')"
+else
+  check tracker-churn 0 "$replaced rebuild(s) in the last hour"
+fi
+if [ "$open" -gt 0 ] && command -v jq >/dev/null; then
+  state=$(sqlite3 -readonly -cmd '.timeout 5000' "$DB" "select coalesce(events,'[]') from sessions where source='hls' and ended_at_ms is null order by started_at_ms desc limit 1" 2>/dev/null \
+    | jq -r '[.[] | select(.k == "marathon") | select(.d | test(" (started|board replaced|ended)$"))] | last | .d // ""' 2>/dev/null)
+  case "$state" in
+    *" started"|*" board replaced")
+      last_row=$(plain | awk '/marathon row/ {t=$1} END {print t}')
+      lr=$(date -d "${last_row:-1970-01-01T00:00:00Z}" +%s 2>/dev/null || echo 0)
+      since_row=$((now - lr))
+      if [ "$since_row" -gt 3600 ]; then
+        check tracker-stall 1 "a marathon is in force (${state% started}) and the last completion was $((since_row / 60)) min ago"
+      else
+        check tracker-stall 0 "marathon in force, last completion $((since_row / 60)) min ago"
+      fi;;
+    *) check tracker-stall 0 "no marathon in force";;
+  esac
+fi
+
+# --- site: while a session is open the ten-minute deploy keeps the public
+# page fresh; a page over 30 minutes old with the stream up is a deploy that
+# has been failing (see deploy above) or a cron that is not running. The
+# page's address is the last "live:" line a deploy wrote, so nothing here
+# names the site.
+site=$(grep '^live: ' "$DEPLOY_LOG" 2>/dev/null | tail -1 | awk '{print $2}')
+if [ "$open" -gt 0 ] && [ -n "$site" ] && command -v jq >/dev/null; then
+  gen=$(curl -s --max-time 10 "${site%/}/index.html?hc=$now" -H 'Cache-Control: no-cache' \
+    | sed -n '/<script id="data"/,/<\/script>/p' | sed '1d;$d' | jq -r '.generated_at_ms // 0' 2>/dev/null)
+  gen=${gen:-0}; gen=${gen%.*}
+  if [ "$gen" -gt 0 ] 2>/dev/null; then
+    page_age=$(( now - gen / 1000 ))
+    if [ "$page_age" -gt 1800 ]; then
+      check site-stale 1 "the public page was built $((page_age / 60)) min ago with the stream up"
+    else
+      check site-stale 0 "public page $((page_age / 60)) min old"
+    fi
+  fi
+fi
+
+$1
 if [ ${#alerts[@]} -gt 0 ] || [ ${#clears[@]} -gt 0 ]; then
   body=""
   for a in ${alerts[@]+"${alerts[@]}"}; do body+="ALERT $a"$'\n'; done

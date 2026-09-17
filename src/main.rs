@@ -13,6 +13,7 @@ mod identity;
 mod locate;
 mod marathon;
 mod ocr;
+mod pane;
 mod report;
 mod roster;
 mod sanity;
@@ -72,6 +73,20 @@ enum Command {
         /// Give up after analyzing this many frames without finding a timer
         #[arg(long, default_value_t = 12)]
         frames: u32,
+    },
+    /// What the pane pass would read off one frame, for every layout: the
+    /// board as read, what classify calls it, and the board probe's score at
+    /// each threshold. Reads a canvas-scaled PNG or grabs one frame
+    Pane {
+        /// Analyze this PNG instead of grabbing a frame from the source
+        #[arg(long)]
+        image: Option<std::path::PathBuf>,
+        /// Binarisation threshold(s) to try; default: the [splits] threshold, then 100
+        #[arg(long = "threshold")]
+        thresholds: Vec<u8>,
+        /// Only this layout
+        #[arg(long)]
+        layout: Option<String>,
     },
     /// The purpose-built timer digit reader: harvest templates from replay
     /// corpora (NG_DUMP_TIMER=all) and score them. Crops are segmented at
@@ -189,6 +204,11 @@ async fn main() -> Result<()> {
         Command::Calibrate { full_frame } => calibrate::run(cfg, full_frame).await,
         Command::Report { json, api_dir } => report::run(cfg, json, api_dir.as_deref()).await,
         Command::Locate { image, frames } => locate::run(cfg, image, frames).await,
+        Command::Pane {
+            image,
+            thresholds,
+            layout,
+        } => pane::run(cfg, image, thresholds, layout).await,
         Command::Audit { dir } => audit::run(&cfg, &dir).map(|_| ()),
         Command::Glyphs { action } => match action {
             GlyphsAction::Train {

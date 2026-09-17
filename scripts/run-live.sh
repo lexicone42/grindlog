@@ -17,7 +17,7 @@ LOG=logs/live.log
 # itself runs for months. (An earlier version checked once, at supervisor
 # start, and never again.)
 rotate() {
-  for f in obs-live.jsonl "$LOG"; do
+  for f in obs-live.jsonl boards-live.jsonl "$LOG"; do
     if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 104857600 ]; then
       old="$f.$(date +%Y%m%d-%H%M).old"
       mv "$f" "$old" && gzip -f "$old" || true

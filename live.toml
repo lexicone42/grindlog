@@ -164,6 +164,12 @@ command_prefix = "ngrust-"
 
 [debug]
 obs_log = "obs-live.jsonl"
+# One line per pane pass: the board as read — title, counter, every row with
+# its name and time cells. What explains, afterwards, why a board day went
+# the way it did; without it, 2026-09-17 took twelve replay trials to see
+# what the live bot was reading. A pass a minute; the supervisor rotates it
+# with the obs log.
+board_log = "boards-live.jsonl"
 
 [attempts_counter]
 # LiveSplit lifetime attempt counter in the layout header.

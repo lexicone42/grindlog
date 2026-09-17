@@ -132,7 +132,7 @@ pub struct Regions {
     pub sob: Option<(u32, u32, u32, u32)>, // relative to union
 }
 
-type R = (u32, u32, u32, u32);
+pub(crate) type R = (u32, u32, u32, u32);
 
 /// Absolute canvas rectangles for one layout: layout 0 is the base config
 /// sections; alternates override rectangles they specify and inherit the rest.
@@ -1108,7 +1108,7 @@ fn pane_geometry(
 /// its name and cells, whatever game it belongs to).
 /// The pane pass's upscale: the words `measure_pane` returns are in these
 /// pixels, `PANE_UP` times the crop's.
-const PANE_UP: u32 = 2;
+pub(crate) const PANE_UP: u32 = 2;
 
 /// The board probe: one OCR of the pane, read as a board against every
 /// layout's timer rectangle, and the layout whose reading has the most rows
@@ -1231,7 +1231,7 @@ async fn probe_boards_at(
 /// tesseract's page analysis over the whole image: read off the union, a
 /// row's cumulative "2:01:07" came back "01:07" with the "2" filed in the
 /// name column, and the same rows read clean off the pane alone.
-fn pane_rect(regs: &Regions, union_w: u32, union_h: u32) -> R {
+pub(crate) fn pane_rect(regs: &Regions, union_w: u32, union_h: u32) -> R {
     const MARGIN: u32 = 12;
     let rects = std::iter::once(regs.timer)
         .chain(regs.splits)
