@@ -256,3 +256,14 @@ attempts_counter = { crop_x = 545, crop_y = 448, crop_w = 90, crop_h = 50 }
 name = "Arcathlon"
 category = "10 games"
 match = ["arcath", "randomized"]
+
+# The race board itself, first seen 2026-09-17: "Big 20 #23 / Practice Run",
+# the twenty games two rows each (the game, then its category in brackets)
+# under the webcam, columns +/- | Game | Total, the timer in a light band at
+# the foot of the pane with a small segment timer beneath it. No attempt
+# counter. `locate` found the digits at 455,968 91x52; the splits crop is
+# wide enough to take the title rows in with the time columns.
+[[layouts]]
+name = "big20-race"
+timer = { crop_x = 415, crop_y = 951, crop_w = 143, crop_h = 86 }
+splits = { crop_x = 280, crop_y = 450, crop_w = 340, crop_h = 480 }
