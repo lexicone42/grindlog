@@ -137,6 +137,11 @@ pub enum ResetReason {
     Desync,
     /// Timer froze below min_final_ms — too short to be a real finish.
     TooShort,
+    /// A foreign run's timer froze and the pane, read once more while it
+    /// stood, showed no split row at that value: the runner paused or
+    /// stopped without finishing. Decided in app.rs, never by the state
+    /// machine, which cannot see the rows.
+    Paused,
 }
 
 impl ResetReason {
@@ -146,6 +151,7 @@ impl ResetReason {
             ResetReason::Disappeared => "disappeared",
             ResetReason::Desync => "desync",
             ResetReason::TooShort => "tooshort",
+            ResetReason::Paused => "paused",
         }
     }
 }

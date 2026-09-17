@@ -1106,14 +1106,18 @@ fn pane_geometry(
 /// None when it cannot be derived), the pane's own readings
 /// (`pane_readings`) and the board (`board::read_board`: every row with
 /// its name and cells, whatever game it belongs to).
+/// The pane pass's upscale: the words `measure_pane` returns are in these
+/// pixels, `PANE_UP` times the crop's.
+const PANE_UP: u32 = 2;
+
 async fn measure_pane(
     ocr_engine: &mut OcrEngine,
     union_img: &GrayImage,
     timer: R,
     acts: u32,
     pre: &PreprocessCfg,
-) -> Result<(Option<PaneGeometry>, PaneReadings, Board)> {
-    const UP: u32 = 2;
+) -> Result<(Option<PaneGeometry>, PaneReadings, Board, Vec<ocr::Word>)> {
+    const UP: u32 = PANE_UP;
     let pre2 = PreprocessCfg {
         upscale: UP,
         threshold: pre.threshold,
@@ -1187,7 +1191,7 @@ async fn measure_pane(
     .min()
     .unwrap_or(timer.1 as i64);
     let readings = pane_readings(&words, &letters, UP, timer, splits_top);
-    Ok((geom, readings, board))
+    Ok((geom, readings, board, words))
 }
 
 /// Reference times the pane advertises, tracked until they are stable enough
@@ -2221,6 +2225,10 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut pane_identity_seen: std::collections::HashSet<String> = Default::default();
     // The board reader's last snapshot, in shadow mode.
     let mut last_board_snapshot: Option<board::Snapshot> = None;
+    // A foreign run's frozen timer, held with the frame time it froze at
+    // until the next pane pass decides whether it finished or paused (see
+    // the freeze block ahead of the event loop).
+    let mut held_freeze: Option<(Event, i64)> = None;
     // The marathon in progress, when the board is one a `[[games]]` entry
     // asks to track by completions, the tag its session was given, and how
     // many consecutive pane passes read a board belonging to another game.
@@ -2852,7 +2860,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     )
                     .await
                     {
-                        Ok((geom, readings, board)) => {
+                        Ok((geom, readings, board, _)) => {
                             let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
                             // What the pane says it is timing, and whether
                             // that is still this deployment's game.
@@ -3329,7 +3337,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         // and the only event it has left in it is the tail of whatever was on
         // screen before — an attempt he abandoned by switching scenes. Drop
         // it, and the run with it: the board records this broadcast.
-        let events = if marathon_active {
+        let mut events = if marathon_active {
             current = None;
             Vec::new()
         } else {
@@ -3558,6 +3566,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         // with the one in force, so a single odd frame changes nothing.
         // The short cadence gives up after five minutes of reads (a layout
         // with no counter to find) and the minute cadence takes over.
+        let mut passed_pane: Option<Vec<ocr::Word>> = None;
         let settled = pane_geom.is_some_and(|g| !g.provisional());
         let pane_read_every = if settled || provisional_reads >= 30 {
             60_000
@@ -3580,7 +3589,8 @@ pub async fn run(cfg: Config) -> Result<()> {
             )
             .await
             {
-                Ok((geom, readings, board)) => {
+                Ok((geom, readings, board, pane_words)) => {
+                    passed_pane = Some(pane_words.clone());
                     if let Some(g) = geom {
                         // Nothing new: the pane in force, read again (a lost
                         // counter — covered, or its row unread — is not
@@ -3794,6 +3804,54 @@ pub async fn run(cfg: Config) -> Result<()> {
         // the gate convicts a board nothing names is orphaned: its board could
         // not be identified, and no later name may adopt it. See
         // `CurrentRun::foreign`, `CurrentRun::orphaned`.
+        // A freeze held from the last frame, decided by the pane pass forced
+        // for it — or let through as it came when no pass happened within
+        // FREEZE_HOLD_MS (the layout lost its lock in the same moment),
+        // which is the old behaviour and says so in the log.
+        if let Some((ev, since)) = held_freeze.as_ref() {
+            let last_ms = match ev {
+                Event::Reset { last_ms, .. } => *last_ms,
+                _ => 0,
+            };
+            let verdict = match (&passed_pane, t - since > FREEZE_HOLD_MS) {
+                (Some(w), _) => Some(freeze_confirmed(w, active_regs.timer.3 * PANE_UP, last_ms)),
+                (None, true) => Some(None),
+                (None, false) => None,
+            };
+            if let Some(v) = verdict {
+                held_freeze = None;
+                // What goes through is never the TooShort reset it came in
+                // as — the hold block below would only hold it again — but
+                // the finish it was found to be, or a reset that says paused.
+                let decided = match v {
+                    Some(true) => {
+                        info!(
+                            "timer frozen at {}: a split row shows it — a finish",
+                            format_ms(last_ms)
+                        );
+                        Event::Finished { final_ms: last_ms }
+                    }
+                    Some(false) => {
+                        info!(
+                            "timer frozen at {}: no split row shows it — paused, not finished",
+                            format_ms(last_ms)
+                        );
+                        Event::Reset {
+                            last_ms,
+                            reason: crate::state::ResetReason::Paused,
+                        }
+                    }
+                    None => {
+                        warn!(
+                            "timer frozen at {} and the pane could not be read; taking it as a finish",
+                            format_ms(last_ms)
+                        );
+                        Event::Finished { final_ms: last_ms }
+                    }
+                };
+                events.insert(0, decided);
+            }
+        }
         if let Some(cr) = current.as_mut() {
             match (
                 cr.foreign.is_some(),
@@ -3806,6 +3864,25 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
         }
         for ev in events {
+            // A foreign run's timer frozen under the tracked game's floor is a
+            // finish OR a pause, and this frame cannot tell them apart; the
+            // pane can, by whether a split row carries the frozen value.
+            // Hold it, force a pane pass on the next frame, decide there.
+            if let Event::Reset {
+                last_ms,
+                reason: crate::state::ResetReason::TooShort,
+            } = &ev
+            {
+                let target = current
+                    .as_ref()
+                    .and_then(|c| c.foreign.as_ref())
+                    .or(foreign_target.as_ref());
+                if held_freeze.is_none() && target.is_some_and(|f| *last_ms >= f.min_final_ms) {
+                    held_freeze = Some((ev.clone(), t));
+                    last_sob_read_t = i64::MIN / 2;
+                    continue;
+                }
+            }
             // Not the tracked game's, and not anyone else's either: drop it.
             // See `close_would_fabricate`.
             if close_would_fabricate(
@@ -4062,6 +4139,40 @@ fn foreign_finish_line(game: &str, category: &str, final_ms: i64, prior: Option<
             format_ms(final_ms)
         ),
     }
+}
+
+/// How long a foreign run's frozen timer is held for a pane pass before it
+/// goes through undecided. A pass is forced on the very next frame; only a
+/// layout that lost its lock in the same moment gets this far.
+const FREEZE_HOLD_MS: i64 = 5_000;
+
+/// Whether the pane, read while the timer stands frozen at `last_ms`, shows
+/// that value in a split row. LiveSplit writes the final split's cumulative
+/// time into its row when the run ends, so a finished board carries the
+/// timer's value in a row; a paused timer leaves the row it was in blank,
+/// and every row it did fill reads earlier than the timer.
+///
+/// Decided from the pass's raw words, not `read_board`'s rows: that reader
+/// keeps only rows above the timer crop, and on a short board the final
+/// row sits inside it — the crops show "11:21.2" directly over the timer's
+/// own "11:21.21". A row's digits stand about a third as tall as the
+/// timer's, so everything under a quarter of the crop's height is a row
+/// and the rest is the timer reading itself, which is the frozen value by
+/// definition and proves nothing. The rows print tenths where the timer
+/// has hundredths. None when no row-sized time is on the pane at all — a
+/// pane that could not be read, not one that disagrees.
+fn freeze_confirmed(words: &[ocr::Word], timer_h: u32, last_ms: i64) -> Option<bool> {
+    let row_h = timer_h / 4;
+    let mut any = false;
+    for w in words.iter().filter(|w| w.h < row_h) {
+        if let Some(ms) = crate::timeparse::parse_time(&w.text) {
+            any = true;
+            if (ms - last_ms).abs() <= 150 {
+                return Some(true);
+            }
+        }
+    }
+    any.then_some(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5833,5 +5944,53 @@ mod tests {
         assert!(!c.observe(Some(500_000), 13_000)); // garbage jump
         assert_eq!(c.streak, 0);
         assert!(!c.observe(None, 13_500));
+    }
+    /// The pane at a frozen timer: a finished board has the value in a
+    /// split row (11:21.2 over a timer at 11:21.21), a paused one has only
+    /// the comparison times it was chasing (11:18.4 over 1:18.44), and a
+    /// pane with no time in any row decides nothing.
+    #[test]
+    fn a_frozen_timer_is_a_finish_only_where_a_split_row_shows_it() {
+        let w = |y: u32, h: u32, text: &str| ocr::Word {
+            x: 300,
+            y,
+            w: 90,
+            h,
+            conf: 80.0,
+            text: text.into(),
+        };
+        // A 162 px timer crop at the pane pass's scale; rows read ~40 px
+        // tall there, the timer's own digits ~110.
+        let crop = 162 * PANE_UP;
+        // Crisis Force, finished: the final row carries the run, over the
+        // timer reading the same value.
+        let done = [
+            w(20, 40, "1:04.6"),
+            w(20, 40, "1:04.6"),
+            w(60, 40, "5:11.9"),
+            w(60, 40, "11:21.2"),
+            w(120, 110, "11:21.21"),
+        ];
+        assert_eq!(freeze_confirmed(&done, crop, 681_210), Some(true));
+        // The same board paused at 1:18.44 in the second segment: the rows
+        // show the comparison, and the timer's own word does not count.
+        let paused = [
+            w(20, 40, "1:04.6"),
+            w(20, 40, "1:04.6"),
+            w(60, 40, "4:53.4"),
+            w(60, 40, "11:18.4"),
+            w(120, 110, "1:18.44"),
+        ];
+        assert_eq!(freeze_confirmed(&paused, crop, 78_440), Some(false));
+        // A row a tenth off is the finish; a second off is another number.
+        assert_eq!(freeze_confirmed(&done, crop, 681_300), Some(true));
+        assert_eq!(freeze_confirmed(&done, crop, 682_400), Some(false));
+        // Only the timer legible, reading the frozen value: it decides
+        // nothing, however exactly it matches.
+        assert_eq!(
+            freeze_confirmed(&[w(120, 110, "1:18.44")], crop, 78_440),
+            None
+        );
+        assert_eq!(freeze_confirmed(&[], crop, 78_440), None);
     }
 }

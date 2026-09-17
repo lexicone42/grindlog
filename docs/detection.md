@@ -315,6 +315,26 @@ Three details it must get right, each of which was a bug first:
   is written as a death — `replays/diehard` holds five of exactly that.
   `game.other_min_final_ms` (default 30 s) is the floor that applies to a
   retargeted run instead.
+- **A foreign freeze is a finish only when the pane says so.** Above that
+  floor the state machine still cannot tell a finish from a *pause*: both
+  are a timer that stops. A week of practice held three pauses filed as
+  bests (Crisis Force 1:18, Uninvited 3:14, New Ghostbusters II 10:01). The
+  pane can tell them apart: LiveSplit writes the final split's cumulative
+  time into its row when a run ends, so a finished board carries the
+  timer's value in a split row, and a paused one does not — the pixels at
+  a pause show "11:18.4" (the comparison) over a timer at 1:18.44, at a
+  finish "11:21.2" over 11:21.21. So a foreign run's freeze is *held*
+  (`held_freeze`), a pane pass is forced on the next frame while the frozen
+  board is still up, and `freeze_confirmed` decides from the pass's raw
+  words — not `read_board`'s rows, which stop above the timer crop while a
+  short board's final row sits inside it: a time-shaped word under a
+  quarter of the crop's height (a row; the timer's own digits are taller
+  and read the frozen value by definition) within 150 ms of the timer is a
+  finish; rows that read but do not match are a reset with reason `paused`;
+  a pane with no row-sized time on it decides nothing, and the freeze goes
+  through as a finish with a warning, as does one no pass
+  reached within five seconds (a layout that lost its lock in the same
+  moment). Only foreign runs are held; the tracked game's floor is its own.
 
 Measured on `2868800526`, which is the broadcast that produced the
 fabricated runs: the Die Hard window records ten Die Hard runs (five
