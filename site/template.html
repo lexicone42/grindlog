@@ -225,6 +225,20 @@
   .striplabel { font-family: "Silkscreen", monospace; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-right: 4px; }
 
   /* ---------- what is on screen now ---------- */
+  /* the race card: one card, the prep page's strip, and the day's practice */
+  .racecard { border-left: 3px solid var(--gold); margin-bottom: 14px; }
+  .racehead { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+  .racetitle { margin: 0; font-size: clamp(20px, 3vw, 26px); letter-spacing: -.01em; }
+  .racetitle a { color: var(--ink); text-decoration: none; }
+  .racetitle a:hover { text-decoration: underline; }
+  .racecounts { display: flex; gap: 22px; font-size: 13px; color: var(--ink2); padding-top: 4px; }
+  .racecounts b { display: block; font-family: "Martian Mono", monospace; font-size: 22px; font-weight: 600; color: var(--ink); line-height: 1.1; }
+  .racestrip { display: flex; gap: 3px; margin: 14px 0 10px; }
+  .racestrip i { flex: 1 1 0; height: 7px; border-radius: 2px; background: var(--hairline); }
+  .racestrip i.some { background: var(--gold); opacity: .55; }
+  .racestrip i.done { background: var(--gold); }
+  .racetoday { margin: 0; }
+
   .nowcard {
     background: linear-gradient(135deg, var(--series-soft), transparent 60%), var(--card);
     border: 1px solid var(--hairline); border-left: 3px solid var(--series);
@@ -300,6 +314,23 @@
     <p class="eyebrow" id="now-label"></p>
     <div class="nowgame" id="now-game"></div>
     <div class="nowmeta" id="now-meta"></div>
+  </section>
+  <!-- The race he is preparing for, while he is preparing for it. This sits
+       above the tracked game because for these weeks it IS the broadcast;
+       it shows itself only while the race is ahead (or just past) and there
+       is practice in the last fortnight, and hides again on its own when
+       he is back on Ninja Gaiden. Data from the report's `big20` block. -->
+  <section class="card racecard" id="race-card" hidden>
+    <div class="racehead">
+      <div>
+        <p class="eyebrow" id="race-eyebrow"></p>
+        <h2 class="racetitle"><a id="race-link" href="/big20/index.html"></a></h2>
+        <p class="nowmeta" id="race-meta"></p>
+      </div>
+      <div class="racecounts" id="race-counts"></div>
+    </div>
+    <div class="racestrip" id="race-strip" title="the twenty, in race order"></div>
+    <p class="subnote racetoday" id="race-today"></p>
   </section>
   <!-- Everything below is about ONE game. It is the only one this
        deployment records in full, so it gets the depth; it is not what the
@@ -475,6 +506,57 @@ const tagPill = r => sessionTag[r.session_id]
 /* masthead */
 document.getElementById('tracked-name').textContent = D.current_game;
 document.getElementById('chip-cat').textContent = D.current_category;
+
+/* the race he is preparing for */
+(function raceCard() {
+  const r = D.big20;
+  if (!r || !Array.isArray(r.games) || !r.games.length || !r.date) return;
+  const tz = (D.day_offset_minutes || 0) * 60000;
+  const now = Date.now();
+  const raceDay = new Date(r.date + 'T00:00:00Z');
+  const daysAway = Math.round((raceDay - (now + tz)) / 86400000);
+  const games = r.games;
+  const latest = Math.max(0, ...games.map(g => g.last_at_ms || 0));
+  // While the race is ahead (three days' grace after it) and he has
+  // practised inside a fortnight. Otherwise this card does not exist and
+  // the page is the tracked game's, as before.
+  if (daysAway < -3 || now - latest > 14 * 86400000) return;
+  const card = document.getElementById('race-card');
+  card.hidden = false;
+  const tried = games.filter(g => g.attempts > 0).length;
+  const done = games.filter(g => g.finished > 0).length;
+  const attempts = games.reduce((n, g) => n + (g.attempts || 0), 0);
+  document.getElementById('race-eyebrow').textContent = 'Preparing for';
+  document.getElementById('race-link').textContent = `Big 20 ${r.race}`;
+  const when = raceDay.toLocaleDateString(undefined, { month: 'long', day: 'numeric', timeZone: 'UTC' });
+  document.getElementById('race-meta').innerHTML =
+    esc(daysAway > 1 ? `${when} · ${daysAway} days away` : daysAway === 1 ? `${when} · tomorrow`
+      : daysAway === 0 ? `${when} · race day` : `${when} · run`) +
+    ` · ${games.length} games` + (r.url ? ` · <a href="${esc(r.url)}" rel="noopener">the rules</a>` : '') +
+    ` · <a href="/big20/index.html">every attempt</a>`;
+  document.getElementById('race-counts').innerHTML =
+    `<span><b>${done}</b>of ${games.length} finished</span>` +
+    `<span><b>${tried}</b>practised</span>` +
+    `<span><b>${attempts}</b>attempts</span>`;
+  document.getElementById('race-strip').innerHTML = games.map(g =>
+    `<i class="${g.finished > 0 ? 'done' : g.attempts > 0 ? 'some' : ''}" title="${esc(g.n + '. ' + g.game)}"></i>`).join('');
+  // Today, from the practice cards: which games, and the best of each.
+  const today = new Date(now + tz).toISOString().slice(0, 10);
+  const byGame = new Map();
+  for (const e of (D.other_events || []).filter(e => e.practice && e.day === today)) {
+    for (const g of e.games) {
+      const s = byGame.get(g.game) || { n: 0, best: null };
+      s.n++;
+      if (g.final_time_ms != null && (s.best == null || g.final_time_ms < s.best)) s.best = g.final_time_ms;
+      byGame.set(g.game, s);
+    }
+  }
+  const order = new Map(games.map(g => [g.game, g.n]));
+  const line = [...byGame].sort((a, b) => (order.get(a[0]) || 99) - (order.get(b[0]) || 99))
+    .map(([g, s]) => `${esc(g)} ${s.best != null ? fmt(s.best) : `×${s.n}`}`);
+  document.getElementById('race-today').innerHTML = line.length
+    ? `Today: ${line.join(' · ')}` : 'Nothing practised yet today.';
+})();
 
 /* what is on screen now */
 (function nowPlaying() {

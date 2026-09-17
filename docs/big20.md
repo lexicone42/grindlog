@@ -131,6 +131,15 @@ the game but is not practice for this race.
 The empty rows are the point. A leaderboard shows what has been done; a prep
 page has to show what is left.
 
+The landing page carries the same block in miniature while the race is what
+he is doing: a card under the live panel and above the Ninja Gaiden records
+with the date, how many of the twenty are finished and practised, the
+attempt count, a twenty-cell strip in race order (gold for finished, faint
+for practised) and the games he has touched today. It shows itself while
+the race is ahead (until three days after it) and his newest practice run is
+under two weeks old; when he is back to grinding Ninja Gaiden it goes away
+by itself and the page reads as before.
+
 ## The next race
 
 A roster edit, not a code change. `assets/big20-roster.toml` carries the
