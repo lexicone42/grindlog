@@ -234,6 +234,18 @@ fn big20_prep(
                     .unwrap_or(false)
             };
             let practice_cat = |c: &str| practice_cats.iter().any(|p| c.eq_ignore_ascii_case(p));
+            // His FULL RUNS of the race — every game on the race's own board,
+            // filed by the board tracker under the race's category with a
+            // word after it ("Big 20 #23 run"). Practice for the race in the
+            // truest sense, and kept apart from the per-game attempts all the
+            // same: a segment of a run-through is one game under race
+            // conditions, not an attempt he could reset.
+            let run_cat = |c: &str| {
+                rosters
+                    .categories()
+                    .iter()
+                    .any(|p| c.len() > p.len() && c[..p.len()].eq_ignore_ascii_case(p))
+            };
             let mine = |s: &db::GameSummary| mine_name(&s.game);
             let is_practice = |s: &db::GameSummary| practice_cat(&s.category);
             // Every practice attempt at it, oldest first: what the page's
@@ -249,9 +261,13 @@ fn big20_prep(
                 .iter()
                 .filter(|s| mine(s) && is_practice(s))
                 .collect();
+            let full_runs: Vec<&db::GameSummary> = summaries
+                .iter()
+                .filter(|s| mine(s) && run_cat(&s.category))
+                .collect();
             let elsewhere: Vec<&db::GameSummary> = summaries
                 .iter()
-                .filter(|s| mine(s) && !is_practice(s))
+                .filter(|s| mine(s) && !is_practice(s) && !run_cat(&s.category))
                 .collect();
             let best = |v: &[&db::GameSummary]| v.iter().filter_map(|s| s.best_ms).min();
             serde_json::json!({
@@ -266,6 +282,11 @@ fn big20_prep(
                 "first_at_ms": practice.iter().filter_map(|s| s.first_at_ms).min(),
                 "last_at_ms": practice.iter().filter_map(|s| s.last_at_ms).max(),
                 // His Arcathlon time for it, where there is one.
+                // His best for it inside a full run of the race, and how many
+                // full runs reached it.
+                "run_ms": best(&full_runs),
+                "run_at_ms": full_runs.iter().filter_map(|s| s.last_at_ms).max(),
+                "run_count": full_runs.iter().map(|s| s.finished).sum::<i64>(),
                 "marathon_ms": best(&elsewhere),
                 "marathon_at_ms": elsewhere.iter().filter_map(|s| s.last_at_ms).max(),
                 "runs": log
@@ -284,11 +305,38 @@ fn big20_prep(
             })
         })
         .collect();
+    // The full runs, one per broadcast: how far each got (the cumulative
+    // the last recorded row ended at) and over how many games. A run he
+    // abandoned is a run he abandoned; the page says how far.
+    let run_cat = |c: &str| {
+        rosters
+            .categories()
+            .iter()
+            .any(|p| c.len() > p.len() && c[..p.len()].eq_ignore_ascii_case(p))
+    };
+    let mut by_session: std::collections::BTreeMap<i64, Vec<&db::OtherRun>> =
+        std::collections::BTreeMap::new();
+    for r in runs.iter().filter(|r| run_cat(&r.category)) {
+        by_session.entry(r.session).or_default().push(r);
+    }
+    let run_throughs: Vec<serde_json::Value> = by_session
+        .values()
+        .map(|rows| {
+            serde_json::json!({
+                "day": rows[0].day,
+                "started_at_ms": rows.iter().map(|r| r.started_at_ms).min(),
+                "games": rows.len(),
+                "reached_ms": rows.iter().filter_map(|r| r.last_timer_ms).max(),
+                "segments_ms": rows.iter().filter_map(|r| r.final_time_ms).sum::<i64>(),
+            })
+        })
+        .collect();
     serde_json::json!({
         "race": rosters.event_name(event),
         "url": url,
         "date": date,
         "games": games,
+        "run_throughs": run_throughs,
     })
 }
 
@@ -960,12 +1008,22 @@ mod tests {
                 // folds onto the race's name rather than leaving as a game
                 // of its own.
                 summary("aws", "Other", 3, 1, 400_000),
+                // A full run of the race: Die Hard, under race conditions.
+                summary("Die Hard", "Big 20 #23 run", 1, 1, 142_000),
                 // A marathon completion of a game that is also in the race.
                 summary("Jaws", "Arcathlon", 5, 5, 420_000),
                 // Nothing to do with this race.
                 summary("Ninja Gaiden (NES)", "Any%", 3137, 41, 695_100),
             ],
-            &[],
+            // The full run's Die Hard segment, as the board tracker filed it.
+            &[db::OtherRun {
+                category: "Big 20 #23 run".into(),
+                final_time_ms: Some(142_000),
+                last_timer_ms: Some(142_000),
+                tag: None,
+                day: "2026-09-17".into(),
+                ..run(5, "Die Hard", 142_000)
+            }],
             &cfg,
         );
         let by = |name: &str| {
@@ -984,6 +1042,13 @@ mod tests {
         assert_eq!(dh["best_ms"], 121_400);
         assert!(dh["marathon_ms"].is_null());
 
+        let dh = by("Die Hard");
+        assert_eq!(dh["run_ms"], 142_000, "his best inside a full run");
+        assert_eq!(dh["run_count"], 1);
+        assert!(dh["marathon_ms"].is_null(), "a full run is not a marathon");
+        assert_eq!(out["run_throughs"].as_array().unwrap().len(), 1);
+        assert_eq!(out["run_throughs"][0]["games"], 1);
+        assert_eq!(out["run_throughs"][0]["reached_ms"], 142_000);
         let jaws = by("Jaws");
         assert_eq!(
             jaws["attempts"], 3,

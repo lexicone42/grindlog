@@ -78,6 +78,10 @@ echo "tracking $tracked_game [$tracked_cat]; everything else in a pass is practi
 
 for id in "${ids[@]}"; do
   srcdb="$BIG20_OUT/vod-$id.db"
+  # Absolute for ATTACH, whether BIG20_OUT was given relative or absolute (a
+  # rehearsal from a copy under /tmp attached "$(pwd)//tmp/..." — an empty
+  # database — and failed on src.sessions).
+  case "$srcdb" in /*) srcabs=$srcdb;; *) srcabs="$(pwd)/$srcdb";; esac
   [ -f "$srcdb" ] || { echo "!!! $srcdb is missing — replay it first (scripts/replay-big20.sh $id)" >&2; exit 1; }
   open=$(q "$srcdb" "SELECT COUNT(*) FROM sessions WHERE ended_at_ms IS NULL")
   [ "$open" = 0 ] || { echo "!!! $srcdb still has an open session; the replay did not finish" >&2; exit 2; }
@@ -133,7 +137,7 @@ for id in "${ids[@]}"; do
   # POSITIVE — a session carrying this import's own tag — and not "a session
   # with no evidence against", which takes silence for consent.
   q "$LIVE" "
-    ATTACH DATABASE '$(pwd)/$srcdb' AS src;
+    ATTACH DATABASE '$srcabs' AS src;
     BEGIN IMMEDIATE;
     CREATE TEMP TABLE mine AS
       SELECT s.id FROM sessions s

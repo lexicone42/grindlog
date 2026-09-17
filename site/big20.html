@@ -103,6 +103,8 @@
   .project .sum.plain { color: var(--ink); }
   .project .over { color: var(--ink2); font-size: 12.5px; }
   .project .miss { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .project .runs { font-size: 13px; color: var(--ink2); margin: 4px 0 0; }
+  .project .runs b { color: var(--ink); font-family: "Martian Mono", monospace; font-size: 12.5px; }
   .scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   th {
@@ -278,7 +280,19 @@ if (finished > 0) {
   p.hidden = false;
   p.innerHTML =
     `<div><div class="lbl">Sum of bests</div><div class="sum">${fmt(sob)}</div><div class="over">${over} — the ceiling</div>${miss}</div>` +
-    `<div><div class="lbl">Sum of latest finishes</div><div class="sum plain">${fmt(latest)}</div><div class="over">${over} — nearer what a race day looks like</div>${miss}</div>`;
+    `<div><div class="lbl">Sum of latest finishes</div><div class="sum plain">${fmt(latest)}</div><div class="over">${over} — nearer what a race day looks like</div>${miss}</div>` +
+    fullRuns();
+}
+
+// His full runs of the race on its own board, newest first: how far each
+// got, over how many games. The whole race is the number that matters and
+// this is the nearest thing to it he has run.
+function fullRuns() {
+  const rs = (D.run_throughs || []).slice().sort((a, b) => b.started_at_ms - a.started_at_ms);
+  if (!rs.length) return '';
+  const line = r => `${esc(dshort(r.started_at_ms))}: <b>${r.games}</b> of ${games.length} games, ${fmt(r.reached_ms)} on the clock`;
+  return `<div><div class="lbl">Full runs</div><div class="runs">${rs.slice(0, 4).map(r => `<div>${line(r)}</div>`).join('')}</div>` +
+    `<div class="miss">a full run's games count under "Full run", not as attempts</div></div>`;
 }
 
 // The trend cell: attempts left to right; a finish is a point (green when
@@ -307,7 +321,7 @@ document.getElementById('grid').innerHTML =
   `<tr><th class="n">#</th><th class="game">Game</th>` +
   `<th class="num">Attempts</th><th class="num">Finished</th>` +
   `<th class="num">Best</th><th class="num">Latest</th><th class="trend">Trend</th>` +
-  `<th class="num">Arcathlon</th><th class="num last">Last</th></tr>` +
+  `<th class="num">Full run</th><th class="num">Arcathlon</th><th class="num last">Last</th></tr>` +
   games.map(g => {
     const rate = g.att ? Math.round(100 * g.fin / g.att) : null;
     const ago = g.lastAt == null ? null : daysAgo(g.lastAt);
@@ -319,6 +333,8 @@ document.getElementById('grid').innerHTML =
     <td class="num tnum${g.bestMs != null ? ' best' : ' none'}">${fmt(g.bestMs)}${g.bestRun ? `<span class="when">${esc(dshort(g.bestRun.t))}</span>` : ''}</td>
     <td class="num tnum${g.latest ? '' : ' none'}">${g.latest ? fmt(g.latest.ms) : '—'}${g.latest && g.latest !== g.bestRun ? `<span class="when">+${fmt(g.latest.ms - g.bestMs)}</span>` : ''}</td>
     <td class="trend">${spark(g)}</td>
+    <td class="num tnum${g.run_ms != null ? '' : ' none'}"
+        title="${g.run_ms != null ? 'his best for it inside a full run, ' + esc(dshort(g.run_at_ms)) + (g.run_count > 1 ? ', of ' + g.run_count : '') : ''}">${fmt(g.run_ms)}${g.run_ms != null ? `<span class="when">${esc(dshort(g.run_at_ms))}</span>` : ''}</td>
     <td class="num tnum${g.marathon_ms != null ? '' : ' none'}"
         title="${g.marathon_ms != null ? 'in an Arcathlon, ' + esc(dshort(g.marathon_at_ms)) : ''}">${fmt(g.marathon_ms)}</td>
     <td class="num last tnum ${g.lastAt == null ? 'none' : ago > 6 ? 'stale' : ''}">${
@@ -327,7 +343,7 @@ document.getElementById('grid').innerHTML =
 
 document.getElementById('note').textContent = tried === 0
   ? 'Nothing recorded yet. Practice runs are recorded once the tracker is following the board he is timing; his marathon times for these games are shown where he has them.'
-  : 'Attempts and finishes are his own practice for this race; each game links to every attempt. Latest is his most recent finish and how far off his best it was. In the trend, a point is a finish (green when it set a new best) and a tick is a reset, as far as the timer got. The Arcathlon column is his time for the same game in one of his marathons — a real time, but not practice for this list, so it is never added to the rest.';
+  : 'Attempts and finishes are his own practice for this race; each game links to every attempt. Latest is his most recent finish and how far off his best it was. In the trend, a point is a finish (green when it set a new best) and a tick is a reset, as far as the timer got. Full run is his best for the game inside a run of the whole race on its own board. The Arcathlon column is his time for the same game in one of his marathons — a real time, but not practice for this list, so it is never added to the rest.';
 
 // The days, newest first: what he touched, how it went, and which bests
 // were set. A prep log reads by day as much as by game.
