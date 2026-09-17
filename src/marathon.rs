@@ -448,6 +448,16 @@ pub struct Marathon {
     /// Completed rows filed under the name as read because no roster name fit
     /// them. Reported: a roster gone stale must not fail silently.
     unmatched: u32,
+    /// The least a completion of each game can plausibly take, by the
+    /// roster's name for it: half his own best where he has one. A row
+    /// whose segment comes in under it is a misread, not a run — the race
+    /// board's first day filed "Faria 1:07" off a cumulative read short and
+    /// "Moon Crystal 0:30" off a transition row's time landing on a stale
+    /// slot — and is not filed. Empty where nothing is known: then every
+    /// completion stands, as before.
+    floors: HashMap<String, i64>,
+    /// Completions refused under the floor, for the log.
+    implausible: u32,
 }
 
 impl Marathon {
@@ -463,6 +473,8 @@ impl Marathon {
             assigned: Vec::new(),
             identified_from: Vec::new(),
             unmatched: 0,
+            floors: HashMap::new(),
+            implausible: 0,
         }
     }
 
@@ -481,6 +493,16 @@ impl Marathon {
     /// event the cumulative column is strictly increasing, so it identifies
     /// the completion exactly, where a name damaged differently by two OCR
     /// passes does not.
+    /// The least each game can plausibly take (see `floors`), by name.
+    pub fn set_floors(&mut self, floors: HashMap<String, i64>) {
+        self.floors = floors;
+    }
+
+    /// Completions refused as implausibly short.
+    pub fn implausible(&self) -> u32 {
+        self.implausible
+    }
+
     pub fn seed(&mut self, cumulatives: &[i64]) {
         self.known = cumulatives.to_vec();
     }
@@ -864,6 +886,17 @@ impl Marathon {
                 self.unmatched += 1;
             }
             let game = canonical.unwrap_or_else(|| read.clone());
+            // Under half his own best for the game this is a misread, not a
+            // completion: left unrecorded, so a later pass reading the row
+            // right can still file it.
+            if self
+                .floors
+                .get(&game)
+                .is_some_and(|floor| segment_ms < *floor)
+            {
+                self.implausible += 1;
+                continue;
+            }
             let as_read = (game != read).then_some(read);
             self.slots[i].recorded = Some(cum);
             self.known.push(cum);
@@ -1856,6 +1889,40 @@ mod tests {
                 .observe(&p3(), 301_000 + t * 60_000, Some(2_500_000))
                 .is_empty());
         }
+    }
+
+    /// A completion under half his own best for the game is a misread, not a
+    /// run, and is not filed; the row stays open for a pass that reads it
+    /// right. The floors are his: nothing is refused for a game without one.
+    #[test]
+    fn a_completion_under_the_games_floor_is_not_filed() {
+        let mut m = tracker();
+        m.set_floors(HashMap::from([("Faria".to_string(), 240_000)]));
+        let pass = |faria: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![row("Faria", faria), row("Monster Party", &[])],
+            )
+        };
+        assert!(m.observe(&pass(&[]), 1_000, Some(0)).is_empty());
+        assert!(m.observe(&pass(&[]), 61_000, Some(60_000)).is_empty());
+        // The cumulative read short: 1:07 for a game he finishes in eight
+        // minutes. Two passes agree, and it is still not a completion.
+        assert!(m
+            .observe(&pass(&["1:07", "1:07"]), 121_000, Some(67_000))
+            .is_empty());
+        assert!(m
+            .observe(&pass(&["1:07", "1:07"]), 181_000, Some(67_000))
+            .is_empty());
+        assert_eq!(m.implausible(), 1);
+        // Read right, the row files.
+        assert!(m
+            .observe(&pass(&["8:14", "8:14"]), 241_000, Some(494_000))
+            .is_empty());
+        let seen = m.observe(&pass(&["8:14", "8:14"]), 301_000, Some(494_000));
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].game, "Faria");
+        assert_eq!(seen[0].segment_ms, 494_000);
     }
 
     /// A completion is filed under the roster's name for the game, whatever
