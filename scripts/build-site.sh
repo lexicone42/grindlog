@@ -247,7 +247,8 @@ if [ "$(jq -r '.big20 // "null"' site/api/v1/report.json)" != "null" ]; then
   slice=$(mktemp)
   jq -c '{title: ("Big 20 " + .big20.race + " · prep"),
           day_offset_minutes: .day_offset_minutes,
-          date: .big20.date, url: .big20.url, games: .big20.games}' \
+          date: .big20.date, url: .big20.url, games: .big20.games,
+          run_throughs: (.big20.run_throughs // [])}' \
      site/api/v1/report.json > "$slice"
   render_event "big20" "Big 20 prep" "$slice" site/big20.html
   rm -f "$slice"

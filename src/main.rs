@@ -172,7 +172,12 @@ async fn main() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     limit_openmp_threads();
+    // Logs go to stderr, every subcommand: `report --json` prints the site's
+    // JSON on stdout, and a config-time INFO line — the [[games]] roster
+    // load, once live.toml carried one — landed in front of it and the site
+    // build rejected its own report for half a day.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )

@@ -323,7 +323,7 @@ if (D.kind === 'game') {
     }
     document.getElementById('grid').innerHTML = html;
     if (marathon.length) {
-      html = `<tr class="day"><td colspan="4">In his Arcathlons<small>not practice for the race</small></td></tr>` +
+      html = `<tr class="day"><td colspan="4">In his full runs and Arcathlons<small>race conditions, not practice attempts</small></td></tr>` +
         marathon.slice().reverse().map(r => `<tr>
           <td class="n tnum"></td>
           <td class="num tnum">${r.final_time_ms != null ? fmt(r.final_time_ms) : '<span class="none">—</span>'}</td>
