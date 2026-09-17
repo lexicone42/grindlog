@@ -56,3 +56,4 @@ nohup.out
 
 # Agent worktrees the tooling places inside the repository
 /.claude/
+obs-live.jsonl.*
