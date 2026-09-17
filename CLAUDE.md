@@ -17,7 +17,7 @@ including without root).
 A Rust bot that watches a Twitch stream, reads the streamer's LiveSplit
 timer off the video, logs every attempt to SQLite and publishes a records
 site. One binary, `ngtwitchtimer`, with subcommands (`run`, `calibrate`,
-`locate`, `report`, `glyphs`, `audit`). The reference deployment follows one
+`locate`, `pane`, `report`, `glyphs`, `audit`). The reference deployment follows one
 streamer around the clock and is the thing every change here ends up running
 against.
 

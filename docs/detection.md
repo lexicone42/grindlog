@@ -107,6 +107,11 @@ dark/poor-quality unlocks above, feeds the run state machine no readings, and
 is let go when no marathon is in force five minutes after the grant. See
 [marathons](marathons.md#the-race-board-big-20).
 
+On a frame in front of you, `ngtwitchtimer pane` shows what the pane pass and
+the board probe would make of it: per layout and threshold, the rectangle read,
+the rows and names, the title, the verdict. It is the loop that found every
+live-only defect of the race board's first day, as a subcommand.
+
 **The hundredths font.** LiveSplit draws the fraction of the main timer in a
 smaller font, and at stream resolution its decimal point is a couple of
 pixels that thresholding erases: `4.76` reads as `476`, `3:06.12` as

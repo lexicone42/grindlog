@@ -72,6 +72,7 @@ ngtwitchtimer -c live.toml run   # any config file
 ngtwitchtimer report             # PBs, today's stats, recent runs
 ngtwitchtimer report --json      # machine-readable (feeds the site)
 ngtwitchtimer locate             # find the LiveSplit pane in a frame
+ngtwitchtimer pane [--image f.png] # what the pane pass reads, per layout and threshold
 ngtwitchtimer calibrate          # tune the timer crop by eye
 ngtwitchtimer glyphs train|test|boxes   # the timer's template reader
 RUST_LOG=ngtwitchtimer=debug ngtwitchtimer   # per-frame tracing
