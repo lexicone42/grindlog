@@ -944,7 +944,17 @@ pub async fn now_playing(pool: &SqlitePool) -> Result<NowPlaying> {
         // event started, or that its board was replaced under it (a rebuilt
         // tracker, the event still on); "ended" is the one that closes it.
         // The rows it has recorded are this session's runs of its category.
-        let marathon = match events.iter().rev().find(|e| e["k"] == "marathon") {
+        // The tracker writes every completion as a marathon event too
+        // ("Hydlide 18:32.0"), so the newest marathon event is not the
+        // state: the newest one that says started, replaced or ended is.
+        let is_state = |d: &str| {
+            d.ends_with(" started") || d.ends_with(" board replaced") || d.ends_with(" ended")
+        };
+        let marathon = match events
+            .iter()
+            .rev()
+            .find(|e| e["k"] == "marathon" && e["d"].as_str().is_some_and(is_state))
+        {
             Some(e) => {
                 let d = e["d"].as_str().unwrap_or_default();
                 let category = d
@@ -1520,6 +1530,9 @@ mod tests {
             .unwrap();
         let mut h = SessionHealth::default();
         h.event(20, "marathon", "Big 20 #23 run started".to_string());
+        // Every completion is a marathon event too, and must not read as
+        // the state: the newest state line is "started".
+        h.event(25, "marathon", "Hydlide 18:32.0".to_string());
         update_session_health(&pool, sid2, &h).await.unwrap();
         let now = now_playing(&pool).await.unwrap();
         let m = now.marathon.expect("a marathon in force");
