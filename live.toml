@@ -261,9 +261,13 @@ match = ["arcath", "randomized"]
 # the twenty games two rows each (the game, then its category in brackets)
 # under the webcam, columns +/- | Game | Total, the timer in a light band at
 # the foot of the pane with a small segment timer beneath it. No attempt
-# counter. `locate` found the digits at 455,968 91x52; the splits crop is
-# wide enough to take the title rows in with the time columns.
+# counter. The timer crop is the big digits only, with room on the left for
+# two-digit minutes and the hours digit the race total will grow: the first
+# crop (from `locate` on a "1:50" reading) had "17:10" touching its left edge,
+# which the probe rightly refuses as clipped, and took in the small segment
+# timer beneath, which halved the read rate. The splits crop is wide enough
+# to take the title rows in with the time columns.
 [[layouts]]
 name = "big20-race"
-timer = { crop_x = 415, crop_y = 951, crop_w = 143, crop_h = 86 }
+timer = { crop_x = 375, crop_y = 953, crop_w = 190, crop_h = 56 }
 splits = { crop_x = 280, crop_y = 450, crop_w = 340, crop_h = 480 }
