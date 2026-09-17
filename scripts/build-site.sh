@@ -222,7 +222,9 @@ while IFS= read -r game; do
   jq -c --arg g "$game" \
     '{kind: "game", title: $g, day_offset_minutes: .day_offset_minutes,
       race: ((.big20 // {}) as $b | (($b.games // []) | map(select(.game == $g)) | .[0]) as $r
-             | if $r then {name: $b.race, n: $r.n, goal: $r.goal} else null end),
+             | if $r then {name: $b.race, n: $r.n, goal: $r.goal, of: ($b.games | length),
+                                date: $b.date, marathon_ms: $r.marathon_ms, marathon_at_ms: $r.marathon_at_ms}
+               else null end),
       runs: [.other_events[] as $e | $e.games[] | select(.game == $g)
              | {day: $e.day, started_at_ms, event: $e.label, practice: ($e.practice // false),
                 href: (if ($e.label | startswith("Arcathlon #"))

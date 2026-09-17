@@ -86,12 +86,49 @@
   .scroll { overflow-x: auto; }
   .note { color: var(--muted); font-size: 12.5px; margin: 18px 0 0; }
   footer { margin-top: 34px; color: var(--muted); font-size: 12px; }
+  /* A PRACTICE game's page: tiles for the figures, a chart of every
+     attempt, then the attempts by day. */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 0 0 14px; }
+  .tile { background: var(--card); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px 10px; }
+  .tile b { display: block; font-family: "Martian Mono", monospace; font-size: 20px; font-weight: 600; line-height: 1.15; font-variant-numeric: tabular-nums; }
+  .tile b.gold { color: var(--gold); }
+  .tile span { display: block; color: var(--muted); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; margin-top: 4px; }
+  .tile small { color: var(--ink2); font-size: 12px; display: block; margin-top: 2px; }
+  .chart { margin: 0 0 14px; padding: 14px 16px 10px; }
+  .chart svg { display: block; width: 100%; height: auto; }
+  .chart .grid { stroke: var(--hairline); stroke-width: 1; }
+  .chart .lbl { fill: var(--muted); font-size: 10px; font-family: "Martian Mono", monospace; }
+  .chart .line { fill: none; stroke: var(--gold); stroke-width: 1.4; opacity: .85; }
+  .chart .fin { fill: var(--gold); }
+  .chart .pb { fill: var(--ahead); }
+  .chart .rs { stroke: var(--muted); stroke-width: 2; opacity: .55; }
+  .chart .goalline { stroke: var(--series); stroke-width: 1; stroke-dasharray: 3 3; opacity: .7; }
+  .legend { color: var(--muted); font-size: 11.5px; margin: 8px 0 0; display: flex; gap: 16px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+  .legend i.fin { background: var(--gold); }
+  .legend i.pb { background: var(--ahead); }
+  .legend i.rs { background: var(--muted); border-radius: 1px; width: 3px; height: 9px; }
+  .legend i.mar { background: var(--series); width: 12px; height: 2px; border-radius: 0; vertical-align: 3px; }
+  tr.day td { border-top: 2px solid var(--hairline); padding-top: 12px; color: var(--ink2); font-weight: 600; }
+  tr.day td small { color: var(--muted); font-weight: 400; margin-left: 10px; }
+  th.bar, td.bar { width: 34%; min-width: 120px; padding-left: 18px; }
+  .depth { position: relative; height: 8px; border-radius: 2px; background: rgba(130,140,255,.10); overflow: hidden; }
+  .depth i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--muted); opacity: .6; }
+  .depth i.fin { background: var(--gold); opacity: 1; }
+  .depth i.pb { background: var(--ahead); opacity: 1; }
+  .delta { color: var(--muted); font-size: 11.5px; }
+  .tag {
+    font-family: "Silkscreen", monospace; font-size: 8px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--ahead); margin-left: 8px; vertical-align: 2px;
+  }
 </style>
 
 <div class="wrap">
   <a class="back" href="/">&larr; all games</a>
   <h1 id="title"></h1>
   <p class="sub" id="sub"></p>
+  <div class="tiles" id="tiles" hidden></div>
+  <section class="card chart" id="chart" hidden></section>
   <section class="card scroll"><table id="grid"></table></section>
   <p class="note" id="note"></p>
   <footer>Times read off the on-screen LiveSplit board, frame by frame · <a href="/api/v1/README.md">data</a></footer>
@@ -149,20 +186,155 @@ if (D.kind === 'game') {
   document.getElementById('sub').textContent =
     race + counts + (best != null ? ` · best ${fmt(best)}` : '') + span;
   if (practice) {
+    // Practice rows only from here on; a marathon completion of the same
+    // game is real but not practice, and it is listed apart at the end.
+    const marathon = D.runs.filter(r => !r.practice).sort((a, b) => a.started_at_ms - b.started_at_ms);
+    const byTime = D.runs.filter(r => r.practice).sort((a, b) => a.started_at_ms - b.started_at_ms);
+    const played = byTime.length;
+    // Every attempt in time order with the running best alongside: a
+    // finish that beat everything before it is a new best, and a reset is
+    // worth exactly how far the timer got.
+    let running = null;
+    for (const r of byTime) {
+      r.fin = r.final_time_ms != null;
+      r.pb = r.fin && (running == null || r.final_time_ms < running);
+      if (r.pb) running = r.final_time_ms;
+      r.depth = r.fin ? r.final_time_ms : r.last_timer_ms;
+    }
+    const fins = byTime.filter(r => r.fin);
+    const bestRun = fins.reduce((m, r) => (m == null || r.final_time_ms < m.final_time_ms) ? r : m, null);
+    const latest = fins.length ? fins[fins.length - 1] : null;
+    const avg = fins.length ? fins.reduce((n, r) => n + r.final_time_ms, 0) / fins.length : null;
+    const days = [...new Set(byTime.map(r => r.day))];
+    const rate = played ? Math.round(100 * fins.length / played) : 0;
+    const R = D.race;
+    document.getElementById('sub').textContent =
+      (R ? `Big 20 ${R.name} · game ${R.n} of ${R.of || 20}${R.goal ? ' · ' + R.goal : ''} · ` : '') +
+      `${played} attempt${played === 1 ? '' : 's'}, ${fins.length} finished` +
+      (bestRun ? ` · best ${fmt(bestRun.final_time_ms)}` : '') +
+      (played > 1 ? ` · ${dshort(byTime[0].started_at_ms)} to ${dshort(byTime[played - 1].started_at_ms)}` : '');
+    if (R) {
+      document.getElementById('sub').insertAdjacentHTML('beforeend',
+        ' · <a href="/big20/index.html">the race</a>');
+    }
+
+    // The figures, as tiles.
+    const tile = (v, label, sub, cls) =>
+      `<div class="tile"><b class="${cls || ''}">${v}</b><span>${label}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
+    const tiles = document.getElementById('tiles');
+    tiles.hidden = false;
+    tiles.innerHTML =
+      tile(played, played === 1 ? 'attempt' : 'attempts', `over ${days.length} day${days.length === 1 ? '' : 's'}`) +
+      tile(fins.length, 'finished', played ? `${rate}% of attempts` : '') +
+      tile(bestRun ? fmt(bestRun.final_time_ms) : '—', 'best',
+           bestRun ? `#${bestRun.attempt_number} · ${dshort(bestRun.started_at_ms)}` : 'no finish yet', 'gold') +
+      tile(latest ? fmt(latest.final_time_ms) : '—', 'latest finish',
+           latest && latest !== bestRun ? `+${fmt(latest.final_time_ms - bestRun.final_time_ms)} off the best`
+           : latest ? 'is the best' : '') +
+      tile(avg != null ? fmt(avg) : '—', 'average finish', fins.length > 1 ? `over ${fins.length} finishes` : '') +
+      (R && R.marathon_ms != null
+        ? tile(fmt(R.marathon_ms), 'in an Arcathlon', `${dshort(R.marathon_at_ms)} · not practice`) : '');
+
+    // The chart: attempts left to right, time up. A finish is a point on
+    // the line (green when it was a new best); a reset is a bar up to where
+    // the timer was; his Arcathlon time, where there is one, is a dashed
+    // rule to measure the finishes against.
+    if (byTime.length) {
+      const W = 860, H = 230, L = 56, Rm = 14, T = 12, B = 30;
+      const top0 = Math.max(...byTime.map(r => r.depth || 0), R && R.marathon_ms || 0, 1);
+      const steps = [10e3, 15e3, 30e3, 60e3, 120e3, 300e3, 600e3, 900e3, 1800e3, 3600e3];
+      const step = steps.find(s => top0 / s <= 5) || 3600e3;
+      const top = Math.ceil(top0 * 1.04 / step) * step;
+      const n = byTime.length;
+      const x = i => n === 1 ? (L + W - Rm) / 2 : L + i * (W - L - Rm) / (n - 1);
+      const y = v => T + (1 - v / top) * (H - T - B);
+      const tick = v => v >= 3600e3 ? `${Math.floor(v / 3600e3)}:${String(Math.floor(v / 60e3) % 60).padStart(2, '0')}:00`
+                      : v % 60e3 === 0 ? `${v / 60e3}:00` : `${Math.floor(v / 60e3)}:${String((v / 1e3) % 60).padStart(2, '0')}`;
+      let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(played + ' attempts')}">`;
+      for (let v = 0; v <= top; v += step) {
+        svg += `<line class="grid" x1="${L}" x2="${W - Rm}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>` +
+               `<text class="lbl" x="${L - 8}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end">${tick(v)}</text>`;
+      }
+      if (R && R.marathon_ms != null) {
+        svg += `<line class="goalline" x1="${L}" x2="${W - Rm}" y1="${y(R.marathon_ms).toFixed(1)}" y2="${y(R.marathon_ms).toFixed(1)}"/>`;
+      }
+      // Day labels along the bottom, one per first attempt of a day.
+      let lastDay = null;
+      byTime.forEach((r, i) => {
+        if (r.day !== lastDay) {
+          svg += `<text class="lbl" x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : n > 1 && i === n - 1 ? 'end' : 'middle'}">${esc(dshort(r.started_at_ms))}</text>`;
+          lastDay = r.day;
+        }
+      });
+      const w = Math.max(2, Math.min(10, (W - L - Rm) / Math.max(n, 1) * 0.5));
+      byTime.forEach((r, i) => {
+        if (!r.fin && r.depth != null) {
+          svg += `<line class="rs" x1="${x(i).toFixed(1)}" x2="${x(i).toFixed(1)}" y1="${y(0).toFixed(1)}" y2="${y(r.depth).toFixed(1)}" style="stroke-width:${w.toFixed(1)}"><title>${esc('#' + r.attempt_number + ' · ' + dshort(r.started_at_ms) + ' · reset at ' + fmt(r.depth))}</title></line>`;
+        }
+      });
+      const pts = byTime.map((r, i) => r.fin ? `${x(i).toFixed(1)},${y(r.final_time_ms).toFixed(1)}` : null).filter(Boolean);
+      if (pts.length > 1) svg += `<polyline class="line" points="${pts.join(' ')}"/>`;
+      byTime.forEach((r, i) => {
+        if (r.fin) {
+          svg += `<circle class="${r.pb ? 'pb' : 'fin'}" cx="${x(i).toFixed(1)}" cy="${y(r.final_time_ms).toFixed(1)}" r="4.5"><title>${esc('#' + r.attempt_number + ' · ' + dshort(r.started_at_ms) + ' · ' + fmt(r.final_time_ms) + (r.pb ? ' · new best' : ''))}</title></circle>`;
+        }
+      });
+      svg += '</svg>';
+      const chart = document.getElementById('chart');
+      chart.hidden = false;
+      chart.innerHTML = svg +
+        `<div class="legend"><span><i class="fin"></i>finish</span><span><i class="pb"></i>new best</span>` +
+        `<span><i class="rs"></i>reset, as far as the timer got</span>` +
+        (R && R.marathon_ms != null ? `<span><i class="mar"></i>his Arcathlon time</span>` : '') + `</div>`;
+    }
+
+    // The attempts, by day, newest first. The bar is how far each got,
+    // on one scale for the whole page, so a reset deep into the game
+    // reads as what it was.
+    const top = Math.max(...byTime.map(r => r.depth || 0), 1);
     const rows = [...byTime].reverse();
-    document.getElementById('grid').innerHTML =
-      `<tr><th>Date</th><th class="n">#</th><th class="num">Result</th></tr>` +
-      rows.map(r => `<tr>
-        <td class="tnum">${dshort(r.started_at_ms)}</td>
+    let html = `<tr><th class="n">#</th><th class="num">Result</th><th class="bar">How far</th><th>Against the best</th></tr>`;
+    let day = null;
+    for (const r of rows) {
+      if (r.day !== day) {
+        day = r.day;
+        const ofDay = byTime.filter(x => x.day === day);
+        const f = ofDay.filter(x => x.fin);
+        const b = f.length ? Math.min(...f.map(x => x.final_time_ms)) : null;
+        html += `<tr class="day"><td colspan="4">${esc(dshort(r.started_at_ms))}<small>${ofDay.length} attempt${ofDay.length === 1 ? '' : 's'}` +
+                `${f.length ? ` · ${f.length} finished · best ${fmt(b)}` : ' · no finish'}</small></td></tr>`;
+      }
+      const pct = r.depth != null ? Math.max(1, Math.min(100, 100 * r.depth / top)) : 0;
+      const against = r.fin
+        ? (r === bestRun ? '<span class="delta">the best</span>'
+           : `<span class="delta">+${fmt(r.final_time_ms - bestRun.final_time_ms)}</span>`)
+        : (r.depth != null && bestRun
+           ? `<span class="delta">reset at ${Math.round(100 * r.depth / bestRun.final_time_ms)}% of the best</span>`
+           : r.depth != null ? '<span class="delta">reset</span>' : '');
+      html += `<tr>
         <td class="n tnum">${r.attempt_number ?? ''}</td>
-        <td class="num tnum${r.final_time_ms != null && r.final_time_ms === best ? ' best' : ''}">${
-          r.final_time_ms != null ? fmt(r.final_time_ms)
-          : r.last_timer_ms != null ? `<span class="none">reset at ${fmt(r.last_timer_ms)}</span>`
+        <td class="num tnum${r === bestRun ? ' best' : ''}">${
+          r.fin ? fmt(r.final_time_ms) + (r.pb && r !== bestRun ? '<span class="tag">new best</span>' : '')
+          : r.depth != null ? `<span class="none">reset at ${fmt(r.depth)}</span>`
           : '<span class="none">—</span>'}</td>
-      </tr>`).join('');
+        <td class="bar"><div class="depth"><i class="${r === bestRun ? 'pb' : r.fin ? 'fin' : ''}" style="width:${pct.toFixed(1)}%"></i></div></td>
+        <td>${against}</td>
+      </tr>`;
+    }
+    document.getElementById('grid').innerHTML = html;
+    if (marathon.length) {
+      html = `<tr class="day"><td colspan="4">In his Arcathlons<small>not practice for the race</small></td></tr>` +
+        marathon.slice().reverse().map(r => `<tr>
+          <td class="n tnum"></td>
+          <td class="num tnum">${r.final_time_ms != null ? fmt(r.final_time_ms) : '<span class="none">—</span>'}</td>
+          <td class="bar"></td>
+          <td class="delta">${esc(dshort(r.started_at_ms))} · ${r.href ? `<a href="${r.href}">${esc(r.event)}</a>` : esc(r.event)}</td>
+        </tr>`).join('');
+      document.getElementById('grid').insertAdjacentHTML('beforeend', html);
+    }
     document.getElementById('note').textContent =
-      'Every attempt, newest first. A finish shows its time, with the fastest marked; a reset shows how far the timer had got.' +
-      (D.race ? ` Practice for Big 20 ${D.race.name}.` : '');
+      'Every attempt, newest first, by day. A finish shows its time, with the fastest marked and each new best tagged; a reset shows how far the timer had got. The bars share one scale, so a reset deep into the game reads as what it was.' +
+      (D.race ? ` Practice for Big 20 ${D.race.name}, game ${D.race.n} of ${D.race.of || 20}.` : '');
   } else {
     document.getElementById('grid').innerHTML =
       `<tr><th>Date</th><th>Event</th><th class="num">Time</th></tr>` +
