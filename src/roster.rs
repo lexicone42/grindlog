@@ -695,11 +695,40 @@ pub fn bundled_all() -> Vec<Rosters> {
     .collect()
 }
 
+/// A damaged reading folded onto a name the way a FOREIGN board's header is,
+/// with what it is filed under.
+///
+/// The race he is practising for is tried first, with the wide net the
+/// matcher uses INSIDE a roster — where the sequel number is only a
+/// tie-break, because an event holds one of each family. The race holds
+/// one Mega Man and one Ghostbusters, so a header that lost its numeral
+/// ("Mega Man" for Mega Man 6, "New Ghostbusters" for New Ghostbusters II)
+/// still lands on the right one. Against the whole pool those same readings
+/// were refused or misfiled: the pool holds six Mega Mans and keeps the
+/// number strict, which is what stops "Ninja Gaiden Ill" becoming Ninja
+/// Gaiden II — and it stays strict here for everything the race does not
+/// name. The Arcathlon pool comes second, on those terms.
+///
+/// Cached: the identity gate asks once a pane pass, and the files do not
+/// change while the bot runs.
+pub fn canonical_foreign(read: &str) -> Option<(String, Option<String>)> {
+    type Shipped = (Option<(Rosters, usize)>, Vec<Rosters>);
+    static SHIPPED: std::sync::OnceLock<Shipped> = std::sync::OnceLock::new();
+    let (race, pool) = SHIPPED.get_or_init(|| (big20(), bundled_all()));
+    if let Some((r, e)) = race {
+        if let Some(g) = r.assign(Some(*e), &[Some(read)]).first().copied().flatten() {
+            return Some((g.to_string(), r.category_of(g).map(str::to_string)));
+        }
+    }
+    pool.iter().find_map(|r| {
+        let g = r.assign(None, &[Some(read)]).first().copied().flatten()?;
+        Some((g.to_string(), r.category_of(g).map(str::to_string)))
+    })
+}
+
 /// The canonical name for a damaged reading, across every shipped roster.
 pub fn canonical_any(read: &str) -> Option<String> {
-    bundled_all()
-        .iter()
-        .find_map(|r| r.canonical(read).map(str::to_string))
+    canonical_foreign(read).map(|(g, _)| g)
 }
 
 #[cfg(test)]
@@ -1104,6 +1133,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ok.lineup(0), vec![("Die Hard", None), ("Jaws", None)]);
+    }
+
+    /// A foreign header with its numeral lost lands on the race's one game of
+    /// that family; a name the race does not hold still goes through the
+    /// pool with the sequel kept strict.
+    #[test]
+    fn a_foreign_header_is_folded_against_the_race_first() {
+        let name = |s: &str| canonical_foreign(s).map(|(g, _)| g);
+        assert_eq!(name("Mega Man").as_deref(), Some("Mega Man 6"));
+        assert_eq!(
+            name("New Ghostbusters").as_deref(),
+            Some("New Ghostbusters II")
+        );
+        assert_eq!(
+            name("New Ghostbusters Ii").as_deref(),
+            Some("New Ghostbusters II")
+        );
+        assert_eq!(
+            canonical_foreign("Mega Man")
+                .and_then(|(_, c)| c)
+                .as_deref(),
+            Some("Big 20 #23"),
+            "and it carries the race's category"
+        );
+        // Not in the race: the pool, strict. Zelda is Zelda, not Zelda II.
+        assert_eq!(name("Zelda").as_deref(), Some("Zelda"));
+        assert_eq!(canonical_foreign("Zelda").and_then(|(_, c)| c), None);
+        assert_eq!(name("Some Game Nobody Listed"), None);
     }
 
     /// The Arcathlon rosters and the Big 20 list are separate files because

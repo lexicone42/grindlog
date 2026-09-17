@@ -208,7 +208,11 @@ game, against it, or not at all:
   the header does not merely fail to match, it matches a game on a list
   this build ships (the Arcathlon rosters and the Big 20 roster, folded by
   `roster.rs`'s own matcher, which is far better at damaged names than a
-  string compare). Recognising the other game is *corroboration*, which is
+  string compare). The race he is practising for is tried first, with the
+  wide inside-a-roster net — it holds one Mega Man and one Ghostbusters, so
+  a header that lost its numeral ("Mega Man", "New Ghostbusters") still lands
+  on the right one — and the Arcathlon pool after, with the sequel kept
+  strict (`roster::canonical_foreign`). Recognising the other game is *corroboration*, which is
   why a header alone can convict when it names something and cannot when
   it does not.
 
