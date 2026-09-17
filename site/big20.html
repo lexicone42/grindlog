@@ -1,14 +1,21 @@
 <!-- Preparation for one Big 20 race, as its own page. Rendered by
      scripts/build-site.sh from the report's `big20` block, which is the
      race's twenty games in RACE ORDER joined against what the database
-     holds for each. Do not write the data placeholder's name in prose
-     anywhere in this file: the splice takes the whole line, and a mention
-     in a comment silently ate the data once already.
+     holds for each, every practice attempt included. Do not write the data
+     placeholder's name in prose anywhere in this file: the splice takes the
+     whole line, and a mention in a comment silently ate the data once
+     already.
 
      What the page is for: the empty rows. A leaderboard shows what has
      been done; a prep page has to show what is left, so all twenty are
      listed whether or not he has touched them, in the sequence he will
      run them on the day.
+
+     What it adds up to: the race is the twenty back to back, so the number
+     that matters is the SUM — of his bests (the ceiling) and of his latest
+     finishes (what a race day would look like). Both are shown over the
+     games that have a finish, with the games that do not named, because a
+     sum over nineteen is not a race time.
 
      Two columns that look alike and are not:
        PRACTICE — attempts under his own splits for this race. This is what
@@ -31,14 +38,14 @@
     --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
     --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
     --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
-    --pending: rgba(130,140,255,.10);
+    --pending: rgba(130,140,255,.10); --tick: rgba(162,166,200,.45);
   }
   :root:not([data-theme="dark"]) {
     color-scheme: light;
     --bg: #f2f2ec; --card: #ffffff; --ink: #171425; --ink2: #4e5170;
     --muted: #83879f; --hairline: rgba(20,15,60,.11); --series: #2a78d6;
     --gold: #a9791a; --gold-soft: rgba(169,121,26,.12); --ahead: #1f8f63;
-    --pending: rgba(20,15,60,.08);
+    --pending: rgba(20,15,60,.08); --tick: rgba(78,81,112,.4);
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -46,7 +53,7 @@
       --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
       --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
       --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
-      --pending: rgba(130,140,255,.10);
+      --pending: rgba(130,140,255,.10); --tick: rgba(162,166,200,.45);
     }
   }
   :root[data-theme="dark"] {
@@ -54,13 +61,13 @@
     --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
     --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
     --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
-    --pending: rgba(130,140,255,.10);
+    --pending: rgba(130,140,255,.10); --tick: rgba(162,166,200,.45);
   }
   body {
     background: var(--bg); color: var(--ink); margin: 0;
     font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  .wrap { max-width: 900px; margin: 0 auto; padding: 28px 20px 60px; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 60px; }
   a { color: var(--series); }
   .back {
     font-family: "Silkscreen", monospace; font-size: 10px; letter-spacing: .1em;
@@ -68,6 +75,10 @@
   }
   .back:hover { color: var(--ink); }
   h1 { font-size: clamp(22px, 4vw, 32px); margin: 14px 0 4px; letter-spacing: -.01em; }
+  h2 {
+    font-family: "Silkscreen", monospace; font-size: 11px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--muted); font-weight: 400; margin: 30px 0 10px;
+  }
   .sub { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
   .card { background: var(--card); border: 1px solid var(--hairline); border-radius: 8px; padding: 18px 20px; }
   /* Twenty cells in race order: which of the twenty he has practised, and
@@ -79,11 +90,19 @@
   }
   .strip i.done { background: var(--ahead); }
   .strip i.some { background: var(--gold); }
-  .counts {
-    display: flex; gap: 26px; flex-wrap: wrap; margin: 0 0 20px;
-    font-size: 13px; color: var(--ink2);
-  }
-  .counts b { color: var(--ink); font-weight: 600; }
+  /* The counts, as tiles: one figure each, the label under it. */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 0 0 14px; }
+  .tile { background: var(--card); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px 10px; }
+  .tile b { display: block; font-family: "Martian Mono", monospace; font-size: 20px; font-weight: 600; line-height: 1.15; font-variant-numeric: tabular-nums; }
+  .tile span { display: block; color: var(--muted); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; margin-top: 4px; }
+  .tile small { color: var(--ink2); font-size: 12px; display: block; margin-top: 2px; }
+  /* The projection: what the twenty add up to, two ways. */
+  .project { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px 28px; margin: 0 0 22px; border-left: 3px solid var(--gold); }
+  .project .lbl { color: var(--muted); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+  .project .sum { font-family: "Martian Mono", monospace; font-size: 26px; font-weight: 600; color: var(--gold); font-variant-numeric: tabular-nums; line-height: 1.2; margin: 2px 0; }
+  .project .sum.plain { color: var(--ink); }
+  .project .over { color: var(--ink2); font-size: 12.5px; }
+  .project .miss { color: var(--muted); font-size: 12px; margin-top: 4px; }
   .scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   th {
@@ -91,21 +110,38 @@
     letter-spacing: .04em; text-transform: uppercase; padding: 0 10px 8px 0;
     border-bottom: 1px solid var(--hairline); white-space: nowrap;
   }
-  td { padding: 8px 10px 8px 0; border-top: 1px solid var(--hairline); }
-  /* Five numeric columns in a row read as one block unless they are given
-     room; at the default cell padding the dashes of an untouched game run
-     together. */
+  td { padding: 7px 10px 7px 0; border-top: 1px solid var(--hairline); vertical-align: middle; }
   th.num, td.num { text-align: right; padding-right: 18px; }
   th.last, td.last { padding-right: 0; white-space: nowrap; }
-  th.game, td.game { padding-right: 18px; }
+  th.game, td.game { padding-right: 18px; white-space: nowrap; }
+  td.game .goal { display: block; }
+  td.game a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--hairline); }
+  td.game a:hover { color: var(--series); border-color: var(--series); }
   .tnum { font-family: "Martian Mono", monospace; font-variant-numeric: tabular-nums; font-size: 12.5px; }
   .n { color: var(--muted); width: 2em; }
   .goal { color: var(--ink2); font-size: 12.5px; }
   .best { color: var(--gold); font-weight: 600; }
   .none { color: var(--muted); }
+  .when { display: block; color: var(--muted); font-size: 10.5px; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .rate { color: var(--muted); font-size: 11px; }
+  /* The trend: every attempt in order, finishes as points on a line,
+     resets as ticks at the depth the timer reached. */
+  td.trend { padding-right: 14px; }
+  .spark { display: block; width: 132px; height: 30px; }
+  .spark .line { fill: none; stroke: var(--gold); stroke-width: 1.2; opacity: .8; }
+  .spark .fin { fill: var(--gold); }
+  .spark .pb { fill: var(--ahead); }
+  .spark .rs { stroke: var(--tick); stroke-width: 1.5; }
   /* A game with no attempt at all: the row is still there, and quiet. */
   tr.untouched td { color: var(--muted); }
   tr.untouched .goal { color: var(--muted); }
+  tr.untouched td.game a { color: var(--muted); }
+  .stale { color: var(--muted); }
+  .pbs { font-size: 12.5px; color: var(--ink2); }
+  .pbs b { color: var(--gold); font-weight: 600; font-family: "Martian Mono", monospace; font-size: 12px; }
+  .pbs .from { color: var(--muted); font-size: 11px; }
+  .pbs .firsts { color: var(--muted); }
+  .pbs .firsts b { color: var(--ink2); font-weight: 500; }
   .note { color: var(--muted); font-size: 12.5px; margin: 18px 0 0; }
   footer { margin-top: 34px; color: var(--muted); font-size: 12px; }
 </style>
@@ -115,9 +151,13 @@
   <h1 id="title"></h1>
   <p class="sub" id="sub"></p>
   <div class="strip" id="strip"></div>
-  <div class="counts" id="counts"></div>
+  <div class="tiles" id="tiles"></div>
+  <section class="card project" id="project" hidden></section>
+  <h2>The twenty, in race order</h2>
   <section class="card scroll"><table id="grid"></table></section>
   <p class="note" id="note"></p>
+  <h2 id="days-head" hidden>Practice days</h2>
+  <section class="card scroll" id="days-card" hidden><table id="days"></table></section>
   <footer>Times read off the on-screen LiveSplit board, frame by frame · <a href="/api/v1/README.md">data</a></footer>
 </div>
 
@@ -138,9 +178,20 @@ const fmt = ms => {
   const m = Math.floor(t / 60), s = (t - m * 60).toFixed(1).padStart(4, '0');
   return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${s}` : `${m}:${s}`;
 };
+// Whole hours and minutes, for a total that is hours long.
+const hm = ms => {
+  const m = Math.round(ms / 60000);
+  return m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m` : `${m}m`;
+};
 const TZ = (D.day_offset_minutes || 0) * 60000;
 const dshort = ms => ms == null ? '—' : new Date(ms + TZ).toLocaleDateString(undefined,
   { month: 'short', day: 'numeric', timeZone: 'UTC' });
+const dayOf = s => new Date(s + 'T00:00:00Z').toLocaleDateString(undefined,
+  { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+// The same slug scripts/build-site.sh names a game's directory with.
+const slugOf = g => String(g).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const today = new Date(Date.now() + TZ);
+const daysAgo = ms => Math.floor((today - new Date(ms + TZ)) / 86400000);
 
 const games = D.games || [];
 document.title = D.title;
@@ -151,7 +202,7 @@ document.getElementById('title').textContent = D.title;
 const parts = [];
 if (D.date) {
   const day = new Date(D.date + 'T00:00:00Z');
-  const days = Math.round((day - new Date(Date.now() + TZ)) / 86400000);
+  const days = Math.round((day - today) / 86400000);
   const when = day.toLocaleDateString(undefined,
     { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
   parts.push(days > 1 ? `${when} · ${days} days away`
@@ -167,38 +218,153 @@ if (D.url) {
     ` · <a href="${esc(D.url)}" rel="noopener">the rules</a>`);
 }
 
+// Per game, from its attempts in time order: the finishes, the best and
+// when it was set, the latest finish, and which finishes were a new best.
+for (const g of games) {
+  const runs = (g.runs || []).slice().sort((a, b) => a.t - b.t);
+  let best = null;
+  for (const r of runs) {
+    r.fin = r.o === 'finished' && r.ms != null;
+    r.pb = r.fin && (best == null || r.ms < best);
+    if (r.pb) best = r.ms;
+    // How far the attempt got: the finish time, or where the timer was
+    // when he reset.
+    r.depth = r.fin ? r.ms : r.at;
+  }
+  const fins = runs.filter(r => r.fin);
+  g.log = runs;
+  g.fins = fins;
+  g.bestRun = fins.reduce((m, r) => (m == null || r.ms < m.ms) ? r : m, null);
+  g.latest = fins.length ? fins[fins.length - 1] : null;
+  g.att = runs.length || g.attempts || 0;
+  g.fin = fins.length || g.finished || 0;
+  g.bestMs = g.bestRun ? g.bestRun.ms : g.best_ms;
+  g.lastAt = runs.length ? runs[runs.length - 1].t : g.last_at_ms;
+}
+
 // Practised / finished / untouched, and the strip that shows which.
 // "some" is attempted but never finished, which on a prep page is a
 // different state from both done and not started.
-const finished = games.filter(g => g.finished > 0).length;
-const tried = games.filter(g => g.attempts > 0).length;
-const attempts = games.reduce((n, g) => n + (g.attempts || 0), 0);
+const finished = games.filter(g => g.fin > 0).length;
+const tried = games.filter(g => g.att > 0).length;
+const attempts = games.reduce((n, g) => n + g.att, 0);
+const finishes = games.reduce((n, g) => n + g.fin, 0);
+const onTimer = games.reduce((n, g) => n + g.log.reduce((m, r) => m + (r.depth || 0), 0), 0);
+const days = [...new Set(games.flatMap(g => g.log.map(r => r.day)))].sort();
 document.getElementById('strip').innerHTML = games.map(g =>
-  `<i class="${g.finished > 0 ? 'done' : g.attempts > 0 ? 'some' : ''}" title="${esc(g.n + '. ' + g.game)}"></i>`
+  `<i class="${g.fin > 0 ? 'done' : g.att > 0 ? 'some' : ''}" title="${esc(g.n + '. ' + g.game)}"></i>`
 ).join('');
-document.getElementById('counts').innerHTML =
-  `<span><b>${finished}</b> of ${games.length} finished</span>` +
-  `<span><b>${tried}</b> practised</span>` +
-  `<span><b>${attempts}</b> attempt${attempts === 1 ? '' : 's'} in all</span>`;
+const tile = (v, label, sub) => `<div class="tile"><b>${v}</b><span>${label}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
+document.getElementById('tiles').innerHTML =
+  tile(`${finished}<span style="display:inline;font-size:13px;color:var(--muted);text-transform:none;letter-spacing:0"> / ${games.length}</span>`, 'finished') +
+  tile(tried, 'practised') +
+  tile(attempts, 'attempts', `${finishes} finished`) +
+  tile(days.length, days.length === 1 ? 'practice day' : 'practice days', days.length ? `${dshort(new Date(days[0] + 'T00:00:00Z').getTime() - TZ)} – ${dshort(new Date(days[days.length - 1] + 'T00:00:00Z').getTime() - TZ)}` : '') +
+  tile(onTimer ? hm(onTimer) : '—', 'on the timer');
+
+// What the twenty add up to. The race is all of them back to back, so the
+// sum is the figure — but only a sum over all twenty is a race time, so
+// each is shown over the games it covers, with the rest named.
+if (finished > 0) {
+  const withBest = games.filter(g => g.bestMs != null);
+  const sob = withBest.reduce((n, g) => n + g.bestMs, 0);
+  const latest = games.filter(g => g.latest).reduce((n, g) => n + g.latest.ms, 0);
+  const missing = games.filter(g => g.bestMs == null).map(g => g.game);
+  const over = `over ${withBest.length} of ${games.length} games`;
+  const miss = missing.length
+    ? `<div class="miss">without ${missing.length > 6 ? `${missing.length} games` : esc(missing.join(', '))}</div>`
+    : '<div class="miss">all twenty</div>';
+  const p = document.getElementById('project');
+  p.hidden = false;
+  p.innerHTML =
+    `<div><div class="lbl">Sum of bests</div><div class="sum">${fmt(sob)}</div><div class="over">${over} — the ceiling</div>${miss}</div>` +
+    `<div><div class="lbl">Sum of latest finishes</div><div class="sum plain">${fmt(latest)}</div><div class="over">${over} — nearer what a race day looks like</div>${miss}</div>`;
+}
+
+// The trend cell: attempts left to right; a finish is a point (green when
+// it was a new best), joined by a line; a reset is a tick at the depth the
+// timer reached. One vertical scale per game, from zero to its slowest
+// attempt, so a run that got further reads higher.
+const spark = g => {
+  const runs = g.log;
+  if (!runs.length) return '';
+  const W = 132, H = 30, pad = 3;
+  const top = Math.max(...runs.map(r => r.depth || 0), 1);
+  const x = i => runs.length === 1 ? W / 2 : pad + i * (W - 2 * pad) / (runs.length - 1);
+  const y = v => H - pad - (v / top) * (H - 2 * pad);
+  const pts = runs.map((r, i) => r.fin ? `${x(i).toFixed(1)},${y(r.ms).toFixed(1)}` : null).filter(Boolean);
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" aria-label="${esc(runs.length + ' attempts')}">` +
+    (pts.length > 1 ? `<polyline class="line" points="${pts.join(' ')}"/>` : '') +
+    runs.map((r, i) => r.fin
+      ? `<circle class="${r.pb ? 'pb' : 'fin'}" cx="${x(i).toFixed(1)}" cy="${y(r.ms).toFixed(1)}" r="2.4"><title>${esc('#' + r.n + ' · ' + fmt(r.ms) + (r.pb ? ' · new best' : ''))}</title></circle>`
+      : r.depth != null
+        ? `<line class="rs" x1="${x(i).toFixed(1)}" x2="${x(i).toFixed(1)}" y1="${(H - pad).toFixed(1)}" y2="${y(r.depth).toFixed(1)}"><title>${esc('#' + r.n + ' · reset at ' + fmt(r.depth))}</title></line>`
+        : '').join('') +
+    `</svg>`;
+};
 
 document.getElementById('grid').innerHTML =
-  `<tr><th class="n">#</th><th class="game">Game</th><th>Goal</th>` +
+  `<tr><th class="n">#</th><th class="game">Game</th>` +
   `<th class="num">Attempts</th><th class="num">Finished</th>` +
-  `<th class="num">Best</th><th class="num">Arcathlon</th>` +
-  `<th class="num last">Last</th></tr>` +
-  games.map(g => `<tr class="${g.attempts > 0 ? '' : 'untouched'}">
+  `<th class="num">Best</th><th class="num">Latest</th><th class="trend">Trend</th>` +
+  `<th class="num">Arcathlon</th><th class="num last">Last</th></tr>` +
+  games.map(g => {
+    const rate = g.att ? Math.round(100 * g.fin / g.att) : null;
+    const ago = g.lastAt == null ? null : daysAgo(g.lastAt);
+    return `<tr class="${g.att > 0 ? '' : 'untouched'}">
     <td class="n tnum">${g.n}</td>
-    <td class="game">${esc(g.game)}</td>
-    <td class="goal">${esc(g.goal ?? '')}</td>
-    <td class="num tnum">${g.attempts || '<span class="none">—</span>'}</td>
-    <td class="num tnum">${g.finished || '<span class="none">—</span>'}</td>
-    <td class="num tnum${g.best_ms != null ? ' best' : ' none'}">${fmt(g.best_ms)}</td>
+    <td class="game"><a href="/game/${slugOf(g.game)}/index.html">${esc(g.game)}</a><span class="goal">${esc(g.goal ?? '')}</span></td>
+    <td class="num tnum">${g.att || '<span class="none">—</span>'}</td>
+    <td class="num tnum">${g.fin ? `${g.fin} <span class="rate">${rate}%</span>` : '<span class="none">—</span>'}</td>
+    <td class="num tnum${g.bestMs != null ? ' best' : ' none'}">${fmt(g.bestMs)}${g.bestRun ? `<span class="when">${esc(dshort(g.bestRun.t))}</span>` : ''}</td>
+    <td class="num tnum${g.latest ? '' : ' none'}">${g.latest ? fmt(g.latest.ms) : '—'}${g.latest && g.latest !== g.bestRun ? `<span class="when">+${fmt(g.latest.ms - g.bestMs)}</span>` : ''}</td>
+    <td class="trend">${spark(g)}</td>
     <td class="num tnum${g.marathon_ms != null ? '' : ' none'}"
         title="${g.marathon_ms != null ? 'in an Arcathlon, ' + esc(dshort(g.marathon_at_ms)) : ''}">${fmt(g.marathon_ms)}</td>
-    <td class="num last tnum ${g.last_at_ms == null ? 'none' : ''}">${dshort(g.last_at_ms)}</td>
-  </tr>`).join('');
+    <td class="num last tnum ${g.lastAt == null ? 'none' : ago > 6 ? 'stale' : ''}">${
+      g.lastAt == null ? '—' : ago === 0 ? 'today' : ago === 1 ? 'yesterday' : `${ago}d ago`}</td>
+  </tr>`; }).join('');
 
 document.getElementById('note').textContent = tried === 0
   ? 'Nothing recorded yet. Practice runs are recorded once the tracker is following the board he is timing; his marathon times for these games are shown where he has them.'
-  : 'Attempts and finishes are his own practice for this race. The Arcathlon column is his time for the same game in one of his marathons — a real time, but not practice for this list, so it is never added to the rest.';
+  : 'Attempts and finishes are his own practice for this race; each game links to every attempt. Latest is his most recent finish and how far off his best it was. In the trend, a point is a finish (green when it set a new best) and a tick is a reset, as far as the timer got. The Arcathlon column is his time for the same game in one of his marathons — a real time, but not practice for this list, so it is never added to the rest.';
+
+// The days, newest first: what he touched, how it went, and which bests
+// were set. A prep log reads by day as much as by game.
+if (days.length) {
+  const byDay = new Map(days.map(d => [d, { att: 0, fin: 0, on: 0, games: new Set(), first: [], better: [] }]));
+  for (const g of games) {
+    let before = null;                 // his best going into the day
+    let day = null, dayBest = null;
+    const close = () => {
+      if (day == null || dayBest == null) return;
+      const d = byDay.get(day);
+      if (before == null) d.first.push(`${esc(g.game)} <b>${fmt(dayBest)}</b>`);
+      else if (dayBest < before) d.better.push(`${esc(g.game)} <b>${fmt(dayBest)}</b> <span class="from">from ${fmt(before)}</span>`);
+      before = before == null ? dayBest : Math.min(before, dayBest);
+    };
+    for (const r of g.log) {
+      if (r.day !== day) { close(); day = r.day; dayBest = null; }
+      const d = byDay.get(r.day);
+      d.att++; if (r.fin) d.fin++; d.on += r.depth || 0; d.games.add(g.game);
+      if (r.fin && (dayBest == null || r.ms < dayBest)) dayBest = r.ms;
+    }
+    close();
+  }
+  document.getElementById('days-head').hidden = false;
+  document.getElementById('days-card').hidden = false;
+  document.getElementById('days').innerHTML =
+    `<tr><th>Day</th><th class="num">Games</th><th class="num">Attempts</th><th class="num">Finished</th><th class="num">On the timer</th><th>Bests</th></tr>` +
+    days.slice().reverse().map(day => { const d = byDay.get(day); return `<tr>
+      <td class="tnum" style="white-space:nowrap">${esc(dayOf(day))}</td>
+      <td class="num tnum">${d.games.size}</td>
+      <td class="num tnum">${d.att}</td>
+      <td class="num tnum">${d.fin || '<span class="none">—</span>'}</td>
+      <td class="num tnum">${d.on ? hm(d.on) : '<span class="none">—</span>'}</td>
+      <td class="pbs">${
+        (d.better.length ? `<div>${d.better.join(' · ')}</div>` : '') +
+        (d.first.length ? `<div class="firsts">${d.first.length > 6 ? `first finishes of ${d.first.length} games` : 'first finish: ' + d.first.join(' · ')}</div>` : '') ||
+        '<span class="none">—</span>'}</td>
+    </tr>`; }).join('');
+}
 </script>

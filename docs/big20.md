@@ -130,9 +130,25 @@ would have to run inside it.
 ## Reading the result
 
 `/big20/` on the site (`site/big20.html`, built by `build-site.sh` from the
-report's `big20` block) is the twenty games **in race order**, each with the
-goal it must be finished to, how many attempts and finishes, his best, and —
-in a column of its own — his time for that game in one of his Arcathlons.
+report's `big20` block, which carries every practice attempt per game) is the
+twenty games **in race order**, each linking to its own page, with the goal
+it must be finished to, attempts and finishes (and the rate), his best and
+when it was set, his latest finish and how far off the best it was, a trend
+of every attempt (finishes as points, a new best in green, resets as ticks at
+the depth the timer reached), when he last practised it, and — in a column of
+its own — his time for that game in one of his Arcathlons. Above the table:
+the **sum of his bests** and the **sum of his latest finishes**, each over
+the games that have a finish with the rest named, because the race is the
+twenty back to back and a sum over nineteen is not a race time. Below it,
+the practice days: games touched, attempts, finishes, time on the timer, and
+the bests set that day (a first finish named as such, an improvement with
+what it came down from).
+
+A game's own page (`/game/<slug>/`, `site/event.html`) shows the same figures
+for that game as tiles, a chart of every attempt against his Arcathlon time
+where he has one, and the attempts by day with a bar for how far each got on
+one scale for the page. His marathon completions of the game are listed
+apart at the end and are in none of the figures.
 Those last are kept apart deliberately: six of the twenty are also Arcathlon
 games, and a completion from a marathon in July says something real about
 the game but is not practice for this race.

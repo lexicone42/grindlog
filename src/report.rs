@@ -178,7 +178,11 @@ fn practice_categories(cfg: &Config) -> Vec<String> {
 ///
 /// A game he has never played carries neither, which is the whole point:
 /// the page is a list of twenty and the empty rows are the news.
-fn big20_prep(summaries: &[db::GameSummary], cfg: &Config) -> serde_json::Value {
+fn big20_prep(
+    summaries: &[db::GameSummary],
+    runs: &[db::OtherRun],
+    cfg: &Config,
+) -> serde_json::Value {
     let Some((rosters, event)) = roster::big20() else {
         return serde_json::Value::Null;
     };
@@ -215,17 +219,24 @@ fn big20_prep(summaries: &[db::GameSummary], cfg: &Config) -> serde_json::Value 
             // this race's Jaws, and a page that matched on the raw string
             // would call the game untouched while its runs sat on their
             // own per-game page.
-            let mine = |s: &db::GameSummary| {
+            let mine_name = |g: &str| {
                 rosters
-                    .canonical(&s.game)
+                    .canonical(g)
                     .map(|c| c.eq_ignore_ascii_case(name))
                     .unwrap_or(false)
             };
-            let is_practice = |s: &db::GameSummary| {
-                practice_cats
-                    .iter()
-                    .any(|c| s.category.eq_ignore_ascii_case(c))
-            };
+            let practice_cat = |c: &str| practice_cats.iter().any(|p| c.eq_ignore_ascii_case(p));
+            let mine = |s: &db::GameSummary| mine_name(&s.game);
+            let is_practice = |s: &db::GameSummary| practice_cat(&s.category);
+            // Every practice attempt at it, oldest first: what the page's
+            // projection, trend and day log are computed from. A few
+            // hundred rows across the twenty, and the alternative is a
+            // summary field per question the page might ask.
+            let mut log: Vec<&db::OtherRun> = runs
+                .iter()
+                .filter(|r| mine_name(&r.game) && practice_cat(&r.category))
+                .collect();
+            log.sort_by_key(|r| r.started_at_ms);
             let practice: Vec<&db::GameSummary> = summaries
                 .iter()
                 .filter(|s| mine(s) && is_practice(s))
@@ -249,6 +260,19 @@ fn big20_prep(summaries: &[db::GameSummary], cfg: &Config) -> serde_json::Value 
                 // His Arcathlon time for it, where there is one.
                 "marathon_ms": best(&elsewhere),
                 "marathon_at_ms": elsewhere.iter().filter_map(|s| s.last_at_ms).max(),
+                "runs": log
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "t": r.started_at_ms,
+                            "o": r.outcome,
+                            "ms": r.final_time_ms,
+                            "at": r.last_timer_ms,
+                            "n": r.attempt_number,
+                            "day": r.day,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -280,6 +304,9 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
         return Ok(());
     }
     let summaries = db::summaries(&pool).await?;
+    // Every run of every OTHER game, once: the practice-day cards and the
+    // race page both read it.
+    let other_runs = db::other_runs(&pool, &game, &category).await?;
     let practice = practice_categories(&cfg);
     let today = db::today_stats(&pool, &game, &category, util::local_day_start_ms()).await?;
     // Every run and every split, for the site's per-day log.
@@ -406,7 +433,7 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
             // whatever this database holds for it. Present whether or not he
             // has practised any of them: a prep page's job is to show what
             // is left as much as what is done.
-            "big20": big20_prep(&summaries, &cfg),
+            "big20": big20_prep(&summaries, &other_runs, &cfg),
             // What the pane last saw, whatever game it was. The page leads
             // with this rather than with the tracked game, because on a
             // Big 20 day the tracked game is not what is happening.
@@ -427,7 +454,7 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
             // played in. The page pivots this both ways: by event, and by
             // game across events.
             "other_events": other_events(
-                &db::other_runs(&pool, &game, &category).await?,
+                &other_runs,
                 &roster::Rosters::bundled().unwrap_or_default(),
                 &practice.iter().map(String::as_str).collect::<Vec<_>>(),
             ),
@@ -852,6 +879,65 @@ mod tests {
     /// wrong: it asked the CONFIG which categories were marathons, and
     /// `mode = "board"` is not enabled in the deployment, so the answer was
     /// "none" and Jaws' five Arcathlon completions read as five practice
+    /// The page's projection, trend and day log are computed from each
+    /// game's own attempts, so the block carries them: every practice run
+    /// of the game, oldest first, folded through the roster like the
+    /// summaries are — and never a marathon row, which is not practice.
+    #[test]
+    fn big20_prep_carries_each_games_attempts_oldest_first() {
+        let cfg = Config::for_test_with_min_final(660_000);
+        let at = |game: &'static str, t: i64, ms: Option<i64>| db::OtherRun {
+            category: "Big 20 #23".into(),
+            started_at_ms: t,
+            final_time_ms: ms,
+            outcome: if ms.is_some() { "finished" } else { "reset" }.into(),
+            last_timer_ms: ms.or(Some(40_000)),
+            attempt_number: 1,
+            tag: None,
+            day: "2026-09-16".into(),
+            ..run(7, game, 0)
+        };
+        let out = big20_prep(
+            &[],
+            &[
+                at("Die Hard", 3_000, Some(121_000)),
+                at("Die Hard", 1_000, None),
+                // Read off a damaged board: this race's Jaws all the same.
+                at("aws", 2_000, Some(400_000)),
+                // A marathon completion of Jaws is not practice for it.
+                db::OtherRun {
+                    day: "2026-07-04".into(),
+                    ..run(3, "Jaws", 420_000)
+                },
+            ],
+            &cfg,
+        );
+        let by = |name: &str| {
+            out["games"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|g| g["game"] == name)
+                .unwrap()
+                .clone()
+        };
+        let dh = by("Die Hard");
+        let log = dh["runs"].as_array().unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0]["t"], 1_000, "oldest first");
+        assert_eq!(log[0]["o"], "reset");
+        assert_eq!(log[0]["at"], 40_000, "how far a reset got");
+        assert_eq!(log[1]["ms"], 121_000);
+        assert_eq!(log[1]["day"], "2026-09-16");
+        let jaws = by("Jaws");
+        assert_eq!(
+            jaws["runs"].as_array().unwrap().len(),
+            1,
+            "the damaged spelling is folded in; the Arcathlon row is not"
+        );
+        assert!(by("Hydlide")["runs"].as_array().unwrap().is_empty());
+    }
+
     /// attempts with a perfect finish rate. The categories runs are FILED
     /// under are what decides.
     #[test]
@@ -871,6 +957,7 @@ mod tests {
                 // Nothing to do with this race.
                 summary("Ninja Gaiden (NES)", "Any%", 3137, 41, 695_100),
             ],
+            &[],
             &cfg,
         );
         let by = |name: &str| {
