@@ -1821,6 +1821,30 @@ async fn track_marathon(
                         alias.name
                     ),
                 }
+                // Half his own best per game, from everything recorded, as the
+                // least a completion of it can plausibly take: a row read
+                // short of that is a misread and is not filed (see
+                // `Marathon::set_floors`). Games he has never finished have
+                // no floor and every completion of them stands.
+                match db::summaries(pool).await {
+                    Ok(sums) => {
+                        let mut floors: std::collections::HashMap<String, i64> =
+                            std::collections::HashMap::new();
+                        for s in &sums {
+                            if let Some(b) = s.best_ms {
+                                let f = floors.entry(s.game.clone()).or_insert(b / 2);
+                                *f = (*f).min(b / 2);
+                            }
+                        }
+                        debug!(
+                            "marathon {:?}: plausibility floors for {} game(s) from his own bests",
+                            alias.name,
+                            floors.len()
+                        );
+                        m.set_floors(floors);
+                    }
+                    Err(e) => warn!("could not read his bests for the plausibility floors: {e:#}"),
+                }
                 info!(
                     "marathon board: {:?} -> tracking every row as a run of its own game, category {:?}",
                     board.title, alias.name
