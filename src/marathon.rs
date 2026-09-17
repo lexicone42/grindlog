@@ -808,6 +808,26 @@ impl Marathon {
             let Some(read) = self.slots[i].name().map(str::to_string) else {
                 continue;
             };
+            // The race board prints each game as two rows: the game, and its
+            // category in brackets under it, which is the transition into
+            // the next game. The bracketed row fits no roster name and is
+            // not a game, so nothing is filed under it — but its cumulative
+            // stands, because the row under it derives its segment from it
+            // (Pac-Mania's 7:26 is 10:18 less the 2:52 the bracketed row
+            // reached). OCR loses the opening bracket far more often than
+            // the closing one, so a name that ends in one with no opening
+            // bracket anywhere is the mark too; a game with brackets in its
+            // name ("SMB3 (Warpless)") carries its own and is not caught,
+            // and a roster match keeps a row whatever it looks like.
+            let bracketed = {
+                let t = read.trim();
+                t.starts_with('(') || (t.ends_with(')') && !t.contains('('))
+            };
+            if self.canonical(i).is_none() && bracketed {
+                self.slots[i].recorded = Some(cum);
+                self.known.push(cum);
+                continue;
+            }
             let Some((segment_ms, derived)) = self.segment_for(i, cum) else {
                 continue;
             };
@@ -1549,6 +1569,49 @@ mod tests {
                 )
                 .is_empty());
         }
+    }
+
+    /// The race board prints each game twice: the game's row, and its
+    /// category in brackets under it, which is the transition into the next
+    /// game. The bracketed row is filed under nothing — it is not a game —
+    /// but the row under it takes its segment from the bracketed row's
+    /// cumulative: Pac-Mania's 7:26 is 10:18 less 2:52.
+    #[test]
+    fn a_bracketed_row_is_a_segment_of_the_board_and_not_a_game() {
+        let mut m = tracker();
+        let pass = |die: &[&str], any: &[&str], pac: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Die Hard", die),
+                    row("(Any% Beginner)", any),
+                    row("Pac-Mania", pac),
+                    row("(Sandbox)", &[]),
+                ],
+            )
+        };
+        assert!(m.observe(&pass(&[], &[], &[]), 1_000, Some(0)).is_empty());
+        assert!(m
+            .observe(&pass(&[], &[], &[]), 61_000, Some(60_000))
+            .is_empty());
+        let p = pass(&["2:22", "2:22"], &[], &[]);
+        assert!(m.observe(&p, 121_000, Some(142_000)).is_empty());
+        let seen = m.observe(&p, 181_000, Some(142_000));
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].game, "Die Hard");
+        assert_eq!(seen[0].segment_ms, 142_000);
+        // The transition row gains its time: nothing is filed.
+        let p = pass(&["2:22", "2:22"], &["0:30", "2:52"], &[]);
+        assert!(m.observe(&p, 241_000, Some(172_000)).is_empty());
+        assert!(m.observe(&p, 301_000, Some(172_000)).is_empty());
+        // Pac-Mania's segment is measured from the bracketed row above it.
+        let p = pass(&["2:22", "2:22"], &["0:30", "2:52"], &["7:26", "10:18"]);
+        assert!(m.observe(&p, 361_000, Some(618_000)).is_empty());
+        let seen = m.observe(&p, 421_000, Some(618_000));
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].game, "Pac-Mania");
+        assert_eq!(seen[0].segment_ms, 446_000);
+        assert_eq!(seen[0].cumulative_ms, 618_000);
     }
 
     /// A completion is filed under the roster's name for the game, whatever
