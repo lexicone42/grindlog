@@ -539,7 +539,7 @@ impl Marathon {
             })
             .collect();
         format!(
-            "{} of {} rows recorded over {} passes{}{}: {}",
+            "{} of {} rows recorded over {} passes{}{}{}: {}",
             self.slots.iter().filter(|s| s.recorded.is_some()).count(),
             self.slots.len(),
             self.passes,
@@ -551,6 +551,10 @@ impl Marathon {
             match self.unmatched {
                 0 => String::new(),
                 n => format!(", {n} unmatched"),
+            },
+            match self.implausible() {
+                0 => String::new(),
+                n => format!(", {n} refused under the floor"),
             },
             names.join(", ")
         )
