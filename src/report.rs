@@ -98,8 +98,15 @@ fn other_events(
             v.dedup();
             v
         };
+        // A board tracked by its rows under a category of its own — his full
+        // runs of the race, filed as "Big 20 #23 run" by the [[games]] entry
+        // that tracks that board — is labelled by that category and never
+        // identified against the Arcathlon rosters: six of the twenty are
+        // Arcathlon games, and a run-through would come out "Randomized
+        // Arcathlon". Only the Arcathlon's own completions are identified.
+        let arcathlon = group[0].category.eq_ignore_ascii_case("Arcathlon");
         // One game is a practice day, not an event to identify.
-        let event = (!practice && group.len() > 1)
+        let event = (!practice && arcathlon && group.len() > 1)
             .then(|| rosters.identify(&names))
             .flatten();
         let label = match (practice, event, distinct.len()) {
@@ -108,6 +115,7 @@ fn other_events(
             // games themselves right underneath.
             (true, _, n) if n > 3 => format!("{n} games"),
             (true, _, _) => distinct.join(", "),
+            (false, _, _) if !arcathlon => group[0].category.clone(),
             (_, Some(e), _) => format!("Arcathlon {}", rosters.event_name(e)),
             (_, None, n) if n > 1 => "Randomized Arcathlon".to_string(),
             _ => group[0].game.clone(),
@@ -119,7 +127,7 @@ fn other_events(
             // Whether the ten games fit one roster. A reader sorting for
             // the randomized draws wants this, not the label's spelling.
             // Never a practice session: it is not a draw of any kind.
-            "randomized": !practice && event.is_none() && group.len() > 1,
+            "randomized": !practice && arcathlon && event.is_none() && group.len() > 1,
             // And which of the two this is, said plainly rather than left
             // to be inferred from the absence of the other flag.
             "practice": practice,
@@ -993,5 +1001,32 @@ mod tests {
         assert!(untouched["best_ms"].is_null());
         assert!(untouched["last_at_ms"].is_null());
         assert_eq!(out["games"].as_array().unwrap().len(), 20);
+    }
+    /// His full runs of the race are a board tracked by its rows under a
+    /// category of its own, and six of the twenty are Arcathlon games:
+    /// identified against the Arcathlon rosters they would come out a
+    /// randomized draw. The category is the label, and the total is real.
+    #[test]
+    fn a_run_of_the_race_is_labelled_by_its_category_and_not_identified() {
+        let r = roster::Rosters::bundled().unwrap();
+        let race = |game: &'static str, ms: i64| db::OtherRun {
+            category: "Big 20 #23 run".into(),
+            tag: None,
+            ..run(9, game, ms)
+        };
+        let out = other_events(
+            &[
+                race("Die Hard", 142_000),
+                race("Pac-Mania", 446_000),
+                race("Double Dragon II: The Revenge", 1_749_000),
+            ],
+            &r,
+            &["Other", "Big 20 #23"],
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["label"], "Big 20 #23 run");
+        assert_eq!(out[0]["randomized"], false);
+        assert_eq!(out[0]["practice"], false);
+        assert_eq!(out[0]["total_ms"], 142_000 + 446_000 + 1_749_000);
     }
 }
