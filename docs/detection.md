@@ -94,6 +94,19 @@ that would push the crop beyond `drift_px` is logged once and left alone.
 The splits/counter rectangles measured at the lock move only by how far the
 digits actually moved, not by the correction to the crop itself.
 
+**A board can grant the lock instead of the timer.** On a marathon board the
+rows are what is tracked, and on the race board the timer's digits sit where
+no crop holds them without cutting a digit or taking the logo beside them in —
+both of which the probe rightly refuses. So while unlocked, and only where the
+configuration tracks some board by its rows (`[[games]] mode = "board"`), one
+layout at a time is read as a pane every ten seconds; a pane that
+`marathon::classify` calls a board-mode board twice running grants that
+layout the lock through the same path a timer does (`layout locked … locking
+on the board, not the timer`). A board-granted lock is exempt from the
+dark/poor-quality unlocks above, feeds the run state machine no readings, and
+is let go when no marathon is in force five minutes after the grant. See
+[marathons](marathons.md#the-race-board-big-20).
+
 **The hundredths font.** LiveSplit draws the fraction of the main timer in a
 smaller font, and at stream resolution its decimal point is a couple of
 pixels that thresholding erases: `4.76` reads as `476`, `3:06.12` as
@@ -330,7 +343,15 @@ Three details it must get right, each of which was a bug first:
   short board's final row sits inside it: a time-shaped word under a
   quarter of the crop's height (a row; the timer's own digits are taller
   and read the frozen value by definition) within 150 ms of the timer is a
-  finish; rows that read but do not match are a reset with reason `paused`;
+  finish. The pane can also correct the timer: the glyph reader's crop can
+  drift off the digits and read "3:14.54" for a timer at 13:14.54 (Uninvited,
+  2026-09-15, after a stretch the reader could not follow), while the pane
+  pass reads the same digits whole as the tallest time-shaped word; when that
+  reading and a row agree with each other and not with the frozen value, the
+  run ended at theirs. (A step rule — "the row is the frozen value plus ten
+  minutes" — was tried and is wrong: a paused Crisis Force board had its PB
+  row, 11:18.4, exactly ten minutes over the paused timer at 1:18.44.)
+  Rows that read but do not match are a reset with reason `paused`;
   a pane with no row-sized time on it decides nothing, and the freeze goes
   through as a finish with a warning, as does one no pass
   reached within five seconds (a layout that lost its lock in the same

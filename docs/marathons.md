@@ -60,3 +60,51 @@ module: a roster that named the wrong game would name it wrong for both.
 What it scores is the plumbing — which rows were played, which were
 recorded, at what time, under which of the event's games — and `roster.rs`'s
 own tests hold the other end.
+
+## The race board (Big 20)
+
+The Big 20 race — and his full practice runs of it, from 2026-09-17 — is
+the same pane in the same place with twenty games instead of ten, and each
+game as **two rows**: the game (`01 - Die Hard`) and its category in
+brackets under it (`(Any% Beginner)`), which is the transition into the next
+game. The board **scrolls**: LiveSplit shows a window of nine or so rows
+with the last pinned, and moves it down as he plays.
+
+`scripts/replay-big20-race.sh <vod_id>` is `replay-arcathlon.sh` with the
+race roster (`assets/big20-roster.toml`) and a board entry matching the
+board's title; it writes `big20-race-db/vod-<id>.db`, one row per completed
+game under category `Big 20 #23 run`. Land it with
+`BIG20_OUT=big20-race-db BIG20_TAG=big20-race ./scripts/import-big20.sh`,
+tagged apart from the same VOD's practice import. Three things the tracker
+does for this board that an Arcathlon never needed:
+
+- **A bracketed row is a segment, not a game.** It is filed under nothing,
+  but its cumulative stands, because the row under it derives its segment
+  from it: Pac-Mania's 7:26 is 10:18 less the 2:52 the bracketed row
+  reached. The mark is a name that starts with a bracket, or ends with one
+  and has no opening bracket anywhere (OCR loses the opening one far more
+  often); "SMB3 (Warpless)" carries its own and is a game.
+- **Rows that scroll into view are tracked.** Rows are placed by name where
+  a name anchors a slot; under the last anchor they continue positionally
+  into new slots — but only where the first anchored row sits at least two
+  slots below its position, one game of this board, which a fixed board
+  never shows. (Continued unconditionally, the Arcathlon audit recorded a
+  game never played: the pane's footer read as an eleventh row.) Rows that
+  scroll off keep their slot and its record.
+- **Live, the layout locks on the board, not the timer.** The timer's digits
+  sit between the decimal point and a logo with pixels to spare on neither
+  side; no crop reads them without cutting a digit or taking the logo in,
+  and the probe refuses both. While unlocked, and only where the
+  configuration tracks some board by its rows, one layout at a time is read
+  as a pane every ten seconds; a pane that classifies as a board-mode board
+  twice running grants that layout the lock through the same path a timer
+  does. A board-granted lock is exempt from the timer's dark/poor-quality
+  unlocks, feeds the run state machine nothing, and is let go when no
+  marathon is in force five minutes after the grant. `live.toml` carries
+  the entry (`[[games]] name = "Big 20 #23 run", mode = "board"`) and the
+  `big20-race` layout whose splits crop takes the names column in. The pane binarises differently per theme — at the deployment's
+  `[splits] threshold` (150) the race board reads one to four rows a pass,
+  at 100 ten, and at 100 his Ninja Gaiden pane's title reads as noise and
+  the gate convicts its own board — so the board probe tries the configured
+  threshold and then 100, remembers which found the board, and the pane
+  pass reads at that threshold only while the lock is board-granted.

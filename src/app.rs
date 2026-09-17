@@ -1110,6 +1110,102 @@ fn pane_geometry(
 /// pixels, `PANE_UP` times the crop's.
 const PANE_UP: u32 = 2;
 
+/// The board probe: one OCR of the pane, read as a board against every
+/// layout's timer rectangle, and the layout whose reading has the most rows
+/// and classifies as a board-mode board. None where no layout's does, or
+/// where the best reading has under three rows: the pane is one image and
+/// every layout sees the same title, and `classify` takes a title alone as
+/// enough to start a marathon — so a title cannot pick a layout, and the
+/// first cut of this locked the race board to a layout whose timer sat
+/// above every one of its rows. The rows pick the layout: they are read
+/// only above the timer rectangle, so the rectangle that stands under them
+/// is the one that reads them.
+/// The pane binarises differently per theme: at his Ninja Gaiden pane's
+/// `[splits] threshold` (150) the race board reads one to four rows a pass,
+/// and at the 100 that reads the race board at ten, the Ninja Gaiden pane's
+/// title reads as noise and the gate convicts its own board. So the probe
+/// tries the configured threshold and then these, and the threshold that
+/// found the board is what the pane pass reads at while the lock it granted
+/// stands.
+const BOARD_PROBE_THRESHOLDS: [u8; 1] = [100];
+
+async fn probe_boards(
+    ocr_engine: &mut OcrEngine,
+    union_img: &GrayImage,
+    regs: &[Regions],
+    cfg: &Config,
+    current: Option<&marathon::Marathon>,
+    pre: &PreprocessCfg,
+) -> Result<Option<(usize, Board, u8)>> {
+    for threshold in std::iter::once(pre.threshold)
+        .chain(BOARD_PROBE_THRESHOLDS.iter().copied())
+        .filter(|t| *t == pre.threshold || !BOARD_PROBE_THRESHOLDS.contains(&pre.threshold))
+    {
+        if let Some((li, board)) =
+            probe_boards_at(ocr_engine, union_img, regs, cfg, current, pre, threshold).await?
+        {
+            return Ok(Some((li, board, threshold)));
+        }
+    }
+    Ok(None)
+}
+
+async fn probe_boards_at(
+    ocr_engine: &mut OcrEngine,
+    union_img: &GrayImage,
+    regs: &[Regions],
+    cfg: &Config,
+    current: Option<&marathon::Marathon>,
+    pre: &PreprocessCfg,
+    threshold: u8,
+) -> Result<Option<(usize, Board)>> {
+    let pre2 = PreprocessCfg {
+        upscale: PANE_UP,
+        threshold,
+        invert: pre.invert,
+        auto_threshold: false,
+    };
+    let proc = ocr::preprocess(union_img, &pre2);
+    let png = ocr::to_png(&proc)?;
+    let words = ocr_engine
+        .recognize_words(&png, Some("0123456789:."), 11)
+        .await?;
+    let letters = ocr_engine
+        .recognize_words(&png, None, 11)
+        .await
+        .unwrap_or_default();
+    let mut best: Option<(usize, Board)> = None;
+    for (li, r) in regs.iter().enumerate() {
+        let board = board::read_board(&words, &letters, PANE_UP, r.timer);
+        debug!(
+            "board probe at {threshold}: layout {li} timer {:?}: {} rows, title {:?}, {}",
+            r.timer,
+            board.rows.len(),
+            board.title,
+            match marathon::classify(&board, cfg, current) {
+                marathon::Verdict::Board(a) => format!("board-mode {:?}", a.name),
+                marathon::Verdict::Other => "other".to_string(),
+                marathon::Verdict::Silent => "silent".to_string(),
+            }
+        );
+        if board.rows.len() < 3
+            || !matches!(
+                marathon::classify(&board, cfg, current),
+                marathon::Verdict::Board(_)
+            )
+        {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(_, b)| board.rows.len() > b.rows.len())
+        {
+            best = Some((li, board));
+        }
+    }
+    Ok(best)
+}
+
 async fn measure_pane(
     ocr_engine: &mut OcrEngine,
     union_img: &GrayImage,
@@ -2048,6 +2144,16 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut active_regs: Regions = regs[0].clone();
     let mut active_off: (i32, i32) = (0, 0);
     let mut layout_locked = cands.len() == 1;
+    // A lock granted by the BOARD rather than the timer (the board probe in
+    // the frame loop): a marathon board is tracked by its rows, and its timer
+    // may be unreadable where it sits. Such a lock is not judged by the
+    // timer's reads, feeds the run state machine nothing, and is let go when
+    // no marathon is in force five minutes after the grant.
+    let mut board_locked = false;
+    let mut board_locked_at: i64 = 0;
+    let mut board_hit: Option<(usize, u32)> = None;
+    let mut board_threshold: Option<u8> = None;
+    let mut board_probe_frames: u32 = 0;
     // Until the first lock no layout is favoured; afterwards the active one is.
     let mut ever_locked = layout_locked;
     let mut probe_rr: usize = 0;
@@ -2734,6 +2840,62 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
             }
             let mut winner: Option<(usize, String)> = None;
+            // Lock by board. A marathon board is tracked by its rows, not its
+            // timer, and on the race board the timer's digits sit where no
+            // crop holds them without cutting a digit or taking the logo
+            // beside them in — the probe below refuses both, correctly, and
+            // would never lock. So while unlocked, and only where this
+            // configuration tracks some board by its rows, the pane is read
+            // once every ten seconds and scored against every layout
+            // (`probe_boards`); the layout it names twice running is granted
+            // the lock through the same path a timer does.
+            board_probe_frames += 1;
+            if !layout_locked
+                && board_probe_frames >= 20
+                && cfg
+                    .games
+                    .iter()
+                    .any(|a| a.mode == crate::config::GameMode::Board)
+            {
+                board_probe_frames = 0;
+                match probe_boards(
+                    &mut ocr_engine,
+                    &union_img,
+                    &regs,
+                    &cfg,
+                    marathon.as_ref(),
+                    &pre_splits,
+                )
+                .await
+                {
+                    Ok(found) => {
+                        board_hit = match (board_hit, found.as_ref()) {
+                            (Some((l, n)), Some((li, _, _))) if l == *li => Some((l, n + 1)),
+                            (_, Some((li, _, _))) => Some((*li, 1)),
+                            (_, None) => None,
+                        };
+                        if let (Some((li, n)), Some((_, board, thr))) = (board_hit, found.as_ref())
+                        {
+                            if n >= 2 {
+                                if let Some(ci) =
+                                    cands.iter().position(|c| c.layout == li && c.off == (0, 0))
+                                {
+                                    info!(
+                                        "layout {:?}: its pane reads as a board tracked by its rows ({:?}, {} rows); locking on the board, not the timer",
+                                        layout_names[li], board.title, board.rows.len()
+                                    );
+                                    winner = Some((ci, "board".to_string()));
+                                    board_locked = true;
+                                    board_locked_at = t;
+                                    board_threshold = Some(*thr);
+                                }
+                                board_hit = None;
+                            }
+                        }
+                    }
+                    Err(e) => warn!("board probe failed: {e:#}"),
+                }
+            }
             for ci in to_read {
                 let c = &mut cands[ci];
                 let crop = c.regs.timer;
@@ -3058,7 +3220,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 dark_frames = 0;
             } else {
                 dark_frames += 1;
-                if layout_locked && dark_frames >= dark_frames_search {
+                if layout_locked && !board_locked && dark_frames >= dark_frames_search {
                     layout_locked = false;
                     dark_frames = 0;
                     info!(
@@ -3070,7 +3232,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             // fully dark: digits half out of the crop parse some frames and
             // not others. Judge every 60 read frames; a run of clipped reads
             // is judged sooner.
-            if layout_locked && !frame_static {
+            if layout_locked && !board_locked && !frame_static {
                 quality_frames += 1;
                 if parsed.is_some() {
                     quality_parsed += 1;
@@ -3263,7 +3425,10 @@ pub async fn run(cfg: Config) -> Result<()> {
         // records nothing, exactly as it does under "log". So `track` never
         // widens what gets recorded beyond boards we can identify, and the
         // wrong-game fabrication it replaces is impossible either way.
-        let obs = if (pane_identity.ok() || foreign_target.is_some()) && !marathon_active {
+        let obs = if (pane_identity.ok() || foreign_target.is_some())
+            && !marathon_active
+            && !board_locked
+        {
             parsed.map(Obs::Time).unwrap_or(Obs::Illegible)
         } else {
             Obs::Illegible
@@ -3580,12 +3745,28 @@ pub async fn run(cfg: Config) -> Result<()> {
                 provisional_reads += 1;
             }
             let acts = shared.acts.len().max(1) as u32;
+            // At the threshold the board probe found the board at, while the
+            // lock it granted stands; the configured one otherwise.
+            let pre_pane = match board_threshold {
+                Some(th) if board_locked => PreprocessCfg {
+                    upscale: pre_splits.upscale,
+                    threshold: th,
+                    invert: pre_splits.invert,
+                    auto_threshold: pre_splits.auto_threshold,
+                },
+                _ => PreprocessCfg {
+                    upscale: pre_splits.upscale,
+                    threshold: pre_splits.threshold,
+                    invert: pre_splits.invert,
+                    auto_threshold: pre_splits.auto_threshold,
+                },
+            };
             match measure_pane(
                 &mut ocr_engine,
                 &union_img,
                 active_regs.timer,
                 acts,
-                &pre_splits,
+                &pre_pane,
             )
             .await
             {
@@ -3804,6 +3985,17 @@ pub async fn run(cfg: Config) -> Result<()> {
         // the gate convicts a board nothing names is orphaned: its board could
         // not be identified, and no later name may adopt it. See
         // `CurrentRun::foreign`, `CurrentRun::orphaned`.
+        // A lock the board granted is the marathon's: when none is in force
+        // five minutes after the grant — the event ended, or the pane stopped
+        // reading as one before a tracker was ever taken up — the timer's
+        // rules apply again and the probe resumes.
+        if board_locked && !marathon_active && t - board_locked_at > 300_000 {
+            info!("no marathon in force on the board-granted lock; probing layouts again");
+            board_locked = false;
+            board_threshold = None;
+            layout_locked = false;
+            dark_frames = 0;
+        }
         // A freeze held from the last frame, decided by the pane pass forced
         // for it — or let through as it came when no pass happened within
         // FREEZE_HOLD_MS (the layout lost its lock in the same moment),
@@ -3815,7 +4007,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             };
             let verdict = match (&passed_pane, t - since > FREEZE_HOLD_MS) {
                 (Some(w), _) => Some(freeze_confirmed(w, active_regs.timer.3 * PANE_UP, last_ms)),
-                (None, true) => Some(None),
+                (None, true) => Some(Frozen::Unreadable),
                 (None, false) => None,
             };
             if let Some(v) = verdict {
@@ -3824,14 +4016,22 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // as — the hold block below would only hold it again — but
                 // the finish it was found to be, or a reset that says paused.
                 let decided = match v {
-                    Some(true) => {
+                    Frozen::Finished(final_ms) if final_ms == last_ms => {
                         info!(
                             "timer frozen at {}: a split row shows it — a finish",
                             format_ms(last_ms)
                         );
-                        Event::Finished { final_ms: last_ms }
+                        Event::Finished { final_ms }
                     }
-                    Some(false) => {
+                    Frozen::Finished(final_ms) => {
+                        info!(
+                            "timer frozen at {}: a split row reads {} — a finish, the timer had dropped its leading digit",
+                            format_ms(last_ms),
+                            format_ms(final_ms)
+                        );
+                        Event::Finished { final_ms }
+                    }
+                    Frozen::Paused => {
                         info!(
                             "timer frozen at {}: no split row shows it — paused, not finished",
                             format_ms(last_ms)
@@ -3841,7 +4041,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                             reason: crate::state::ResetReason::Paused,
                         }
                     }
-                    None => {
+                    Frozen::Unreadable => {
                         warn!(
                             "timer frozen at {} and the pane could not be read; taking it as a finish",
                             format_ms(last_ms)
@@ -4159,20 +4359,52 @@ const FREEZE_HOLD_MS: i64 = 5_000;
 /// timer's, so everything under a quarter of the crop's height is a row
 /// and the rest is the timer reading itself, which is the frozen value by
 /// definition and proves nothing. The rows print tenths where the timer
-/// has hundredths. None when no row-sized time is on the pane at all — a
-/// pane that could not be read, not one that disagrees.
-fn freeze_confirmed(words: &[ocr::Word], timer_h: u32, last_ms: i64) -> Option<bool> {
+/// has hundredths.
+///
+/// The pane can also correct the timer. The glyph reader reads the timer
+/// from its own crop, and a crop that has drifted off the digits reads
+/// "3:14.54" for a timer at 13:14.54; the pane pass reads the same digits
+/// whole, as the tallest time-shaped word on the pane. When that reading
+/// and a row agree with each other and not with the frozen value, the run
+/// ended at THEIR value — two reads of the pane against one clipped crop.
+/// A step rule ("the row is the frozen value plus ten minutes") was the
+/// first cut and is wrong: a paused Crisis Force board had its PB row,
+/// 11:18.4, exactly ten minutes over the paused timer at 1:18.44.
+///
+/// `Unreadable` when no row-sized time is on the pane at all — a pane that
+/// could not be read, not one that disagrees.
+fn freeze_confirmed(words: &[ocr::Word], timer_h: u32, last_ms: i64) -> Frozen {
     let row_h = timer_h / 4;
-    let mut any = false;
-    for w in words.iter().filter(|w| w.h < row_h) {
-        if let Some(ms) = crate::timeparse::parse_time(&w.text) {
-            any = true;
-            if (ms - last_ms).abs() <= 150 {
-                return Some(true);
-            }
-        }
+    let times = |tall: bool| {
+        words
+            .iter()
+            .filter(move |w| (w.h >= row_h) == tall)
+            .filter_map(|w| crate::timeparse::parse_time(&w.text))
+    };
+    let rows: Vec<i64> = times(false).collect();
+    if rows.iter().any(|&ms| (ms - last_ms).abs() <= 150) {
+        return Frozen::Finished(last_ms);
     }
-    any.then_some(false)
+    // The pane's own reading of the timer, where a row agrees with it.
+    let whole = times(true)
+        .find(|&t| (t - last_ms).abs() > 150 && rows.iter().any(|&r| (r - t).abs() <= 300));
+    match (whole, !rows.is_empty()) {
+        (Some(ms), _) => Frozen::Finished(ms),
+        (None, true) => Frozen::Paused,
+        (None, false) => Frozen::Unreadable,
+    }
+}
+
+/// What the pane says about a frozen timer: see `freeze_confirmed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Frozen {
+    /// The run ended, at this value — the timer's, or a row's where the
+    /// timer had dropped its leading digit.
+    Finished(i64),
+    /// Rows read and none carries the timer: paused, not finished.
+    Paused,
+    /// Nothing row-sized read on the pane.
+    Unreadable,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5971,7 +6203,10 @@ mod tests {
             w(60, 40, "11:21.2"),
             w(120, 110, "11:21.21"),
         ];
-        assert_eq!(freeze_confirmed(&done, crop, 681_210), Some(true));
+        assert_eq!(
+            freeze_confirmed(&done, crop, 681_210),
+            Frozen::Finished(681_210)
+        );
         // The same board paused at 1:18.44 in the second segment: the rows
         // show the comparison, and the timer's own word does not count.
         let paused = [
@@ -5981,16 +6216,40 @@ mod tests {
             w(60, 40, "11:18.4"),
             w(120, 110, "1:18.44"),
         ];
-        assert_eq!(freeze_confirmed(&paused, crop, 78_440), Some(false));
-        // A row a tenth off is the finish; a second off is another number.
-        assert_eq!(freeze_confirmed(&done, crop, 681_300), Some(true));
-        assert_eq!(freeze_confirmed(&done, crop, 682_400), Some(false));
+        assert_eq!(freeze_confirmed(&paused, crop, 78_440), Frozen::Paused);
+        // A row a tenth off is the finish. A second off, the pane's own timer
+        // and its final row still agree with each other: the run ended at
+        // their value, and the frozen reading was the one that was off.
+        assert_eq!(
+            freeze_confirmed(&done, crop, 681_300),
+            Frozen::Finished(681_300)
+        );
+        assert_eq!(
+            freeze_confirmed(&done, crop, 682_400),
+            Frozen::Finished(681_210)
+        );
+        // Uninvited, the glyph reader's crop clipped to "3:14.54" while the
+        // pane reads the timer whole and its final row agrees: the run
+        // ended at the pane's value.
+        let clipped = [
+            w(20, 40, "5:11.9"),
+            w(20, 40, "13:14.5"),
+            w(120, 110, "13:14.54"),
+        ];
+        assert_eq!(
+            freeze_confirmed(&clipped, crop, 194_540),
+            Frozen::Finished(794_540)
+        );
+        // The same disagreement with no row behind the pane's timer is the
+        // paused case with a bad crop, not a finish.
+        let alone = [w(20, 40, "5:11.9"), w(120, 110, "13:14.54")];
+        assert_eq!(freeze_confirmed(&alone, crop, 194_540), Frozen::Paused);
         // Only the timer legible, reading the frozen value: it decides
         // nothing, however exactly it matches.
         assert_eq!(
             freeze_confirmed(&[w(120, 110, "1:18.44")], crop, 78_440),
-            None
+            Frozen::Unreadable
         );
-        assert_eq!(freeze_confirmed(&[], crop, 78_440), None);
+        assert_eq!(freeze_confirmed(&[], crop, 78_440), Frozen::Unreadable);
     }
 }

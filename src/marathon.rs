@@ -75,7 +75,7 @@ use std::sync::Arc;
 use crate::board::{game_matches, Board, BoardRow};
 use crate::config::{Config, GameAlias, GameMode};
 use crate::roster::Rosters;
-use crate::signature::{BoardSignature, Shape};
+use crate::signature::{BoardSignature, Labels, Shape};
 use crate::timeparse::{parse_time, time_shaped};
 
 /// Passes that must agree before a cumulative time is believed. The board is
@@ -374,7 +374,22 @@ pub fn classify<'a>(board: &Board, cfg: &'a Config, current: Option<&Marathon>) 
         Some(m) if m.claims(board) => Verdict::Silent,
         _ => Verdict::Other,
     };
-    match BoardSignature::of(board).shape() {
+    let sig = BoardSignature::of(board);
+    match sig.shape() {
+        // A board whose rows read as ONE game's segments but whose title
+        // names an event tracked by its rows, with the rows named as games:
+        // that is the event's board early in the day, or read in part. The
+        // signature calls a titled board with a small total column a run
+        // because his Ninja Gaiden acts, damaged into words of their own,
+        // read as different games — but that board's title is Ninja
+        // Gaiden's, not an event's. The race board's total column is under
+        // twenty minutes for its first two games, and a partial read of it
+        // (the rows above the timer, cumulatives misread) is under it at any
+        // time; without this the layout probe could not lock on it and a
+        // marathon in force would be let go on three such passes.
+        Shape::Run { .. } if matches!(sig.labels, Labels::Titles) && titled().is_some() => {
+            Verdict::Board(titled().expect("titled"))
+        }
         Shape::Marathon { .. } => {
             // Which event? The title, when it names one of them; else the
             // only entry that tracks boards, if there is exactly one.
@@ -1183,6 +1198,8 @@ impl Marathon {
         }
         // A slot claimed by two rows identifies neither.
         let mut last = None;
+        let mut last_row = None;
+        let mut first_offset = None;
         for (i, claim) in claims.iter().enumerate() {
             let Some(j) = *claim else { continue };
             if claims.iter().filter(|c| **c == Some(j)).count() > 1 {
@@ -1193,6 +1210,34 @@ impl Marathon {
             }
             out[i] = Some(j);
             last = Some(j);
+            last_row = Some(i);
+            first_offset.get_or_insert(j - i);
+        }
+        // A board that SCROLLS — the race board shows a window of its forty
+        // rows, two per game, and moves it down as he plays — brings rows
+        // into view the tracker has never seen, and a name that names no
+        // slot is exactly what a new game looks like. They sit under the
+        // rows it knows, in board order, so they continue positionally from
+        // the last anchor: the row under it is the next slot, and the next
+        // is the one after, new slots being made where the board has grown.
+        // Rows above the first anchor, or between anchors, stay unplaced as
+        // before — a row unread in the middle shifts nothing here.
+        //
+        // Only where the board HAS scrolled: the first anchored row sits at
+        // least two slots below its position, which is one game of the race
+        // board and which a fixed board never shows. A row unread in the
+        // middle of a fixed board puts the rows under it one slot down, not
+        // two, and continuing under those would give the pane's footer —
+        // read as an eleventh row now and then — a slot of its own: the
+        // Arcathlon audit recorded a game never played the first time this
+        // continued unconditionally.
+        if let (Some(l), Some(r), Some(off)) = (last, last_row, first_offset) {
+            if off < 2 {
+                return out;
+            }
+            for (k, i) in (r + 1..rows.len()).enumerate() {
+                out[i] = Some(l + 1 + k);
+            }
         }
         out
     }
@@ -1612,6 +1657,103 @@ mod tests {
         assert_eq!(seen[0].game, "Pac-Mania");
         assert_eq!(seen[0].segment_ms, 446_000);
         assert_eq!(seen[0].cumulative_ms, 618_000);
+    }
+
+    /// The race board scrolls: two rows per game, a window of nine or so
+    /// with the last pinned, moved down as he plays. Rows he has finished
+    /// leave the top and games still to come arrive at the bottom. The
+    /// arriving rows are tracked from the pass they appear on, the departed
+    /// ones keep what was recorded, and every segment is measured from the
+    /// bracketed row above it.
+    #[test]
+    fn a_scrolling_board_keeps_tracking_the_rows_that_come_into_view() {
+        let mut m = tracker();
+        let b = |rows: Vec<BoardRow>| board(Some("Practice Run"), rows);
+        // Die Hard done, its bracket done, Pac-Mania under way.
+        let p1 = || {
+            b(vec![
+                row("Die Hard", &["2:22", "2:22"]),
+                row("(Any% Beginner)", &["0:30", "2:52"]),
+                row("Pac-Mania", &[]),
+                row("(Sandbox)", &[]),
+                row("Double Dragon II", &[]),
+            ])
+        };
+        // The total is well past the rows already done: they were finished
+        // before the bot looked, and are baselines.
+        assert!(m.observe(&p1(), 1_000, Some(500_000)).is_empty());
+        assert!(m.observe(&p1(), 61_000, Some(560_000)).is_empty());
+        // Pac-Mania finishes.
+        let p2 = || {
+            b(vec![
+                row("Die Hard", &["2:22", "2:22"]),
+                row("(Any% Beginner)", &["0:30", "2:52"]),
+                row("Pac-Mania", &["7:26", "10:18"]),
+                row("(Sandbox)", &[]),
+                row("Double Dragon II", &[]),
+            ])
+        };
+        let first = m.observe(&p2(), 121_000, Some(618_000));
+        assert!(first.is_empty(), "first reading recorded: {first:?}");
+        let seen = m.observe(&p2(), 181_000, Some(618_000));
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].game, "Pac-Mania");
+        assert_eq!(seen[0].segment_ms, 446_000);
+        // The board scrolls two rows: Die Hard is gone, Crisis Force arrives.
+        let p3 = || {
+            b(vec![
+                row("Pac-Mania", &["7:26", "10:18"]),
+                row("(Sandbox)", &["0:30", "10:48"]),
+                row("Double Dragon II", &[]),
+                row("(Beat Game Normal)", &[]),
+                row("Crisis Force", &[]),
+            ])
+        };
+        assert!(m.observe(&p3(), 241_000, Some(700_000)).is_empty());
+        assert!(m.observe(&p3(), 301_000, Some(760_000)).is_empty());
+        // Double Dragon II finishes: its segment is from the bracket above.
+        let p4 = || {
+            b(vec![
+                row("Pac-Mania", &["7:26", "10:18"]),
+                row("(Sandbox)", &["0:30", "10:48"]),
+                row("Double Dragon II", &["29:09", "39:57"]),
+                row("(Beat Game Normal)", &[]),
+                row("Crisis Force", &[]),
+            ])
+        };
+        assert!(m.observe(&p4(), 361_000, Some(2_397_000)).is_empty());
+        let seen = m.observe(&p4(), 421_000, Some(2_397_000));
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].game, "Double Dragon II");
+        assert_eq!(seen[0].segment_ms, 1_749_000);
+        // Scrolls again; Crisis Force, a row that arrived by scrolling,
+        // finishes, measured from its bracket above.
+        let p5 = || {
+            b(vec![
+                row("Double Dragon II", &["29:09", "39:57"]),
+                row("(Beat Game Normal)", &["0:30", "40:28"]),
+                row("Crisis Force", &[]),
+                row("(3 Stages)", &[]),
+                row("Kid Klown", &[]),
+            ])
+        };
+        assert!(m.observe(&p5(), 481_000, Some(2_500_000)).is_empty());
+        assert!(m.observe(&p5(), 541_000, Some(2_560_000)).is_empty());
+        let p6 = || {
+            b(vec![
+                row("Double Dragon II", &["29:09", "39:57"]),
+                row("(Beat Game Normal)", &["0:30", "40:28"]),
+                row("Crisis Force", &["11:31", "51:59"]),
+                row("(3 Stages)", &[]),
+                row("Kid Klown", &[]),
+            ])
+        };
+        assert!(m.observe(&p6(), 601_000, Some(3_119_000)).is_empty());
+        let seen = m.observe(&p6(), 661_000, Some(3_119_000));
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].game, "Crisis Force");
+        assert_eq!(seen[0].segment_ms, 691_000);
+        assert_eq!(seen[0].cumulative_ms, 3_119_000);
     }
 
     /// A completion is filed under the roster's name for the game, whatever
