@@ -640,7 +640,14 @@ impl Marathon {
                 *self.numbers.entry(n).or_insert(0) += 1;
             }
         }
-        let alignment = self.align(&board.rows);
+        let (alignment, superseded) = self.align(&board.rows);
+        // A slot a row has moved away from, never having had a time: the row
+        // that stands there now takes it fresh.
+        for j in superseded {
+            if self.slots.get(j).is_some_and(|s| s.recorded.is_none()) {
+                self.slots[j] = Slot::default();
+            }
+        }
         // Rows this pass adds to the board that already carry a time. One is
         // a game that has just been finished; ten at once is a numbered
         // board arriving with its ten comparison times. Rows without a time
@@ -1111,15 +1118,18 @@ impl Marathon {
     /// rows carry no name to anchor. So position is tried either way, and
     /// where the pass is short it has to be positively supported by a row
     /// whose name is the game its slot has been carrying.
-    fn align(&self, rows: &[BoardRow]) -> Vec<Option<usize>> {
+    ///
+    /// Returns the placing, and the slots a row has MOVED away from (see
+    /// `by_name`): those are cleared before the pass is filed.
+    fn align(&self, rows: &[BoardRow]) -> (Vec<Option<usize>>, Vec<usize>) {
         if rows.is_empty() {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         let positional: Vec<Option<usize>> = (0..rows.len()).map(Some).collect();
         let ok = !self.shifted(rows)
             && (rows.len() >= self.slots.len() || self.supports(rows, &positional));
         if ok {
-            return positional;
+            return (positional, Vec::new());
         }
         self.by_name(rows)
     }
@@ -1185,63 +1195,88 @@ impl Marathon {
     /// Place only the rows whose name names exactly one slot, keeping the
     /// order of the board: an anchor that would put a row above one already
     /// placed higher up is not an anchor at all.
-    fn by_name(&self, rows: &[BoardRow]) -> Vec<Option<usize>> {
+    ///
+    /// A board that SCROLLS — the race board shows a window of its forty
+    /// rows, two per game, and moves it down as he plays — brings rows into
+    /// view the tracker has never seen, and a name that names no slot is
+    /// exactly what a new game looks like. They sit under the rows it knows,
+    /// in board order, so they continue positionally from the last anchor:
+    /// the row under it is the next slot, and the next the one after, new
+    /// slots being made where the board has grown. Only where the board HAS
+    /// scrolled: the first anchored row sits at least two slots below its
+    /// position, one game of this board, which a fixed board never shows. A
+    /// row unread in the middle of a fixed board puts the rows under it one
+    /// slot down, not two, and continuing under those would give the pane's
+    /// footer — read as an eleventh row now and then — a slot of its own:
+    /// the Arcathlon audit recorded a game never played the first time this
+    /// continued unconditionally.
+    ///
+    /// An anchor has to keep the board's spacing: a row anchored to a slot
+    /// no further below the previous anchor's than the rows between them
+    /// allow is not an anchor. That is the race board's PINNED last row —
+    /// "20 - Moon Crystal" sits at the foot of the window whatever scrolls
+    /// above it, and the slot it took early and low would otherwise anchor
+    /// the bottom of every pass and leave the games scrolling in above it
+    /// between anchors, unplaced. It is a row that has moved: it takes the
+    /// next slot in the continuation like a new row, and the slot it left,
+    /// a placeholder that never had a time, is cleared (`superseded`) so
+    /// the row now standing there can take it and the board stays in order.
+    /// Continued without that, its stale slot took a bracketed row's
+    /// transition time as "Moon Crystal finished in 0:30". Rows with no
+    /// legible name end the continuation: nothing is made for them to
+    /// inherit later.
+    fn by_name(&self, rows: &[BoardRow]) -> (Vec<Option<usize>>, Vec<usize>) {
         let mut out = vec![None; rows.len()];
-        let mut claims: Vec<Option<usize>> = Vec::with_capacity(rows.len());
-        for row in rows {
-            claims.push(
+        let mut superseded: Vec<usize> = Vec::new();
+        let claims: Vec<Option<usize>> = rows
+            .iter()
+            .map(|row| {
                 row.name
                     .as_deref()
                     .and_then(clean_name)
-                    .and_then(|n| self.unique_slot(&n)),
-            );
-        }
+                    .and_then(|n| self.unique_slot(&n))
+            })
+            .collect();
         // A slot claimed by two rows identifies neither.
-        let mut last = None;
-        let mut last_row = None;
+        let mut last: Option<(usize, usize)> = None; // (row, slot)
         let mut first_offset = None;
         for (i, claim) in claims.iter().enumerate() {
             let Some(j) = *claim else { continue };
             if claims.iter().filter(|c| **c == Some(j)).count() > 1 {
                 continue;
             }
-            if last.is_some_and(|l| j <= l) {
-                continue;
+            if let Some((lr, ls)) = last {
+                if j <= ls || j - ls < i - lr {
+                    continue;
+                }
             }
             out[i] = Some(j);
-            last = Some(j);
-            last_row = Some(i);
             first_offset.get_or_insert(j - i);
+            last = Some((i, j));
         }
-        // A board that SCROLLS — the race board shows a window of its forty
-        // rows, two per game, and moves it down as he plays — brings rows
-        // into view the tracker has never seen, and a name that names no
-        // slot is exactly what a new game looks like. They sit under the
-        // rows it knows, in board order, so they continue positionally from
-        // the last anchor: the row under it is the next slot, and the next
-        // is the one after, new slots being made where the board has grown.
-        // Rows above the first anchor, or between anchors, stay unplaced as
-        // before — a row unread in the middle shifts nothing here.
-        //
-        // Only where the board HAS scrolled: the first anchored row sits at
-        // least two slots below its position, which is one game of the race
-        // board and which a fixed board never shows. A row unread in the
-        // middle of a fixed board puts the rows under it one slot down, not
-        // two, and continuing under those would give the pane's footer —
-        // read as an eleventh row now and then — a slot of its own: the
-        // Arcathlon audit recorded a game never played the first time this
-        // continued unconditionally.
-        if let (Some(l), Some(r), Some(off)) = (last, last_row, first_offset) {
+        if let (Some((lr, ls)), Some(off)) = (last, first_offset) {
             if off < 2 {
-                return out;
+                return (out, superseded);
             }
-            for (k, i) in (r + 1..rows.len()).enumerate() {
-                out[i] = Some(l + 1 + k);
+            for (k, i) in (lr + 1..rows.len()).enumerate() {
+                let Some(name) = rows[i].name.as_deref().and_then(clean_name) else {
+                    break;
+                };
+                let slot = ls + 1 + k;
+                if let Some(j) = self
+                    .slots
+                    .iter()
+                    .position(|s| s.name().is_some_and(|n| game_matches(&name, n)))
+                {
+                    if j != slot {
+                        superseded.push(j);
+                    }
+                }
+                out[i] = Some(slot);
             }
         }
-        out
+        (out, superseded)
     }
-
     /// The one slot whose settled name is this name. An exact reading wins
     /// outright: "Batman" and "Batman: ROTJ" were two of the ten games of one
     /// real event, and fuzzily each name matches both rows.
@@ -1754,6 +1789,73 @@ mod tests {
         assert_eq!(seen[0].game, "Crisis Force");
         assert_eq!(seen[0].segment_ms, 691_000);
         assert_eq!(seen[0].cumulative_ms, 3_119_000);
+    }
+
+    /// The race board pins its last row under the window: "20 - Moon Crystal"
+    /// is on every pass, at the bottom, whatever scrolls above it. It takes
+    /// one slot, early, and keeps it; the rows scrolling in above it take new
+    /// slots, and its times — none, until he reaches it — never land on
+    /// anybody else's slot.
+    #[test]
+    fn the_pinned_last_row_keeps_its_slot_as_the_board_scrolls() {
+        let mut m = tracker();
+        let b = |rows: Vec<BoardRow>| board(Some("Practice Run"), rows);
+        let p1 = || {
+            b(vec![
+                row("Die Hard", &["2:22", "2:22"]),
+                row("(Any% Beginner)", &["0:30", "2:52"]),
+                row("Pac-Mania", &[]),
+                row("(Sandbox)", &[]),
+                row("20 - Moon Crystal", &[]),
+            ])
+        };
+        assert!(m.observe(&p1(), 1_000, Some(500_000)).is_empty());
+        assert!(m.observe(&p1(), 61_000, Some(560_000)).is_empty());
+        // Scrolled two rows: Pac-Mania done, its bracket done, two games in
+        // view under it, and the pinned row still last.
+        let p2 = || {
+            b(vec![
+                row("Pac-Mania", &["7:26", "10:18"]),
+                row("(Sandbox)", &["0:30", "10:48"]),
+                row("Double Dragon II", &[]),
+                row("(Beat Game Normal)", &[]),
+                row("20 - Moon Crystal", &[]),
+            ])
+        };
+        assert!(m.observe(&p2(), 121_000, Some(700_000)).is_empty());
+        // Pac-Mania finished between the boards, and is filed as itself.
+        let seen = m.observe(&p2(), 181_000, Some(760_000));
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Pac-Mania");
+        // Double Dragon II finishes; then its bracket row does. Neither may
+        // be filed as Moon Crystal, and the pinned row has one slot only.
+        let p3 = || {
+            b(vec![
+                row("Pac-Mania", &["7:26", "10:18"]),
+                row("(Sandbox)", &["0:30", "10:48"]),
+                row("Double Dragon II", &["29:09", "39:57"]),
+                row("(Beat Game Normal)", &["0:30", "40:28"]),
+                row("20 - Moon Crystal", &[]),
+            ])
+        };
+        assert!(m.observe(&p3(), 241_000, Some(2_428_000)).is_empty());
+        let seen = m.observe(&p3(), 301_000, Some(2_428_000));
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Double Dragon II");
+        assert_eq!(seen[0].segment_ms, 1_749_000);
+        let moon: Vec<usize> = m
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.name().is_some_and(|n| n.contains("Moon")))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(moon.len(), 1, "one slot for the pinned row: {moon:?}");
+        for t in 1..4 {
+            assert!(m
+                .observe(&p3(), 301_000 + t * 60_000, Some(2_500_000))
+                .is_empty());
+        }
     }
 
     /// A completion is filed under the roster's name for the game, whatever

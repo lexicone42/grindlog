@@ -1137,6 +1137,18 @@ async fn probe_boards(
     current: Option<&marathon::Marathon>,
     pre: &PreprocessCfg,
 ) -> Result<Option<(usize, Board, u8)>> {
+    // Every threshold, and the best reading wins — by rows WITH NAMES first,
+    // then rows: at 150 the race board gives eight rows off their time cells
+    // with names the reader cannot make out, and a tracker that files rows
+    // by name can do nothing with that; at 100 it gives ten, named. The
+    // first threshold to clear three rows was taken at first, and it was 150.
+    let score = |b: &Board| {
+        (
+            b.rows.iter().filter(|r| r.name.is_some()).count(),
+            b.rows.len(),
+        )
+    };
+    let mut best: Option<(usize, Board, u8)> = None;
     for threshold in std::iter::once(pre.threshold)
         .chain(BOARD_PROBE_THRESHOLDS.iter().copied())
         .filter(|t| *t == pre.threshold || !BOARD_PROBE_THRESHOLDS.contains(&pre.threshold))
@@ -1144,10 +1156,15 @@ async fn probe_boards(
         if let Some((li, board)) =
             probe_boards_at(ocr_engine, union_img, regs, cfg, current, pre, threshold).await?
         {
-            return Ok(Some((li, board, threshold)));
+            if best
+                .as_ref()
+                .is_none_or(|(_, b, _)| score(&board) > score(b))
+            {
+                best = Some((li, board, threshold));
+            }
         }
     }
-    Ok(None)
+    Ok(best)
 }
 
 async fn probe_boards_at(
@@ -1166,6 +1183,7 @@ async fn probe_boards_at(
         auto_threshold: false,
     };
     let proc = ocr::preprocess(union_img, &pre2);
+    debug!("pane pass at threshold {}", pre2.threshold);
     let png = ocr::to_png(&proc)?;
     let words = ocr_engine
         .recognize_words(&png, Some("0123456789:."), 11)
@@ -1206,9 +1224,42 @@ async fn probe_boards_at(
     Ok(best)
 }
 
+/// The rectangle a layout's pane pass reads: its own crops' bounding box
+/// with a small margin, inside the decoded union. The union is every
+/// layout's crops together, and what lies in it beyond THIS pane — the
+/// game screen's edge to the right, the sprites under the timer — bends
+/// tesseract's page analysis over the whole image: read off the union, a
+/// row's cumulative "2:01:07" came back "01:07" with the "2" filed in the
+/// name column, and the same rows read clean off the pane alone.
+fn pane_rect(regs: &Regions, union_w: u32, union_h: u32) -> R {
+    const MARGIN: u32 = 12;
+    let rects = std::iter::once(regs.timer)
+        .chain(regs.splits)
+        .chain(regs.counter)
+        .chain(regs.sob);
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for r in rects {
+        x0 = x0.min(r.0);
+        y0 = y0.min(r.1);
+        x1 = x1.max(r.0 + r.2);
+        y1 = y1.max(r.1 + r.3);
+    }
+    let x0 = x0.saturating_sub(MARGIN);
+    let y0 = y0.saturating_sub(MARGIN);
+    let x1 = (x1 + MARGIN).min(union_w);
+    let y1 = (y1 + MARGIN).min(union_h);
+    (
+        x0,
+        y0,
+        x1.saturating_sub(x0).max(1),
+        y1.saturating_sub(y0).max(1),
+    )
+}
+
 async fn measure_pane(
     ocr_engine: &mut OcrEngine,
     union_img: &GrayImage,
+    pane: R,
     timer: R,
     acts: u32,
     pre: &PreprocessCfg,
@@ -1220,17 +1271,35 @@ async fn measure_pane(
         invert: pre.invert,
         auto_threshold: false,
     };
-    let proc = ocr::preprocess(union_img, &pre2);
+    // Only the pane (see `pane_rect`); the words come back in the union's
+    // pixels, so everything downstream is as it was.
+    let sub = image::imageops::crop_imm(union_img, pane.0, pane.1, pane.2, pane.3).to_image();
+    let proc = ocr::preprocess(&sub, &pre2);
+    debug!(
+        "pane pass at threshold {} over {}x{} at {},{}",
+        pre2.threshold, pane.2, pane.3, pane.0, pane.1
+    );
     let png = ocr::to_png(&proc)?;
-    let words = ocr_engine
+    let shift = |mut w: ocr::Word| {
+        w.x += pane.0 * UP;
+        w.y += pane.1 * UP;
+        w
+    };
+    let words: Vec<ocr::Word> = ocr_engine
         .recognize_words(&png, Some("0123456789:."), 11)
-        .await?;
+        .await?
+        .into_iter()
+        .map(shift)
+        .collect();
     // The letters pass reads the pane's own words: the row labels that name
     // each reference time, and the game title. One extra call per lock.
-    let letters = ocr_engine
+    let letters: Vec<ocr::Word> = ocr_engine
         .recognize_words(&png, None, 11)
         .await
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .map(shift)
+        .collect();
     // NG_DUMP_PANE=1 saves what this pass saw (debugging a layout).
     if std::env::var_os("NG_DUMP_PANE").is_some() {
         let _ = std::fs::create_dir_all("calibration");
@@ -1758,6 +1827,16 @@ async fn track_marathon(
                 );
                 health.event(at_ms, "marathon", format!("{} started", alias.name));
                 *state = Some(m);
+            } else {
+                // The board is this tracker's. The passes that would replace
+                // it have to run CONSECUTIVELY, like the passes that start or
+                // end an event: on the race board one pass in five or six
+                // comes back with its names damaged past matching — the
+                // highlighted row, a scroll under way — and counted across
+                // the good passes between them, three such passes rebuilt
+                // the tracker every minute of the first live run, with
+                // nothing ever recorded.
+                *hits = 0;
             }
         }
     }
@@ -2849,9 +2928,14 @@ pub async fn run(cfg: Config) -> Result<()> {
             // once every ten seconds and scored against every layout
             // (`probe_boards`); the layout it names twice running is granted
             // the lock through the same path a timer does.
+            // And while the TIMER holds the lock too, at a third the cadence: the
+            // default crop lies over this board's time cells and locks on them
+            // as a timer, and a board probe that waited for the layout to be
+            // free never ran. A Ninja Gaiden pane never classifies as a
+            // board, so on his days this costs two OCR calls a half-minute.
             board_probe_frames += 1;
-            if !layout_locked
-                && board_probe_frames >= 20
+            if !board_locked
+                && board_probe_frames >= if layout_locked { 60 } else { 20 }
                 && cfg
                     .games
                     .iter()
@@ -2896,6 +2980,14 @@ pub async fn run(cfg: Config) -> Result<()> {
                     Err(e) => warn!("board probe failed: {e:#}"),
                 }
             }
+            // While the lock is the board's, the timer candidates do not
+            // compete: this board's timer reads whole seconds where it reads
+            // at all, and a streak of those re-anchored the layout every
+            // minute, whose grant re-read the pane at the configured
+            // threshold — one to four rows of noise — and the tracker
+            // disowned its board on them. The board probe above is the only
+            // thing that may re-grant.
+            let to_read: Vec<usize> = if board_locked { Vec::new() } else { to_read };
             for ci in to_read {
                 let c = &mut cands[ci];
                 let crop = c.regs.timer;
@@ -2963,7 +3055,12 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // same digits, but their splits columns sit differently: put
                 // every layout's timer where the winner's is and keep the one
                 // whose column reads most like times (ties keep the winner).
-                if regs.len() > 1 && new_regs.splits.is_some() {
+                // Not for a lock the board granted: the board probe chose the
+                // layout by the rows its pane reads, and putting the other
+                // layouts' timers where this one's is installed one of THEM,
+                // whose crops bound another pane — the reads that followed
+                // had no title and no names.
+                if regs.len() > 1 && new_regs.splits.is_some() && !board_locked {
                     let rows = shared.acts.len().max(1) as u32;
                     let win_t = new_regs.timer;
                     let mut best: Option<usize> = None;
@@ -3012,13 +3109,29 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // Measure where the split rows and counter really are; the
                 // configured rectangles are only the fallback.
                 if new_regs.splits.is_some() {
+                    // At the board probe's threshold for a lock the board granted.
+                    let pre_grant = match board_threshold {
+                        Some(th) if board_locked => PreprocessCfg {
+                            upscale: pre_splits.upscale,
+                            threshold: th,
+                            invert: pre_splits.invert,
+                            auto_threshold: pre_splits.auto_threshold,
+                        },
+                        _ => PreprocessCfg {
+                            upscale: pre_splits.upscale,
+                            threshold: pre_splits.threshold,
+                            invert: pre_splits.invert,
+                            auto_threshold: pre_splits.auto_threshold,
+                        },
+                    };
                     let acts = shared.acts.len().max(1) as u32;
                     match measure_pane(
                         &mut ocr_engine,
                         &union_img,
+                        pane_rect(&new_regs, union_img.width(), union_img.height()),
                         new_regs.timer,
                         acts,
-                        &pre_splits,
+                        &pre_grant,
                     )
                     .await
                     {
@@ -3086,7 +3199,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                     .await;
                                 }
                             }
-                            if let Some(g) = geom {
+                            if let Some(g) = geom.filter(|_| !board_locked) {
                                 g.apply(&mut new_regs);
                                 let (ux, uy) = (new_regs.union.0, new_regs.union.1);
                                 let s = new_regs.splits.unwrap();
@@ -3764,6 +3877,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             match measure_pane(
                 &mut ocr_engine,
                 &union_img,
+                pane_rect(&active_regs, union_img.width(), union_img.height()),
                 active_regs.timer,
                 acts,
                 &pre_pane,
@@ -3772,7 +3886,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             {
                 Ok((geom, readings, board, pane_words)) => {
                     passed_pane = Some(pane_words.clone());
-                    if let Some(g) = geom {
+                    if let Some(g) = geom.filter(|_| !board_locked) {
                         // Nothing new: the pane in force, read again (a lost
                         // counter — covered, or its row unread — is not
                         // news either). With the same pitch, a frame that
