@@ -90,7 +90,18 @@ does for this board that an Arcathlon never needed:
   slots below its position, one game of this board, which a fixed board
   never shows. (Continued unconditionally, the Arcathlon audit recorded a
   game never played: the pane's footer read as an eleventh row.) Rows that
-  scroll off keep their slot and its record.
+  scroll off keep their slot and its record. An anchor has to keep the
+  board's spacing: LiveSplit PINS the last row ("20 - Moon Crystal") at the
+  foot of the window whatever scrolls above it, and its early, low slot
+  would otherwise anchor the bottom of every pass and leave the games
+  scrolling in above it unplaced — it is treated as a row that has moved,
+  taking the next slot and leaving its stale one cleared, which is also what
+  stopped a bracketed row's transition time landing there as "Moon Crystal
+  finished in 0:30". And a tracker is only rebuilt on three CONSECUTIVE
+  passes that disown its board: one pass in five or six on this board comes
+  back with its names damaged past matching, and counted across the good
+  passes between them, three such passes rebuilt the tracker every minute of
+  the first live run.
 - **Live, the layout locks on the board, not the timer.** The timer's digits
   sit between the decimal point and a logo with pixels to spare on neither
   side; no crop reads them without cutting a digit or taking the logo in,
@@ -107,4 +118,16 @@ does for this board that an Arcathlon never needed:
   at 100 ten, and at 100 his Ninja Gaiden pane's title reads as noise and
   the gate convicts its own board — so the board probe tries the configured
   threshold and then 100, remembers which found the board, and the pane
-  pass reads at that threshold only while the lock is board-granted.
+  pass reads at that threshold only while the lock is board-granted. The
+  probe tries every threshold and keeps the reading with the most rows THAT
+  HAVE NAMES (150 gives the race board eight rows off their time cells with
+  no readable names; 100 gives ten, named), and it keeps running at a third
+  of its cadence while the timer holds the lock, because the default crop
+  lies over this board's time cells and locks on them as a timer first.
+  Once the board holds the lock, the timer candidates do not compete for
+  it, the layout's configured rectangles stand (no measured geometry is
+  adopted), and every pane pass reads only that layout's own rectangle —
+  the union of every layout's crops is what ffmpeg decodes, and the game
+  screen's edge and the sprites in it bent tesseract's page analysis over
+  the whole image: "2:01:07" came back "01:07" with the "2" in the name
+  column, and the same rows read clean off the pane alone.
