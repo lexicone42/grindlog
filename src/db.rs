@@ -900,6 +900,20 @@ pub struct NowPlaying {
     /// When that reading was taken. Old means the pane has not been
     /// legible since, not that he stopped playing.
     pub at_ms: Option<i64>,
+    /// A marathon board in force — his full run of the race — and how far
+    /// it has got: the rows recorded so far this session and the cumulative
+    /// the last of them ended at. The panel leads with this over the game
+    /// name, because on that board the game name is one row of twenty.
+    pub marathon: Option<MarathonNow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MarathonNow {
+    /// The event's category, as the [[games]] entry names it.
+    pub category: String,
+    pub games: i64,
+    pub reached_ms: Option<i64>,
+    pub since_ms: i64,
 }
 
 /// The last board the pane reported, looking back through recent sessions
@@ -912,7 +926,7 @@ pub async fn now_playing(pool: &SqlitePool) -> Result<NowPlaying> {
     // makes the newest import look like the newest broadcast — it reported
     // a July marathon as what was on screen.
     let rows = sqlx::query(
-        "SELECT ended_at_ms IS NULL AS open, source, COALESCE(events,'[]') AS events \
+        "SELECT id, vod_id, ended_at_ms IS NULL AS open, source, COALESCE(events,'[]') AS events \
          FROM sessions ORDER BY started_at_ms DESC LIMIT 40",
     )
     .fetch_all(pool)
@@ -926,6 +940,59 @@ pub async fn now_playing(pool: &SqlitePool) -> Result<NowPlaying> {
             serde_json::from_str(&r.get::<String, _>("events")).unwrap_or_default();
         let titles: Vec<&serde_json::Value> =
             events.iter().rev().filter(|e| e["k"] == "title").collect();
+        // A marathon board in force: the newest marathon event says the
+        // event started, or that its board was replaced under it (a rebuilt
+        // tracker, the event still on); "ended" is the one that closes it.
+        // The rows it has recorded are this session's runs of its category.
+        let marathon = match events.iter().rev().find(|e| e["k"] == "marathon") {
+            Some(e) => {
+                let d = e["d"].as_str().unwrap_or_default();
+                let category = d
+                    .strip_suffix(" started")
+                    .or_else(|| d.strip_suffix(" board replaced"))
+                    .map(str::to_string);
+                match category {
+                    Some(category) if r.get::<i64, _>("open") == 1 => {
+                        // Across the BROADCAST, not this capture session: the bot
+                        // restarts (a rollout mid-run, a reconnect) open a new
+                        // session over the same run, and its rows so far are in
+                        // the earlier ones. Sessions of one broadcast share its
+                        // vod_id; before the archive resolves, this session alone.
+                        let sid: i64 = r.get("id");
+                        let vod: Option<String> = r.get("vod_id");
+                        let row = sqlx::query(
+                            "SELECT COUNT(*) AS n, MAX(r.last_timer_ms) AS reached \
+                             FROM runs r JOIN sessions s ON r.session_id = s.id \
+                             WHERE r.category = ? \
+                               AND (r.session_id = ? OR (? IS NOT NULL AND s.vod_id = ?))",
+                        )
+                        .bind(&category)
+                        .bind(sid)
+                        .bind(&vod)
+                        .bind(&vod)
+                        .fetch_one(pool)
+                        .await?;
+                        Some(MarathonNow {
+                            category,
+                            games: row.get::<i64, _>("n"),
+                            reached_ms: row.get::<Option<i64>, _>("reached"),
+                            since_ms: e["t"].as_i64().unwrap_or_default(),
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            None => None,
+        };
+        if let (None, Some(m)) = (titles.first(), marathon.as_ref()) {
+            return Ok(NowPlaying {
+                live,
+                game: None,
+                category: None,
+                at_ms: Some(m.since_ms),
+                marathon,
+            });
+        }
         if let Some(last) = titles.first() {
             // WHEN comes from the newest title event; WHAT comes from the
             // newest one the tracker managed to name.
@@ -952,6 +1019,7 @@ pub async fn now_playing(pool: &SqlitePool) -> Result<NowPlaying> {
                 game: named.or(last["d"].as_str()).map(str::to_string),
                 category: None,
                 at_ms: last["t"].as_i64(),
+                marathon,
             });
         }
     }
@@ -960,6 +1028,7 @@ pub async fn now_playing(pool: &SqlitePool) -> Result<NowPlaying> {
         game: None,
         category: None,
         at_ms: None,
+        marathon: None,
     })
 }
 
@@ -1400,6 +1469,80 @@ mod tests {
     /// The live panel names the board from the newest reading the tracker
     /// managed to PLACE, not from the newest reading.
     ///
+    /// A marathon board in force leads the panel: the race he is running,
+    /// how many of its rows are recorded this session, and the cumulative
+    /// the last of them ended at. "ended" closes it; a board replaced under
+    /// it (the tracker rebuilt) does not.
+    #[tokio::test]
+    async fn the_live_panel_leads_with_a_marathon_in_force() {
+        let (_dir, pool) = test_pool().await;
+        let sid = open_session(&pool, 1000, "hls", "arcus", None, None)
+            .await
+            .unwrap();
+        let mut h = SessionHealth::default();
+        h.event_named(10, "title", "Practice Run".to_string(), "Practice Run");
+        h.event(20, "marathon", "Big 20 #23 run started".to_string());
+        update_session_health(&pool, sid, &h).await.unwrap();
+        for (game, seg, cum) in [
+            ("Die Hard", 142_000, 142_000),
+            ("Pac-Mania", 446_000, 618_000),
+        ] {
+            insert_run(
+                &pool,
+                NewRun {
+                    game,
+                    category: "Big 20 #23 run",
+                    attempt_number: 1,
+                    started_at_ms: 2_000,
+                    ended_at_ms: 2_000 + cum,
+                    outcome: OUTCOME_FINISHED,
+                    reset_reason: None,
+                    final_time_ms: Some(seg),
+                    last_timer_ms: Some(cum),
+                    session_id: Some(sid),
+                    ls_attempt: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // The bot restarted mid-run: a new session over the same broadcast,
+        // the marathon taken up again, the earlier rows in the old session.
+        set_session_vod(&pool, sid, "2876668056", 1_000)
+            .await
+            .unwrap();
+        close_session(&pool, sid, 3_000).await.unwrap();
+        let sid2 = open_session(&pool, 4_000, "hls", "arcus", None, None)
+            .await
+            .unwrap();
+        set_session_vod(&pool, sid2, "2876668056", 1_000)
+            .await
+            .unwrap();
+        let mut h = SessionHealth::default();
+        h.event(20, "marathon", "Big 20 #23 run started".to_string());
+        update_session_health(&pool, sid2, &h).await.unwrap();
+        let now = now_playing(&pool).await.unwrap();
+        let m = now.marathon.expect("a marathon in force");
+        assert_eq!(m.category, "Big 20 #23 run");
+        assert_eq!(
+            m.games, 2,
+            "the earlier session's rows count: one broadcast"
+        );
+        assert_eq!(m.reached_ms, Some(618_000));
+        assert_eq!(m.since_ms, 20);
+
+        h.event(30, "marathon", "Big 20 #23 run board replaced".to_string());
+        update_session_health(&pool, sid2, &h).await.unwrap();
+        assert!(
+            now_playing(&pool).await.unwrap().marathon.is_some(),
+            "rebuilt, still on"
+        );
+
+        h.event(40, "marathon", "Big 20 #23 run ended".to_string());
+        update_session_health(&pool, sid2, &h).await.unwrap();
+        assert!(now_playing(&pool).await.unwrap().marathon.is_none());
+    }
+
     /// These are the eight readings session #194 actually recorded of one
     /// Steel Legion board inside a minute. The roster folds some and not
     /// others, and which one lands last is a coin flip — it came up "Stee!
