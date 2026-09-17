@@ -194,27 +194,6 @@ impl Tally {
     }
 }
 
-/// Every game this build ships a list for, minus the one being tracked.
-///
-/// The Arcathlon pool and the Big 20 race are the two events this streamer
-/// runs, and between them they name the games most likely to appear on a
-/// pane that is not the tracked game's. Compiled in like the rosters
-/// themselves; a deployment following a different streamer ships whatever
-/// lists it has, or none, and then this signal never fires.
-///
-/// The tracked game is removed rather than matched against: Ninja Gaiden
-/// is itself one of Arcathlon #1's ten, and a header reading "Ninja
-/// Gaiden" must never be evidence AGAINST Ninja Gaiden.
-fn bundled_rosters() -> Vec<crate::roster::Rosters> {
-    [
-        include_str!("../assets/arcathlon-rosters.toml"),
-        include_str!("../assets/big20-roster.toml"),
-    ]
-    .iter()
-    .filter_map(|t| crate::roster::Rosters::parse(t).ok())
-    .collect()
-}
-
 /// The tracked game as its board looks: what the header should say, what
 /// the rows should be called, and the highest attempt the game has already
 /// reached.
@@ -224,10 +203,6 @@ pub struct Fingerprint {
     category: String,
     acts: Vec<String>,
     attempts: Option<i64>,
-    /// The game lists this build ships, kept whole rather than flattened:
-    /// their own matcher is what folds a damaged reading onto a canonical
-    /// name, and it is far better at it than a plain name comparison.
-    rosters: Vec<crate::roster::Rosters>,
 }
 
 impl Fingerprint {
@@ -241,7 +216,6 @@ impl Fingerprint {
             category: cfg.game.category.clone(),
             acts: cfg.game.acts.iter().map(|a| a.name.clone()).collect(),
             attempts: attempts.filter(|&n| n > 0),
-            rosters: bundled_rosters(),
         }
     }
 
@@ -341,13 +315,9 @@ impl Fingerprint {
     /// that lists the game, so it has to be read off whichever roster
     /// actually matched rather than looked up again afterwards.
     fn recognise(&self, t: &str) -> Option<(String, Option<String>)> {
-        self.rosters
-            .iter()
-            .find_map(|r| {
-                let g = r.assign(None, &[Some(t)]).first().copied().flatten()?;
-                Some((g.to_string(), r.category_of(g).map(str::to_string)))
-            })
-            .filter(|(g, _)| !board::game_matches(g, &self.game))
+        // The race roster first, inside-roster, then the pools strict: see
+        // `roster::canonical_foreign` for why that order and those terms.
+        crate::roster::canonical_foreign(t).filter(|(g, _)| !board::game_matches(g, &self.game))
     }
 
     /// The counter sits at or above the floor this game has already
@@ -1063,11 +1033,33 @@ mod observed {
         }
     }
 
-    /// The strict sequel rule costs one fold and is worth it: "Pac-Mania
-    /// 1}" carries a trailing token the roster will not discard, because
-    /// discarding it is how a II becomes a III. A miss, not a mis-fold.
+    /// A trailing token is discarded INSIDE the race and not across the pool.
+    /// "Pac-Mania 1}" was a deliberate miss while every header went through
+    /// the pool with the sequel strict — discarding the token is how a II
+    /// becomes a III among ninety games. The race holds one Pac-Mania, one
+    /// Mega Man and one Ghostbusters, so there a lost or stray numeral can
+    /// only land on the game it is; the pool still refuses a numeral it
+    /// does not hold.
     #[test]
-    fn a_trailing_numeral_is_not_guessed_away() {
-        assert_eq!(fp().recognise("Pac-Mania 1}"), None);
+    fn a_trailing_token_folds_inside_the_race_and_not_across_the_pool() {
+        let f = fp();
+        assert_eq!(
+            f.recognise("Pac-Mania 1}").map(|(g, _)| g).as_deref(),
+            Some("Pac-Mania")
+        );
+        assert_eq!(
+            f.recognise("Mega Man").map(|(g, _)| g).as_deref(),
+            Some("Mega Man 6")
+        );
+        assert_eq!(
+            f.recognise("New Ghostbusters").map(|(g, _)| g).as_deref(),
+            Some("New Ghostbusters II")
+        );
+        // Not in the race: strict. There is no Duck Tales 3 to guess at.
+        assert_eq!(f.recognise("Duck Tales 3"), None);
+        assert_eq!(
+            f.recognise("Duck Tales 2").map(|(g, _)| g).as_deref(),
+            Some("Duck Tales 2")
+        );
     }
 }
