@@ -261,7 +261,11 @@ match = ["arcath", "randomized"]
 # the twenty games two rows each (the game, then its category in brackets)
 # under the webcam, columns +/- | Game | Total, the timer in a light band at
 # the foot of the pane with a small segment timer beneath it. No attempt
-# counter. The timer crop is the big digits only, with room on the left for
+# counter. The splits crop starts at the game names (x=128), not the pane's
+# edge: from x=75 the capture union reached the stream's left margin, and the
+# pixel-art sprites there read as words in the Ninja Gaiden pane's title band
+# and convicted his own board ("st ot" for its title). The timer crop is the
+# big digits only, with room on the left for
 # two-digit minutes and the hours digit the race total will grow: the first
 # crop (from `locate` on a "1:50" reading) had "17:10" touching its left edge,
 # which the probe rightly refuses as clipped, and took in the small segment
@@ -270,4 +274,17 @@ match = ["arcath", "randomized"]
 [[layouts]]
 name = "big20-race"
 timer = { crop_x = 375, crop_y = 953, crop_w = 190, crop_h = 56 }
-splits = { crop_x = 280, crop_y = 450, crop_w = 340, crop_h = 480 }
+splits = { crop_x = 128, crop_y = 450, crop_w = 492, crop_h = 465 }
+
+# The race board — "Big 20 #23 / Practice Run", the twenty games two rows each
+# (the game, then its category in brackets: the transition into the next),
+# tracked by its rows like an Arcathlon board, every completed row a run of
+# its game under this category, named by the race roster. The layout probe
+# locks on this board by its pane (the timer sits where no crop can hold it
+# cleanly); see the board probe in app.rs. First seen 2026-09-17.
+[[games]]
+name = "Big 20 #23 run"
+category = "Big 20 #23 run"
+match = ["big 20", "big20", "practice run"]
+mode = "board"
+roster = "assets/big20-roster.toml"

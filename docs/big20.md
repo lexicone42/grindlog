@@ -165,6 +165,15 @@ the race is ahead (until three days after it) and his newest practice run is
 under two weeks old; when he is back to grinding Ninja Gaiden it goes away
 by itself and the page reads as before.
 
+## Full practice runs on the race board
+
+From 2026-09-17 he also runs the whole race on its own splits ("Big 20 #23
+/ Practice Run"). That is a marathon board, tracked by its rows, and it has
+its own section in [marathons](marathons.md#the-race-board-big-20): the
+replay script, the bracketed transition rows, the scrolling, and how the
+live bot locks on it. Its rows are filed under `Big 20 #23 run`, apart from
+the per-game practice attempts.
+
 ## The next race
 
 A roster edit, not a code change. `assets/big20-roster.toml` carries the
