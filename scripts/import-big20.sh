@@ -2,7 +2,7 @@
 # Import one broadcast's race-practice runs into the live database, from the
 # per-VOD database scripts/replay-big20.sh wrote.
 #
-#   ./scripts/import-big20.sh <vod_id>... [--deploy]
+#   ./scripts/import-big20.sh <vod_id>... [--replace-live] [--deploy]
 #
 # This is NOT import-vod.sh. That one replaces a broadcast DAY, which is right
 # for a Ninja Gaiden VOD and wrong here: he practises Big 20 games in the
@@ -23,6 +23,13 @@
 # it is what caught the marathon import that would have deleted a day.
 # `--deploy` rebuilds and uploads the site afterwards.
 #
+# `--replace-live` makes the replay's pass win over the LIVE capture's practice
+# rows for the span of the VOD: those rows are deleted before the insert, so
+# the replay's land instead of being skipped as duplicates. For when the live
+# bot ran a build that has since been fixed (the 2026-09-16 pane layouts and
+# naming: a week of days whose live capture saw six of the twenty games). It
+# still deletes no run of the tracked game, and no Arcathlon row.
+#
 # Exit 1 when a per-VOD database is missing or holds no practice runs, 2 when
 # its session is still open or the live bot is still capturing that VOD.
 set -euo pipefail
@@ -40,15 +47,16 @@ tracked_cat=$(sed -n '/^\[game\]/,/^\[/p' "$CFG" | sed -n 's/^category *= *"\(.*
 [ -n "$tracked_game" ] && [ -n "$tracked_cat" ] || {
   echo "could not read [game] name/category from $CFG" >&2; exit 1; }
 
-deploy=false ids=()
+deploy=false replace=false ids=()
 for a in "$@"; do
   case "$a" in
     --deploy) deploy=true;;
-    -*) echo "unknown option $a (usage: $0 <vod_id>... [--deploy])" >&2; exit 1;;
+    --replace-live) replace=true;;
+    -*) echo "unknown option $a (usage: $0 <vod_id>... [--replace-live] [--deploy])" >&2; exit 1;;
     *) ids+=("$a");;
   esac
 done
-[ ${#ids[@]} -gt 0 ] || { echo "usage: $0 <vod_id>... [--deploy]" >&2; exit 1; }
+[ ${#ids[@]} -gt 0 ] || { echo "usage: $0 <vod_id>... [--replace-live] [--deploy]" >&2; exit 1; }
 [ -f "$LIVE" ] || { echo "no live database at $LIVE" >&2; exit 1; }
 
 q() { sqlite3 -cmd '.timeout 10000' "$1" "$2"; }
@@ -97,6 +105,24 @@ for id in "${ids[@]}"; do
   echo "  $theirs $tracked_game run(s) in the pass are NOT imported (that is import-vod.sh's job)"
   echo "  $other $tracked_game run(s) that day are left alone"
 
+  # The live capture's practice rows inside this VOD's span: kept and the
+  # replay's overlapping rows skipped (the default), or replaced by the
+  # replay's (--replace-live). Only rows from live (hls) sessions, only
+  # practice (never the tracked game, never an Arcathlon row).
+  lo=$(q "$srcdb" "SELECT MIN(started_at_ms) FROM sessions")
+  hi=$(q "$srcdb" "SELECT MAX(ended_at_ms) FROM sessions")
+  LIVE_ROWS="id IN (SELECT r.id FROM runs r JOIN sessions s ON r.session_id = s.id
+                    WHERE s.source = 'hls' AND $MINE AND r.category <> 'Arcathlon'
+                      AND r.started_at_ms < $hi AND r.ended_at_ms > $lo)"
+  captured=$(q "$LIVE" "SELECT COUNT(*) FROM runs WHERE $LIVE_ROWS")
+  if $replace; then
+    echo "  $captured live-captured practice run(s) in this VOD's span are REPLACED by the replay's"
+    gone="$LIVE_ROWS"
+  else
+    echo "  $captured live-captured practice run(s) in this VOD's span are kept (--replace-live to prefer the replay)"
+    gone="0"
+  fi
+
   # One transaction: drop what an earlier import of THIS VOD left, then
   # insert its session and its practice runs.
   #
@@ -130,6 +156,12 @@ for id in "${ids[@]}"; do
     DELETE FROM runs WHERE session_id IN (SELECT id FROM mine);
     DELETE FROM sessions WHERE id IN (SELECT id FROM mine);
     DROP TABLE mine;
+    -- --replace-live: the live capture's practice rows in the VOD's span.
+    -- Remembered by (game, category) first so the renumber below covers a
+    -- game the replay did not see again.
+    CREATE TEMP TABLE gone AS SELECT DISTINCT game, category FROM runs WHERE $gone;
+    DELETE FROM splits WHERE run_id IN (SELECT id FROM runs WHERE $gone);
+    DELETE FROM runs WHERE $gone;
     INSERT INTO sessions (started_at_ms, ended_at_ms, source, label, tag, frames, parsed,
                           probing, relocks, counter_reads, events, vod_id, vod_created_at_ms)
       SELECT started_at_ms, ended_at_ms, source, label, '$TAG', frames, parsed,
@@ -194,7 +226,9 @@ for id in "${ids[@]}"; do
          WHERE x.game = runs.game AND x.category = runs.category
            AND (x.started_at_ms < runs.started_at_ms
                 OR (x.started_at_ms = runs.started_at_ms AND x.id < runs.id))) + 1
-     WHERE (game, category) IN (SELECT DISTINCT game, category FROM src.runs WHERE );
+     WHERE (game, category) IN (SELECT DISTINCT game, category FROM src.runs WHERE $MINE
+                                UNION SELECT game, category FROM gone);
+    DROP TABLE gone;
     COMMIT;
     DETACH DATABASE src;"
 

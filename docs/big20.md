@@ -41,7 +41,7 @@ It refuses to run if the config it was handed does not set
 `follow_title = "track"`, and refuses if the database path still points at
 the live database after the substitution.
 
-`scripts/import-big20.sh <vod_id>... [--deploy]` lands them, and it is
+`scripts/import-big20.sh <vod_id>... [--replace-live] [--deploy]` lands them, and it is
 **not** `import-vod.sh`: that one replaces a broadcast *day*, and he
 practises in the afternoon of days he also runs Ninja Gaiden. This import is
 additive and scoped to its own VOD. It imports only the runs that are not
@@ -49,6 +49,15 @@ the tracked game's — runs of the tracked game in the same pass are reported
 and left for `import-vod.sh`, which knows how to replace a day of them — and
 it re-counts the day's tracked-game runs afterwards and stops if any went
 missing.
+
+**`--replace-live` is for redoing a day.** By default the import adds, and a
+run the live capture already has wins over the replay's. When the live bot
+ran a build that has since been fixed — the week of 2026-09-08, whose live
+capture saw six of the twenty games and named two of them wrong — that is
+backwards: the flag deletes the live capture's practice rows inside the
+VOD's span before the insert, so the replay's pass lands whole. Still never
+a run of the tracked game, still never an Arcathlon row, and the numbering
+of every game touched is recomputed.
 
 **Rehearse with `LIVE=<a copy>` first.** Not optional. It is what caught the
 marathon import that would have deleted 1888 runs, and it is what caught
