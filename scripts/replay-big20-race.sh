@@ -75,10 +75,10 @@ tessdata_path = "$HOME/.local/opt/tesseract-appimage/usr/share/tesseract-ocr/5/t
 # 371,947 241x48, took in the segment timer beneath and the logo beside them
 # on this pane and read "221" for 29:16 — and the total is the tracker's
 # second witness where a bracketed row above has not settled.
-crop_x = 375
-crop_y = 953
-crop_w = 190
-crop_h = 56
+crop_x = 320
+crop_y = 950
+crop_w = 262
+crop_h = 62
 # Wide enough for both scene variants: the numbered events put the whole pane
 # 10-15 px further right than the randomized ones, and a narrower crop clipped
 # their last digit, so every reading read as clipped and the layout never
