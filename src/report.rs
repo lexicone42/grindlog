@@ -314,13 +314,26 @@ fn big20_prep(
             .iter()
             .any(|p| c.len() > p.len() && c[..p.len()].eq_ignore_ascii_case(p))
     };
-    let mut by_session: std::collections::BTreeMap<i64, Vec<&db::OtherRun>> =
-        std::collections::BTreeMap::new();
-    for r in runs.iter().filter(|r| run_cat(&r.category)) {
-        by_session.entry(r.session).or_default().push(r);
+    // A run-through is one run of the race on one set of splits: its rows
+    // in the order he made them, each ending later on the marathon clock
+    // than the last. The clock going backwards is a new run — he reset the
+    // timer — and nothing else is: a bot restart in the middle of a run
+    // opens a new session, and grouping by session cut one evening's run
+    // into three.
+    let mut race: Vec<&db::OtherRun> = runs.iter().filter(|r| run_cat(&r.category)).collect();
+    race.sort_by_key(|r| (r.started_at_ms, r.last_timer_ms));
+    let mut groups: Vec<Vec<&db::OtherRun>> = Vec::new();
+    let mut clock: Option<i64> = None;
+    for r in race {
+        let at = r.last_timer_ms.unwrap_or(0);
+        if groups.is_empty() || clock.is_some_and(|c| at < c) {
+            groups.push(Vec::new());
+        }
+        groups.last_mut().expect("a group was just opened").push(r);
+        clock = Some(at);
     }
-    let run_throughs: Vec<serde_json::Value> = by_session
-        .values()
+    let run_throughs: Vec<serde_json::Value> = groups
+        .iter()
         .map(|rows| {
             // Every game of the run, in the order he reached them: its
             // segment and the clock it ended at. What the run-through page
@@ -1034,15 +1047,37 @@ mod tests {
                 // Nothing to do with this race.
                 summary("Ninja Gaiden (NES)", "Any%", 3137, 41, 695_100),
             ],
-            // The full run's Die Hard segment, as the board tracker filed it.
-            &[db::OtherRun {
-                category: "Big 20 #23 run".into(),
-                final_time_ms: Some(142_000),
-                last_timer_ms: Some(142_000),
-                tag: None,
-                day: "2026-09-17".into(),
-                ..run(5, "Die Hard", 142_000)
-            }],
+            // The full run's segments as the board tracker filed them: Die
+            // Hard, then Pac-Mania from the NEXT session (the bot restarted
+            // in the middle of the run; the marathon clock kept rising, so
+            // it is the same run). Then Die Hard again with the clock back
+            // near zero: a second run of the race.
+            &[
+                db::OtherRun {
+                    category: "Big 20 #23 run".into(),
+                    final_time_ms: Some(142_000),
+                    last_timer_ms: Some(142_000),
+                    tag: None,
+                    day: "2026-09-17".into(),
+                    ..run(5, "Die Hard", 142_000)
+                },
+                db::OtherRun {
+                    category: "Big 20 #23 run".into(),
+                    final_time_ms: Some(200_000),
+                    last_timer_ms: Some(342_000),
+                    tag: None,
+                    day: "2026-09-17".into(),
+                    ..run(6, "Pac-Mania", 200_000)
+                },
+                db::OtherRun {
+                    category: "Big 20 #23 run".into(),
+                    final_time_ms: Some(130_000),
+                    last_timer_ms: Some(130_000),
+                    tag: None,
+                    day: "2026-09-17".into(),
+                    ..run(7, "Die Hard", 130_000)
+                },
+            ],
             &cfg,
         );
         let by = |name: &str| {
@@ -1065,11 +1100,20 @@ mod tests {
         assert_eq!(dh["run_ms"], 142_000, "his best inside a full run");
         assert_eq!(dh["run_count"], 1);
         assert!(dh["marathon_ms"].is_null(), "a full run is not a marathon");
-        assert_eq!(out["run_throughs"].as_array().unwrap().len(), 1);
-        assert_eq!(out["run_throughs"][0]["games"], 1);
-        assert_eq!(out["run_throughs"][0]["reached_ms"], 142_000);
-        assert_eq!(out["run_throughs"][0]["segments"][0]["game"], "Die Hard");
-        assert_eq!(out["run_throughs"][0]["segments"][0]["ms"], 142_000);
+        let rt = out["run_throughs"].as_array().unwrap();
+        assert_eq!(
+            rt.len(),
+            2,
+            "a run spans the restart; a clock reset starts another"
+        );
+        assert_eq!(rt[0]["games"], 2);
+        assert_eq!(rt[0]["reached_ms"], 342_000);
+        assert_eq!(rt[0]["segments"][0]["game"], "Die Hard");
+        assert_eq!(rt[0]["segments"][0]["ms"], 142_000);
+        assert_eq!(rt[0]["segments"][1]["game"], "Pac-Mania");
+        assert_eq!(rt[0]["segments"][1]["cum"], 342_000);
+        assert_eq!(rt[1]["games"], 1);
+        assert_eq!(rt[1]["reached_ms"], 130_000);
         let jaws = by("Jaws");
         assert_eq!(
             jaws["attempts"], 3,
