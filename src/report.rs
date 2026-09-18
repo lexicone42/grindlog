@@ -322,12 +322,31 @@ fn big20_prep(
     let run_throughs: Vec<serde_json::Value> = by_session
         .values()
         .map(|rows| {
+            // Every game of the run, in the order he reached them: its
+            // segment and the clock it ended at. What the run-through page
+            // lays out, one column per run.
+            let mut ordered: Vec<&db::OtherRun> = rows.clone();
+            ordered.sort_by_key(|r| r.last_timer_ms.unwrap_or(r.started_at_ms));
+            let segments: Vec<serde_json::Value> = ordered
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "game": r.game,
+                        "ms": r.final_time_ms,
+                        "cum": r.last_timer_ms,
+                    })
+                })
+                .collect();
             serde_json::json!({
                 "day": rows[0].day,
                 "started_at_ms": rows.iter().map(|r| r.started_at_ms).min(),
                 "games": rows.len(),
                 "reached_ms": rows.iter().filter_map(|r| r.last_timer_ms).max(),
                 "segments_ms": rows.iter().filter_map(|r| r.final_time_ms).sum::<i64>(),
+                // Every game of the run, in the order he reached them: its
+                // segment and the clock it ended at. What the run-through page
+                // lays out, one column per run.
+                "segments": segments,
             })
         })
         .collect();
@@ -1049,6 +1068,8 @@ mod tests {
         assert_eq!(out["run_throughs"].as_array().unwrap().len(), 1);
         assert_eq!(out["run_throughs"][0]["games"], 1);
         assert_eq!(out["run_throughs"][0]["reached_ms"], 142_000);
+        assert_eq!(out["run_throughs"][0]["segments"][0]["game"], "Die Hard");
+        assert_eq!(out["run_throughs"][0]["segments"][0]["ms"], 142_000);
         let jaws = by("Jaws");
         assert_eq!(
             jaws["attempts"], 3,

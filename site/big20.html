@@ -292,7 +292,7 @@ function fullRuns() {
   if (!rs.length) return '';
   const line = r => `${esc(dshort(r.started_at_ms))}: <b>${r.games}</b> of ${games.length} games, ${fmt(r.reached_ms)} on the clock`;
   return `<div><div class="lbl">Full runs</div><div class="runs">${rs.slice(0, 4).map(r => `<div>${line(r)}</div>`).join('')}</div>` +
-    `<div class="miss">a full run's games count under "Full run", not as attempts</div></div>`;
+    `<div class="miss"><a href="/big20/runs/index.html">every full run, game by game</a> · a full run's games count under "Full run", not as attempts</div></div>`;
 }
 
 // The trend cell: attempts left to right; a finish is a point (green when

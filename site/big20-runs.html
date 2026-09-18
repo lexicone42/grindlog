@@ -1,0 +1,142 @@
+<!-- His full runs of the Big 20 race, one column each. Rendered by
+     scripts/build-site.sh from the report's `big20` block: the twenty games
+     in race order down the side, and every run of the whole race across —
+     each cell the game's segment in that run, the fastest per game marked,
+     the run's clock at its last recorded row in the footer. Beside them,
+     his practice best for each game, so a run-through can be read against
+     the sum of bests it is chasing: transitions and fatigue have a size, and
+     the page says what it is. Do not write the data placeholder's name in
+     prose anywhere in this file: the splice takes the whole line.
+
+     The page names games, never the streamer. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen&family=Martian+Mono:wght@400;600&display=swap">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
+    --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
+    --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
+  }
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #f2f2ec; --card: #ffffff; --ink: #171425; --ink2: #4e5170;
+    --muted: #83879f; --hairline: rgba(20,15,60,.11); --series: #2a78d6;
+    --gold: #a9791a; --gold-soft: rgba(169,121,26,.12); --ahead: #1f8f63;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
+      --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
+      --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
+    --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
+    --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
+  }
+  body { background: var(--bg); color: var(--ink); margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 60px; }
+  a { color: var(--series); }
+  .back { font-family: "Silkscreen", monospace; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; text-decoration: none; color: var(--muted); }
+  .back:hover { color: var(--ink); }
+  h1 { font-size: clamp(22px, 4vw, 32px); margin: 14px 0 4px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
+  .card { background: var(--card); border: 1px solid var(--hairline); border-radius: 8px; padding: 18px 20px; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; padding: 0 10px 8px 0; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
+  td { padding: 7px 10px 7px 0; border-top: 1px solid var(--hairline); vertical-align: middle; }
+  th.num, td.num { text-align: right; padding-right: 18px; }
+  .tnum { font-family: "Martian Mono", monospace; font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .n { color: var(--muted); width: 2em; }
+  .game a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--hairline); }
+  .game a:hover { color: var(--series); border-color: var(--series); }
+  .goal { display: block; color: var(--ink2); font-size: 11.5px; }
+  .best { color: var(--gold); font-weight: 600; }
+  .none { color: var(--muted); }
+  .delta { display: block; color: var(--muted); font-size: 10.5px; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .delta.ahead { color: var(--ahead); }
+  th.run { text-align: right; padding-right: 18px; }
+  th.run small { display: block; font-size: 10px; letter-spacing: 0; text-transform: none; color: var(--muted); font-weight: 400; }
+  tfoot td { border-top: 2px solid var(--hairline); color: var(--ink2); font-weight: 600; }
+  tfoot td.lbl { color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+  .note { color: var(--muted); font-size: 12.5px; margin: 18px 0 0; }
+  footer { margin-top: 34px; color: var(--muted); font-size: 12px; }
+</style>
+
+<div class="wrap">
+  <a class="back" href="/big20/index.html">&larr; the race</a>
+  <h1 id="title"></h1>
+  <p class="sub" id="sub"></p>
+  <section class="card scroll"><table id="grid"></table></section>
+  <p class="note" id="note"></p>
+  <footer>Times read off the on-screen LiveSplit board, frame by frame · <a href="/api/v1/README.md">data</a></footer>
+</div>
+
+<script id="data" type="application/json">
+__DATA__
+</script>
+
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = ms => {
+  if (ms == null) return '—';
+  const t = Math.floor(ms / 100) / 10;
+  const m = Math.floor(t / 60), s = (t - m * 60).toFixed(1).padStart(4, '0');
+  return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${s}` : `${m}:${s}`;
+};
+const TZ = (D.day_offset_minutes || 0) * 60000;
+const dshort = ms => ms == null ? '—' : new Date(ms + TZ).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+const slugOf = g => String(g).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+// Names fold the way the roster folds them: a run's row is the roster's
+// spelling already, so an exact match on the normalised name is enough.
+const key = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+const games = D.games || [];
+// Newest run first, like the Arcathlon pages: the run he just made is the
+// one a reader came to see.
+const runs = (D.run_throughs || []).slice().sort((a, b) => b.started_at_ms - a.started_at_ms);
+document.title = D.title;
+document.getElementById('title').textContent = D.title;
+document.getElementById('sub').textContent = runs.length
+  ? `${runs.length} full run${runs.length === 1 ? '' : 's'} of the twenty, newest first · each cell is the game's time inside that run`
+  : 'No full run recorded yet.';
+
+const segOf = (run, game) => (run.segments || []).find(s => key(s.game) === key(game));
+const sumBests = games.reduce((n, g) => n + (g.best_ms || 0), 0);
+const allBests = games.every(g => g.best_ms != null);
+
+let head = `<tr><th class="n">#</th><th>Game</th>` +
+  runs.map(r => `<th class="run">${esc(dshort(r.started_at_ms))}<small>${r.games} of ${games.length}</small></th>`).join('') +
+  `<th class="num">Practice best</th></tr>`;
+let body = games.map(g => {
+  const cells = runs.map(r => segOf(r, g.game));
+  const times = cells.map(c => c && c.ms).filter(t => t != null);
+  const best = times.length ? Math.min(...times) : null;
+  return `<tr><td class="n tnum">${g.n}</td>` +
+    `<td class="game"><a href="/game/${slugOf(g.game)}/index.html">${esc(g.game)}</a><span class="goal">${esc(g.goal ?? '')}</span></td>` +
+    cells.map(c => {
+      if (!c || c.ms == null) return `<td class="num tnum none">—</td>`;
+      const d = g.best_ms != null ? c.ms - g.best_ms : null;
+      const delta = d == null ? '' : `<span class="delta${d < 0 ? ' ahead' : ''}">${d < 0 ? '−' : '+'}${fmt(Math.abs(d))} vs practice</span>`;
+      return `<td class="num tnum${c.ms === best ? ' best' : ''}" title="${esc('at ' + fmt(c.cum) + ' on the clock')}">${fmt(c.ms)}${delta}</td>`;
+    }).join('') +
+    `<td class="num tnum${g.best_ms != null ? '' : ' none'}">${fmt(g.best_ms)}</td></tr>`;
+}).join('');
+let foot = `<tfoot><tr><td></td><td class="lbl">Reached</td>` +
+  runs.map(r => `<td class="num tnum" title="the clock at the last game recorded">${fmt(r.reached_ms)}</td>`).join('') +
+  `<td class="num tnum${allBests ? '' : ' none'}" title="${allBests ? 'the sum of his practice bests' : 'not every game has a practice best yet'}">${allBests ? fmt(sumBests) : '—'}</td></tr>` +
+  `<tr><td></td><td class="lbl">Games</td>` + runs.map(r => `<td class="num tnum">${r.games}</td>`).join('') + `<td class="num tnum">${games.filter(g => g.best_ms != null).length}</td></tr></tfoot>`;
+document.getElementById('grid').innerHTML = head + body + foot;
+document.getElementById('note').textContent = runs.length
+  ? 'The fastest time for each game across his full runs is marked. Under each time: how far it sits from his best for that game in practice — a run of the whole race carries transitions and four hours of play, and the difference is what those cost. "Reached" is the clock at the last game the tracker recorded in that run; a run cut short shows how far it got.'
+  : 'A full run is the whole race on its own splits; the tracker records each game as it is finished.';
+</script>

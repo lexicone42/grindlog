@@ -253,4 +253,13 @@ if [ "$(jq -r '.big20 // "null"' site/api/v1/report.json)" != "null" ]; then
   render_event "big20" "Big 20 prep" "$slice" site/big20.html
   rm -f "$slice"
   echo "wrote site/big20/index.html"
+  # His full runs of the race, one column each (site/big20-runs.html).
+  slice=$(mktemp)
+  jq -c '{title: ("Big 20 " + .big20.race + " · full runs"),
+          day_offset_minutes: .day_offset_minutes, race: .big20.race,
+          date: .big20.date, games: .big20.games, run_throughs: (.big20.run_throughs // [])}' \
+     site/api/v1/report.json > "$slice"
+  render_event "big20/runs" "Big 20 full runs" "$slice" site/big20-runs.html
+  rm -f "$slice"
+  echo "wrote site/big20/runs/index.html"
 fi
