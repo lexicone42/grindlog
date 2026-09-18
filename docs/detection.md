@@ -94,6 +94,14 @@ that would push the crop beyond `drift_px` is logged once and left alone.
 The splits/counter rectangles measured at the lock move only by how far the
 digits actually moved, not by the correction to the crop itself.
 
+The lock itself — which layout holds it, by what right, and what lets it go —
+is one value with explicit transitions, `lock::LockState` (`src/lock.rs`,
+tested on its own): *Probing*, *Timer* (judged dark, poor or clipped),
+*Board* (never judged by the timer, let go when no marathon is in force
+five minutes after the grant). It replaced eleven variables in the frame
+loop whose interactions were every defect of the race board's first live
+day; the loop asks it what may run and tells it what was read.
+
 **A board can grant the lock instead of the timer.** On a marathon board the
 rows are what is tracked, and on the race board the timer's digits sit where
 no crop holds them without cutting a digit or taking the logo beside them in —

@@ -24,7 +24,9 @@ against.
 Layout of `src/`:
 
 - `app.rs` — the run loop: capture, layout probe/lock/re-anchor, timer read,
-  splits and counter reads, state machine, database, chat, observation log.
+  splits and counter reads, state machine, database, chat, observation log;
+  `lock.rs` — the layout lock as a state machine (probing, held by the
+  timer, held by the board) and the judges that let it go.
 - `glyph.rs` — the purpose-built timer reader (templates in
   `assets/glyphs.json`); `ocr.rs` — preprocessing and the tesseract engines.
 - `state.rs` — the run state machine; `sanity.rs` — the smoothed clock;

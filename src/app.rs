@@ -48,6 +48,7 @@ use crate::board::{self, game_matches, Board};
 use crate::config::Config;
 use crate::db::{self, NewRun};
 use crate::identity;
+use crate::lock::{Lock, LockCfg, LockState, Unlock};
 use crate::marathon;
 use crate::ocr::{self, OcrEngine, PreprocessCfg};
 use crate::sanity;
@@ -2246,22 +2247,14 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut active_layout: usize = 0;
     let mut active_regs: Regions = regs[0].clone();
     let mut active_off: (i32, i32) = (0, 0);
-    let mut layout_locked = cands.len() == 1;
-    // A lock granted by the BOARD rather than the timer (the board probe in
-    // the frame loop): a marathon board is tracked by its rows, and its timer
-    // may be unreadable where it sits. Such a lock is not judged by the
-    // timer's reads, feeds the run state machine nothing, and is let go when
-    // no marathon is in force five minutes after the grant.
-    let mut board_locked = false;
-    let mut board_locked_at: i64 = 0;
-    let mut board_hit: Option<(usize, u32)> = None;
-    let mut board_threshold: Option<u8> = None;
-    let mut board_probe_frames: u32 = 0;
-    // Until the first lock no layout is favoured; afterwards the active one is.
-    let mut ever_locked = layout_locked;
+    // The layout lock: which layout holds it and by what right, and the
+    // judges that let it go. One candidate (a single layout with no drift
+    // search) is locked from the start and never let go.
+    let mut lock = LockState::new(
+        LockCfg::with_dark_frames(cfg.layout_search.dark_frames_search),
+        cands.len(),
+    );
     let mut probe_rr: usize = 0;
-    let mut dark_frames: u32 = 0;
-    let dark_frames_search = cfg.layout_search.dark_frames_search.max(1);
     // Fine drift while locked: where the digits SHOULD sit inside each
     // layout's timer crop — right edge at ~94% of the width, vertically
     // centred, which is how every calibrated crop places them. Learning the
@@ -2314,9 +2307,6 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut static_probe_skips: u32 = 0;
     // Lock quality: reads judged per 60 frames, and consecutive reads whose
     // glyphs touched the crop edge.
-    let mut quality_frames: u32 = 0;
-    let mut quality_parsed: u32 = 0;
-    let mut clipped_frames: u32 = 0;
     // The splits column as of its last read, and what it said: while the
     // column hasn't changed the previous values are fed again (the tracker
     // still gets its confirmations) without another six OCR calls.
@@ -2709,7 +2699,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         // previous frame so the next one is read again.
         let mut ocr_failed = false;
         let running = tracker.phase_name() == "RUNNING";
-        if layout_locked {
+        if lock.locked() {
             let r = active_regs.timer;
             if prev_bright
                 .as_ref()
@@ -2870,11 +2860,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         }
                         // Digits against the crop edge: the position is wrong
                         // even if the text parsed. Count it against the lock.
-                        if legible && ext.is_some_and(|e| e.clipped(r.2, r.3)) {
-                            clipped_frames += 1;
-                        } else {
-                            clipped_frames = 0;
-                        }
+                        lock.timer_clipped(legible && ext.is_some_and(|e| e.clipped(r.2, r.3)));
                         // No automatic enlargement of the crop around tall
                         // digits: a taller crop takes in the row of text
                         // under the timer, and tesseract then drops the small
@@ -2922,7 +2908,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             let turn = probe_rr % n_off;
             probe_rr = probe_rr.wrapping_add(1);
             for li in 0..regs.len() {
-                let favoured = ever_locked && li == active_layout;
+                let favoured = lock.ever_locked() && li == active_layout;
                 let turns = if favoured {
                     [Some(turn), Some((turn + n_off / 2) % n_off)]
                 } else {
@@ -2957,15 +2943,11 @@ pub async fn run(cfg: Config) -> Result<()> {
             // as a timer, and a board probe that waited for the layout to be
             // free never ran. A Ninja Gaiden pane never classifies as a
             // board, so on his days this costs two OCR calls a half-minute.
-            board_probe_frames += 1;
-            if !board_locked
-                && board_probe_frames >= if layout_locked { 60 } else { 20 }
-                && cfg
-                    .games
-                    .iter()
-                    .any(|a| a.mode == crate::config::GameMode::Board)
-            {
-                board_probe_frames = 0;
+            let has_board_alias = cfg
+                .games
+                .iter()
+                .any(|a| a.mode == crate::config::GameMode::Board);
+            if lock.board_probe_due(has_board_alias) {
                 match probe_boards(
                     &mut ocr_engine,
                     &union_img,
@@ -2977,27 +2959,21 @@ pub async fn run(cfg: Config) -> Result<()> {
                 .await
                 {
                     Ok(found) => {
-                        board_hit = match (board_hit, found.as_ref()) {
-                            (Some((l, n)), Some((li, _, _))) if l == *li => Some((l, n + 1)),
-                            (_, Some((li, _, _))) => Some((*li, 1)),
-                            (_, None) => None,
-                        };
-                        if let (Some((li, n)), Some((_, board, thr))) = (board_hit, found.as_ref())
-                        {
-                            if n >= 2 {
-                                if let Some(ci) =
-                                    cands.iter().position(|c| c.layout == li && c.off == (0, 0))
-                                {
-                                    info!(
-                                        "layout {:?}: its pane reads as a board tracked by its rows ({:?}, {} rows); locking on the board, not the timer",
-                                        layout_names[li], board.title, board.rows.len()
-                                    );
-                                    winner = Some((ci, "board".to_string()));
-                                    board_locked = true;
-                                    board_locked_at = t;
-                                    board_threshold = Some(*thr);
-                                }
-                                board_hit = None;
+                        let hit = found.as_ref().map(|(li, _, thr)| (*li, *thr));
+                        if let Some((li, thr)) = lock.board_probe(hit) {
+                            if let Some(ci) =
+                                cands.iter().position(|c| c.layout == li && c.off == (0, 0))
+                            {
+                                let (title, rows) = found
+                                    .as_ref()
+                                    .map(|(_, b, _)| (b.title.clone(), b.rows.len()))
+                                    .unwrap_or_default();
+                                info!(
+                                    "layout {:?}: its pane reads as a board tracked by its rows ({:?}, {} rows); locking on the board, not the timer",
+                                    layout_names[li], title, rows
+                                );
+                                winner = Some((ci, "board".to_string()));
+                                lock.grant_board(li, thr, t);
                             }
                         }
                     }
@@ -3011,7 +2987,11 @@ pub async fn run(cfg: Config) -> Result<()> {
             // threshold — one to four rows of noise — and the tracker
             // disowned its board on them. The board probe above is the only
             // thing that may re-grant.
-            let to_read: Vec<usize> = if board_locked { Vec::new() } else { to_read };
+            let to_read: Vec<usize> = if lock.timer_candidates_compete() {
+                to_read
+            } else {
+                Vec::new()
+            };
             for ci in to_read {
                 let c = &mut cands[ci];
                 let crop = c.regs.timer;
@@ -3054,11 +3034,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // Switching scenes needs a longer streak than re-finding the
                 // same scene, so an overlapping rectangle of another layout
                 // can't win merely by being tried first.
-                let need = if !ever_locked || c.layout == active_layout {
-                    5
-                } else {
-                    10
-                };
+                let need = lock.need(c.layout, active_layout);
                 if c.observe(v, t) && c.streak >= need && winner.is_none() {
                     winner = Some((ci, rd.clone()));
                 }
@@ -3070,9 +3046,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 text = winner_text;
                 // The lock frame's reading is what a static next frame reuses.
                 last_text = text.clone();
-                quality_frames = 0;
-                quality_parsed = 0;
-                clipped_frames = 0;
+                lock.reset_judges();
                 let (mut new_layout, mut new_off, mut new_regs) =
                     (cands[ci].layout, cands[ci].off, cands[ci].regs.clone());
                 // Layouts whose timer rectangles overlap can both explain the
@@ -3084,7 +3058,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // layouts' timers where this one's is installed one of THEM,
                 // whose crops bound another pane — the reads that followed
                 // had no title and no names.
-                if regs.len() > 1 && new_regs.splits.is_some() && !board_locked {
+                if regs.len() > 1 && new_regs.splits.is_some() && !lock.is_board() {
                     let rows = shared.acts.len().max(1) as u32;
                     let win_t = new_regs.timer;
                     let mut best: Option<usize> = None;
@@ -3134,8 +3108,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // configured rectangles are only the fallback.
                 if new_regs.splits.is_some() {
                     // At the board probe's threshold for a lock the board granted.
-                    let pre_grant = match board_threshold {
-                        Some(th) if board_locked => PreprocessCfg {
+                    let pre_grant = match lock.board() {
+                        Some((_, th)) => PreprocessCfg {
                             upscale: pre_splits.upscale,
                             threshold: th,
                             invert: pre_splits.invert,
@@ -3223,7 +3197,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                     .await;
                                 }
                             }
-                            if let Some(g) = geom.filter(|_| !board_locked) {
+                            if let Some(g) = geom.filter(|_| !lock.is_board()) {
                                 g.apply(&mut new_regs);
                                 let (ux, uy) = (new_regs.union.0, new_regs.union.1);
                                 let s = new_regs.splits.unwrap();
@@ -3318,8 +3292,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 active_layout = new_layout;
                 active_off = new_off;
                 active_regs = new_regs;
-                layout_locked = true;
-                ever_locked = true;
+                lock.grant_timer(new_layout, new_off);
                 drift_hits.clear();
                 drift_warned = false;
                 // A lock installs the configured crop again: the anchor must
@@ -3350,49 +3323,27 @@ pub async fn run(cfg: Config) -> Result<()> {
         if let Some(v) = parsed.and_then(|v| timer_clock.push(t, v)) {
             last_timer_seen = Some((v, t));
         }
-        // Resume probing after a dark stretch on the active position: either
-        // the scene changed or the LiveSplit window was nudged.
-        if cands.len() > 1 {
-            if parsed.is_some() {
-                dark_frames = 0;
-            } else {
-                dark_frames += 1;
-                if layout_locked && !board_locked && dark_frames >= dark_frames_search {
-                    layout_locked = false;
-                    dark_frames = 0;
-                    info!(
-                        "timer dark for {dark_frames_search} frames; probing layouts and offsets"
-                    );
+        // The lock's judges: a timer-granted lock is let go dark, poor or
+        // clipped (see `lock::LockState::timer_read`); a board-granted one
+        // is never judged by the timer.
+        if let Some(why) = lock.timer_read(parsed.is_some(), frame_static) {
+            match why {
+                Unlock::Dark { frames } => {
+                    info!("timer dark for {frames} frames; probing layouts and offsets")
                 }
-            }
-            // A lock that reads poorly is a wrong lock even if it never goes
-            // fully dark: digits half out of the crop parse some frames and
-            // not others. Judge every 60 read frames; a run of clipped reads
-            // is judged sooner.
-            if layout_locked && !board_locked && !frame_static {
-                quality_frames += 1;
-                if parsed.is_some() {
-                    quality_parsed += 1;
-                }
-                let poor = quality_frames >= 60 && quality_parsed * 100 / quality_frames < 40;
-                if poor || clipped_frames >= 10 {
-                    info!(
-                        "locked position reads poorly ({quality_parsed}/{quality_frames} parsed, {clipped_frames} clipped in a row); probing layouts and offsets"
-                    );
-                    layout_locked = false;
-                    dark_frames = 0;
-                    clipped_frames = 0;
-                    quality_frames = 0;
-                    quality_parsed = 0;
-                } else if quality_frames >= 60 {
-                    quality_frames = 0;
-                    quality_parsed = 0;
-                }
+                Unlock::Poor {
+                    parsed,
+                    frames,
+                    clipped,
+                } => info!(
+                    "locked position reads poorly ({parsed}/{frames} parsed, {clipped} clipped in a row); probing layouts and offsets"
+                ),
+                Unlock::NoMarathon => {}
             }
         }
         // Fine drift: a nudge too small to break the timer still misaligns the
         // splits/counter crops, so re-anchor on a consistent shift of the ink.
-        if let (true, Some(m)) = (layout_locked, ink) {
+        if let (true, Some(m)) = (lock.locked(), ink) {
             if geom_ink_abs.is_none() {
                 geom_ink_samples.push((
                     active_regs.timer.0 as i32 + m.0,
@@ -3564,7 +3515,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         // wrong-game fabrication it replaces is impossible either way.
         let obs = if (pane_identity.ok() || foreign_target.is_some())
             && !marathon_active
-            && !board_locked
+            && !lock.is_board()
         {
             parsed.map(Obs::Time).unwrap_or(Obs::Illegible)
         } else {
@@ -3575,7 +3526,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         if parsed.is_some() {
             health.parsed += 1;
         }
-        if !layout_locked {
+        if !lock.locked() {
             health.probing += 1;
         }
 
@@ -3752,7 +3703,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 "phase": tracker.phase_name(),
                 "smoothed_ms": tracker.smoothed_now(t),
                 "events": events.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>(),
-                "layout": if layout_locked { layout_names[active_layout].as_str() } else { "probing" },
+                "layout": if lock.locked() { layout_names[active_layout].as_str() } else { "probing" },
                 "offset": [active_off.0, active_off.1],
                 "ink": ink.map(|(r, cy)| vec![r, cy]),
                 "anchor": anchors[active_layout].map(|(r, cy)| vec![r, cy]),
@@ -3876,7 +3827,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             10_000
         };
         let mut adopt: Option<PaneGeometry> = None;
-        if layout_locked && t - last_sob_read_t >= pane_read_every {
+        if lock.locked() && t - last_sob_read_t >= pane_read_every {
             last_sob_read_t = t;
             if !settled {
                 provisional_reads += 1;
@@ -3884,8 +3835,8 @@ pub async fn run(cfg: Config) -> Result<()> {
             let acts = shared.acts.len().max(1) as u32;
             // At the threshold the board probe found the board at, while the
             // lock it granted stands; the configured one otherwise.
-            let pre_pane = match board_threshold {
-                Some(th) if board_locked => PreprocessCfg {
+            let pre_pane = match lock.board() {
+                Some((_, th)) => PreprocessCfg {
                     upscale: pre_splits.upscale,
                     threshold: th,
                     invert: pre_splits.invert,
@@ -3910,7 +3861,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             {
                 Ok((geom, readings, board, pane_words)) => {
                     passed_pane = Some(pane_words.clone());
-                    if let Some(g) = geom.filter(|_| !board_locked) {
+                    if let Some(g) = geom.filter(|_| !lock.is_board()) {
                         // Nothing new: the pane in force, read again (a lost
                         // counter — covered, or its row unread — is not
                         // news either). With the same pitch, a frame that
@@ -4077,13 +4028,19 @@ pub async fn run(cfg: Config) -> Result<()> {
             st.updated_unix_ms = util::unix_ms();
             st.parse_pct =
                 (health.frames > 0).then(|| health.parsed as f64 * 100.0 / health.frames as f64);
-            st.layout = if layout_locked {
-                format!(
+            // The lock as the status shows it: the layout and offset, and by
+            // what right it holds — a board-granted lock says so, with the
+            // threshold its pane reads at.
+            st.layout = match lock.lock() {
+                Lock::Probing => "probing".to_string(),
+                Lock::Timer { .. } => format!(
                     "{} {:+},{:+}",
                     layout_names[active_layout], active_off.0, active_off.1
-                )
-            } else {
-                "probing".to_string()
+                ),
+                Lock::Board { threshold, .. } => format!(
+                    "{} {:+},{:+} (board, threshold {threshold})",
+                    layout_names[active_layout], active_off.0, active_off.1
+                ),
             };
         }
 
@@ -4127,12 +4084,8 @@ pub async fn run(cfg: Config) -> Result<()> {
         // five minutes after the grant — the event ended, or the pane stopped
         // reading as one before a tracker was ever taken up — the timer's
         // rules apply again and the probe resumes.
-        if board_locked && !marathon_active && t - board_locked_at > 300_000 {
+        if let Some(Unlock::NoMarathon) = lock.tick(t, marathon_active) {
             info!("no marathon in force on the board-granted lock; probing layouts again");
-            board_locked = false;
-            board_threshold = None;
-            layout_locked = false;
-            dark_frames = 0;
         }
         // A freeze held from the last frame, decided by the pane pass forced
         // for it — or let through as it came when no pass happened within

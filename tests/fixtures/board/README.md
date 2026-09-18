@@ -25,6 +25,7 @@ LiveSplit's true minus sign is written ASCII; so are apostrophes.
 | `arcathlon-final` | VOD 2858870362 at 15030 s (1080p source), crop 570x480 at (55,435) | "Randomized Arcathlon", ten games, the running one with "-" in both columns; the marathon timer is outside the crop, so the timer rectangle is placed under the last row |
 | `arcathlon-numbered` | VOD 2830524439 at 5400 s, crop 255x275 at (28,193) | "Arcathlon #6" over background art, green deltas, a segment timer under the main one |
 | `arcathlon-early` | VOD 2822281253 at 5400 s, crop 255x275 at (28,193) | three games done, one running, six "???" rows; the digits pass merges each row's two times |
+| `big20-race-early` | VOD 2876668056 at ~10:29 local (1080p canvas), crop 568x583 at (116,438) | the Big 20 race board: two rows per game (the game, its category in brackets), the last row pinned under a nine-row window, two games done; read at threshold 100 over the `big20-race` pane rectangle |
 
 The passes were run with the CLI arguments `ocr.rs` uses (`--dpi 96 --psm
 11 -l eng`, the digits pass with `-c tessedit_char_whitelist=0123456789:.`
