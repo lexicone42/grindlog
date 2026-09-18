@@ -102,6 +102,14 @@ const SEGMENT_SLACK_MS: i64 = 1000;
 const DERIVED_SLACK_MS: i64 = 2000;
 const HOUR_MS: i64 = 3_600_000;
 
+/// Are these the same time, one of them read without its hour digit? The
+/// cumulative column loses the hour on some passes at 480p ("12:28" for
+/// 1:12:28), and a value under an hour whose minutes and seconds are the
+/// other's is that other value, not a different one.
+fn same_time(a: i64, b: i64) -> bool {
+    a == b || (a.min(b) < HOUR_MS && a.max(b) % HOUR_MS == a.min(b))
+}
+
 /// Passes to wait for the segment column to agree with that difference
 /// before recording the difference instead and saying so.
 const SEGMENT_PATIENCE: u32 = 4;
@@ -819,7 +827,16 @@ impl Marathon {
         let chained = i > 0
             && self.slots[i - 1].recorded_at_ms.is_some()
             && observed.is_some_and(|c| self.arithmetic_backs(i, c));
+        // On an ordered board the unrun rows carry the previous run's times
+        // as comparisons from the first pass, and a comparison the total
+        // happens to stand near while the row's baseline is still unsettled
+        // is not a game that just finished: it was on the board before. So
+        // there "just now" speaks only for a row that has never yet shown a
+        // time. Measured: a tracker started with the total at 51:00 filed
+        // Crisis Force's 51:59 comparison as today's run on its second pass.
+        let ordered = self.roster.is_some_and(|e| self.rosters.ordered(e));
         let slot = &mut self.slots[i];
+        let fresh = !ordered || slot.baseline_votes.keys().all(|k| k.is_none());
         if slot.baseline == Baseline::Unknown {
             // A randomized event's row does not exist until it has a time:
             // the board reader finds rows from their times, so the first game
@@ -840,9 +857,35 @@ impl Marathon {
             // settle as the baseline and held the game up for eighteen
             // minutes — the misreading is minutes ahead of the total, and this
             // is exactly the test that tells them apart.
-            if (alone && observed.is_some_and(|c| just_now(c, total_ms))) || chained {
+            if (alone && fresh && observed.is_some_and(|c| just_now(c, total_ms))) || chained {
                 slot.baseline = Baseline::Empty;
             } else {
+                // The same time read with and without its hour digit is one
+                // baseline, kept under the reading that has the hour: a
+                // comparison of 1:12:28 that comes back "12:28" on half the
+                // passes would otherwise split its votes, settle on
+                // whichever pair came first, and then meet its other half as
+                // a change — and a comparison time taken for a completion is
+                // yesterday's run filed as today's.
+                let observed = match observed {
+                    Some(c) => {
+                        let twin = slot
+                            .baseline_votes
+                            .keys()
+                            .find_map(|k| k.filter(|b| *b != c && same_time(*b, c)));
+                        match twin {
+                            Some(b) if b > c => Some(b),
+                            Some(b) => {
+                                if let Some(v) = slot.baseline_votes.remove(&Some(b)) {
+                                    slot.baseline_votes.insert(Some(c), v);
+                                }
+                                Some(c)
+                            }
+                            None => Some(c),
+                        }
+                    }
+                    None => None,
+                };
                 let v = slot.baseline_votes.entry(observed).or_insert(Vote {
                     count: 0,
                     first_ms: at_ms,
@@ -877,7 +920,7 @@ impl Marathon {
         // permanent — a completed row keeps its time for the rest of the
         // event — so whatever else this row read in between was the number
         // being misread, and none of it counts towards a change.
-        if slot.baseline == Baseline::Was(cum) {
+        if matches!(slot.baseline, Baseline::Was(b) if same_time(b, cum)) {
             slot.cumulative_votes.clear();
             slot.segment_votes.clear();
             slot.segment_waits = 0;
@@ -4388,5 +4431,59 @@ mod tests {
             "4:33:06 − 26:43 − 1:31"
         );
         assert_eq!(yoshi.segment_ms, 618_000, "its own column");
+    }
+    /// The second run of the race carries the first as its comparison, so
+    /// every unrun row shows a time; those are baselines. At 480p a
+    /// comparison of 1:12:28 comes back "12:28" on half the passes, and the
+    /// two readings are one baseline, not a baseline and a change: the
+    /// marathon total passing 1:12 while the row is still unrun must not
+    /// file yesterday's Kid Klown as today's. The row's real time, when it
+    /// comes, is the change.
+    #[test]
+    fn a_comparison_read_with_and_without_its_hour_is_one_baseline() {
+        let mut m = race_tracker();
+        let pass = |kid: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Crisis Force", &["11:30", "51:59"]),
+                    row("(3 Stages)", &["0:30", "52:29"]),
+                    row("Kid Klown", kid),
+                    row("(Any%)", &["0:30", "1:12:58"]),
+                    row("Moon Crystal", &["22:25", "5:04:57"]),
+                ],
+            )
+        };
+        let h = 3_600_000;
+        // He is deep in Crisis Force, slower than yesterday; the rows below
+        // show yesterday's run, with and without the hour by turns.
+        let reads = [
+            ["19:58", "1:12:28"],
+            ["19:58", "12:28"],
+            ["19:58", "1:12:28"],
+            ["19:58", "12:28"],
+        ];
+        for (i, r) in reads.iter().enumerate() {
+            let total = Some(50 * 60_000 + i as i64 * 60_000);
+            let seen = m.observe(&pass(r), 1_000 + i as i64 * 60_000, total);
+            assert!(seen.is_empty(), "at pass {i}: {seen:?}");
+        }
+        // The total sweeps through 1:12:28 with the row still unrun, reading
+        // its comparison without the hour: nothing is filed.
+        for i in 4..9 {
+            let total = Some(h + 11 * 60_000 + i as i64 * 30_000);
+            let seen = m.observe(&pass(&["19:58", "12:28"]), 1_000 + i as i64 * 60_000, total);
+            assert!(seen.is_empty(), "at pass {i}: {seen:?}");
+        }
+        // His real Kid Klown, 24:10, at 1:31:40 on the clock: a change, and a
+        // completion.
+        let total = Some(h + 31 * 60_000 + 50_000);
+        let real = ["24:10", "1:31:40"];
+        assert!(m.observe(&pass(&real), 601_000, total).is_empty());
+        let seen = m.observe(&pass(&real), 661_000, total);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Kid Klown in Night Mayor World");
+        assert_eq!(seen[0].segment_ms, 24 * 60_000 + 10_000);
+        assert_eq!(seen[0].cumulative_ms, h + 31 * 60_000 + 40_000);
     }
 }
