@@ -1008,7 +1008,11 @@ impl Marathon {
                 let t = read.trim();
                 t.starts_with('(') || (t.ends_with(')') && !t.contains('('))
             };
-            if self.canonical(i).is_none() && bracketed {
+            // On an ordered board the odd slots are the category rows by
+            // construction, whatever their name came back as: "(Any%)" read
+            // "au" on a live pass and its 0:30 was filed as a game.
+            let category_row = self.ordered() && i % 2 == 1;
+            if category_row || (self.canonical(i).is_none() && bracketed) {
                 self.slots[i].recorded = Some(cum);
                 self.slots[i].recorded_at_ms = Some(at_ms);
                 self.known.push(cum);
@@ -1174,7 +1178,11 @@ impl Marathon {
                 let t = read.trim();
                 t.starts_with('(') || (t.ends_with(')') && !t.contains('('))
             };
-            if self.canonical(i).is_none() && bracketed {
+            // On an ordered board the odd slots are the category rows by
+            // construction, whatever their name came back as: "(Any%)" read
+            // "au" on a live pass and its 0:30 was filed as a game.
+            let category_row = self.ordered() && i % 2 == 1;
+            if category_row || (self.canonical(i).is_none() && bracketed) {
                 self.slots[i].recorded = Some(cum);
                 self.slots[i].recorded_at_ms = Some(ended_at_ms);
                 self.known.push(cum);
@@ -1271,6 +1279,11 @@ impl Marathon {
             }
             (None, Expect::Unanchored) => None,
         }
+    }
+
+    /// Is this board an event run in a fixed order (see `align_ordered`)?
+    fn ordered(&self) -> bool {
+        self.roster.is_some_and(|e| self.rosters.ordered(e))
     }
 
     /// Does the board's own arithmetic vouch for a candidate the marathon
@@ -1389,9 +1402,19 @@ impl Marathon {
         let Expect::Segment(exp) = self.expected_segment(i, cum) else {
             return false;
         };
-        self.slots[i].segment_votes.iter().any(|((c, s), v)| {
-            *c == cum && *s <= cum && settled(v) && (*s - exp).abs() > SEGMENT_SLACK_MS
-        })
+        // What the column mostly says, not any settled reading of it: at
+        // 480p a segment of 11:14 came back "13:14" on four passes and
+        // "12:14" on five beside twelve of "11:14", every one of them
+        // settled, and the row was refused for the rest of the run by the
+        // readings the column itself outvoted. The comparison-time case
+        // this guards against ("20:34 throughout" where the arithmetic
+        // wanted 16:16) is the strongest reading too.
+        self.slots[i]
+            .segment_votes
+            .iter()
+            .filter(|((c, s), v)| *c == cum && *s <= cum && settled(v))
+            .max_by_key(|((_, s), v)| (v.count, *s))
+            .is_some_and(|((_, s), _)| (*s - exp).abs() > SEGMENT_SLACK_MS)
     }
 
     /// Does a candidate cumulative sit where the board says it must? The
@@ -4485,5 +4508,56 @@ mod tests {
         assert_eq!(seen[0].game, "Kid Klown in Night Mayor World");
         assert_eq!(seen[0].segment_ms, 24 * 60_000 + 10_000);
         assert_eq!(seen[0].cumulative_ms, h + 31 * 60_000 + 40_000);
+    }
+    /// On the race board the odd slots are the category rows, whatever their
+    /// name came back as: a "(Any%)" read "au" has no bracket for the name
+    /// rule to see, and its 0:30 was filed as a game named "au". The
+    /// segment column, too, is what it MOSTLY says: a segment read 11:14 on
+    /// most passes and 13:14 on a few is 11:14, and a settled minority
+    /// reading does not refuse the row.
+    #[test]
+    fn a_category_row_is_never_a_game_and_a_segment_is_what_its_column_mostly_says() {
+        let mut m = race_tracker();
+        let pass = |any: &str, cf: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Die Hard", &["2:17", "2:17"]),
+                    row(any, &["0:31", "2:48"]),
+                    row("Pac-Mania", &["7:24", "10:12"]),
+                    row("(Sandbox)", &["0:30", "10:42"]),
+                    row("Crisis Force", cf),
+                    row("(3 Stages)", &[]),
+                    row("Moon Crystal", &[]),
+                ],
+            )
+        };
+        // The rows above finished before the bot looked: baselines.
+        let dash: &[&str] = &["-", "-"];
+        for i in 0..2 {
+            assert!(m
+                .observe(
+                    &pass("(Any% Beginner)", dash),
+                    1_000 + i * 60_000,
+                    Some(20 * 60_000)
+                )
+                .is_empty());
+        }
+        // Crisis Force finishes at 21:26 (11:14 after the 10:42 above it)
+        // and its segment reads 11:14 on most passes, 13:14 on some; the
+        // category row above Die Hard's neighbour reads "au".
+        let total = Some(21 * 60_000 + 40_000);
+        let reads = ["11:14", "13:14", "11:14", "11:14", "13:14", "11:14"];
+        let mut seen = Vec::new();
+        for (i, seg) in reads.iter().enumerate() {
+            seen.extend(m.observe(
+                &pass("au", &[seg, "21:26"]),
+                200_000 + i as i64 * 60_000,
+                total,
+            ));
+        }
+        let games: Vec<&str> = seen.iter().map(|c| c.game.as_str()).collect();
+        assert_eq!(games, ["Crisis Force"], "{seen:?}");
+        assert_eq!(seen[0].segment_ms, 11 * 60_000 + 14_000);
     }
 }
