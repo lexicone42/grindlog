@@ -43,6 +43,10 @@ date = "2026-10-10"
 # practice run and an Arcathlon game he is grinding on his own are not the
 # same thing. An event without this falls back to the config's value.
 category = "Big 20 #23"
+# Run and printed in this order: the tracker places the board's rows by
+# position in this list (two rows a game), not by where they sit in a window
+# that scrolls.
+ordered = true
 games = [
   "Die Hard",
   "Pac-Mania",
@@ -62,6 +66,31 @@ games = [
   "Hydlide",
   "Yoshi",
   "Celeste Mario's Zap n Dash",
+  "Jaws",
+  "Moon Crystal",
+]
+# What his LiveSplit splits print for each game (read off the board on
+# 2026-09-17, tests/fixtures/board/big20-race-*.json), by position. The rows
+# are matched against THESE; the runs are filed under the names above.
+board = [
+  "Die Hard",
+  "Pac-Mania",
+  "Double Dragon II",
+  "Crisis Force",
+  "Kid Klown",
+  "Excitebike",
+  "Uninvited",
+  "Steel Legion",
+  "Faria",
+  "Monster Party",
+  "Parallel World",
+  "Mega Man 6",
+  "New Ghostbusters II",
+  "Mini Putt",
+  "Flintstones",
+  "Hydlide",
+  "Yoshi",
+  "Celeste Mario",
   "Jaws",
   "Moon Crystal",
 ]

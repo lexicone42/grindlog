@@ -95,6 +95,24 @@ struct RawEvent {
     /// use, and the page that tracks preparation for it can show them.
     #[serde(default)]
     goals: Option<Vec<String>>,
+    /// What the BOARD prints for each game, in the same order, where that is
+    /// not the game's name: his LiveSplit splits say "Flintstones" and "Kid
+    /// Klown" and "Celeste Mario" for games whose names run to eight words.
+    /// A damaged reading of a short split name is within a letter or two of
+    /// the split name and nowhere near the full one — "Funtstones", "Kid
+    /// Kiown" and a bare "World" were filed as read for want of this. Where
+    /// given, an event's rows are matched against these; the full names are
+    /// what the runs are filed under and the site shows. Optional, and by
+    /// position like `goals`: same length or nothing.
+    #[serde(default)]
+    board: Option<Vec<String>>,
+    /// The games are run in this order, and the board prints them in it —
+    /// two rows a game, the game and its category under it. The tracker then
+    /// places every row by its game's position in the list rather than by
+    /// where it sits in a window that scrolls (see `Marathon::align_ordered`).
+    /// An Arcathlon board is the whole event on screen at once and is not.
+    #[serde(default)]
+    ordered: bool,
     /// Where the list came from, and when it is run. Both optional and both
     /// only true of a published race: an Arcathlon is his own, has no page
     /// and happens when he says so. A page about preparing for a race wants
@@ -126,12 +144,16 @@ struct Event {
     url: Option<String>,
     date: Option<String>,
     category: Option<String>,
+    ordered: bool,
 }
 
 #[derive(Debug, Clone)]
 struct Game {
     name: String,
     key: Key,
+    /// The key of what the board prints for it, where the file says that
+    /// differs from the name (see `RawEvent::board`).
+    board: Option<Key>,
 }
 
 /// Every event's roster, and the pool they add up to.
@@ -190,19 +212,35 @@ impl Rosters {
                     goals.len()
                 );
             }
+            let board = e.board.unwrap_or_default();
+            if !board.is_empty() && board.len() != e.games.len() {
+                bail!(
+                    "event {:?} lists {} games but {} board spellings; they are matched by position",
+                    e.name,
+                    e.games.len(),
+                    board.len()
+                );
+            }
             let mut games = Vec::new();
-            for name in e.games {
+            for (i, name) in e.games.into_iter().enumerate() {
                 let key = Key::of(&name);
                 if key.stem.is_empty() {
                     bail!("game {name:?} of event {:?} is not a name", e.name);
                 }
+                // Kept even where it equals the name: a fit through the
+                // board spelling outranks one through another game's full
+                // name, and that has to hold for "Parallel World" too.
+                let board = board
+                    .get(i)
+                    .map(|b| Key::of(b))
+                    .filter(|k| !k.stem.is_empty());
                 // The pool is what a randomized board is matched against, and
                 // one name in two events would make its rows ambiguous there
                 // for no reason a reader of this file could see.
                 if !seen.insert(crate::board::normalise_title(&name)) {
                     bail!("game {name:?} is listed under more than one event");
                 }
-                let game = Game { name, key };
+                let game = Game { name, key, board };
                 pool.push(game.clone());
                 games.push(game);
             }
@@ -213,6 +251,7 @@ impl Rosters {
                 url: e.url,
                 date: e.date,
                 category: e.category,
+                ordered: e.ordered,
             });
         }
         Ok(Rosters { events, pool })
@@ -255,6 +294,25 @@ impl Rosters {
             .collect()
     }
 
+    /// Are this event's games run, and printed, in the order the file lists
+    /// them (see `RawEvent::ordered`)?
+    pub fn ordered(&self, event: usize) -> bool {
+        self.events.get(event).is_some_and(|e| e.ordered)
+    }
+    /// Does any event of this file run in a fixed order? A board that may
+    /// turn out to be one is not placed by position before it is identified.
+    pub fn any_ordered(&self) -> bool {
+        self.events.iter().any(|e| e.ordered)
+    }
+    /// Where a CANONICAL name — one `assign` gave — sits in the event's
+    /// order, counting from zero.
+    pub fn position(&self, event: usize, name: &str) -> Option<usize> {
+        self.events
+            .get(event)?
+            .games
+            .iter()
+            .position(|g| g.name == name)
+    }
     /// The event of this file whose name is `name` ("#23"), for a caller
     /// that knows which race it is asking about.
     pub fn event_by_name(&self, name: &str) -> Option<usize> {
@@ -326,6 +384,15 @@ impl Rosters {
         // not depend on the order a sort happens to leave equal scores in.
         scores.sort_by_key(|&(hits, i)| (std::cmp::Reverse(hits), i));
         let (best, event) = *scores.first()?;
+        // A file of one event is that event: the board was classified to
+        // this file by its title (the `[[games]]` alias names the roster), so
+        // one row naming one of its games settles it. The bar of five and
+        // the margin are for telling nine Arcathlons apart, and a race board
+        // shows five game names at most in its window, one of which is
+        // usually damaged past matching.
+        if self.events.len() == 1 {
+            return (best >= 1).then_some(event);
+        }
         let second = scores.get(1).map_or(0, |s| s.0);
         (best >= ROSTER_HITS && best >= second + ROSTER_MARGIN).then_some(event)
     }
@@ -432,8 +499,31 @@ fn best(read: &Key, games: &[Game], strict: bool, free: &[bool]) -> Option<(Rank
     let mut ranked: Vec<(Rank, usize)> = games
         .iter()
         .enumerate()
-        .filter(|(i, g)| free[*i] && (!strict || g.key.sequel == read.sequel))
-        .filter_map(|(i, g)| rank(read, &g.key).map(|r| (r, i)))
+        .filter(|(i, g)| {
+            free[*i]
+                && (!strict
+                    || g.key.sequel == read.sequel
+                    || g.board.as_ref().is_some_and(|b| b.sequel == read.sequel))
+        })
+        .filter_map(|(i, g)| {
+            // Both spellings, the better rank of the two. The pane's header
+            // prints the full name and a board row the split name, and a
+            // reading may be either. A tie between a board spelling and
+            // some other game's full name goes to the board spelling: a
+            // bare "World" is Parallel World's row, not the tail of "Kid
+            // Klown in Night Mayor World".
+            let by_name = rank(read, &g.key).map(|(a, b, c)| (a, b, c, 1));
+            let by_board = g
+                .board
+                .as_ref()
+                .and_then(|k| rank(read, k))
+                .map(|(a, b, c)| (a, b, c, 0));
+            match (by_name, by_board) {
+                (Some(x), Some(y)) => Some(x.min(y)),
+                (x, y) => x.or(y),
+            }
+            .map(|r| (r, i))
+        })
         .collect();
     ranked.sort();
     let (top, game) = *ranked.first()?;
@@ -449,9 +539,12 @@ fn best(read: &Key, games: &[Game], strict: bool, free: &[bool]) -> Option<(Rank
 /// How well a reading fits a name. Ordered, best first: the shape of the
 /// match, then whether the sequel number agrees, then how much damage the
 /// match had to forgive.
-type Rank = (u8, u8, usize);
+/// How well a reading fits a name: the kind of fit, whether the sequel
+/// number agrees, the edit distance where that decided it, and which
+/// spelling it was against (0 the board's, 1 the full name), best first.
+type Rank = (u8, u8, usize, u8);
 
-fn rank(read: &Key, name: &Key) -> Option<Rank> {
+fn rank(read: &Key, name: &Key) -> Option<(u8, u8, usize)> {
     let agree = u8::from(read.sequel != name.sequel);
     let (a, b) = (read.stem.as_str(), name.stem.as_str());
     if a == b {
@@ -1177,5 +1270,50 @@ mod tests {
             .lineup(e)
             .iter()
             .any(|(g, _)| arca.canonical(g) == Some("Mega Man 6")));
+    }
+    /// The board prints his split names, not the games' names: a damaged
+    /// reading of "Flintstones" is within a letter of the split name and
+    /// nowhere near "The Flintstones: Surprise at Dinosaur Peak". Measured:
+    /// "Funtstones", "Kid Kiown" and a bare "World" filed as read.
+    #[test]
+    fn the_boards_own_spelling_names_the_game() {
+        let r = Rosters::parse(include_str!("../assets/big20-roster.toml")).unwrap();
+        let e = r.event_by_name("#23").unwrap();
+        let name = |read: &str| r.assign(Some(e), &[Some(read)])[0];
+        assert_eq!(
+            name("Funtstones"),
+            Some("The Flintstones: Surprise at Dinosaur Peak")
+        );
+        assert_eq!(name("Kid Kiown"), Some("Kid Klown in Night Mayor World"));
+        assert_eq!(
+            name("World"),
+            Some("Parallel World"),
+            "the board's row, not the tail of Kid Klown's name"
+        );
+        assert_eq!(name("Celeste Mario"), Some("Celeste Mario's Zap n Dash"));
+        assert_eq!(name("Mydlide"), Some("Hydlide"));
+        // The pane's header prints the full name, and that still fits.
+        assert_eq!(
+            name("Kiown in Night Mayor World"),
+            Some("Kid Klown in Night Mayor World")
+        );
+        assert!(r.ordered(e), "the race is run in the order listed");
+        assert_eq!(r.position(e, "Jaws"), Some(18));
+        assert_eq!(r.position(e, "Die Hard"), Some(0));
+        assert!(r.any_ordered());
+    }
+
+    /// The board spellings are matched to the games by position, like the
+    /// goals: a list of another length is refused rather than misaligned.
+    #[test]
+    fn a_board_list_of_the_wrong_length_is_refused() {
+        let text = r#"
+[[event]]
+name = "one"
+games = ["Die Hard", "Pac-Mania"]
+board = ["Die Hard"]
+"#;
+        let err = Rosters::parse(text).unwrap_err().to_string();
+        assert!(err.contains("board spellings"), "{err}");
     }
 }
