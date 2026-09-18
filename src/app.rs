@@ -53,7 +53,9 @@ use crate::marathon;
 use crate::ocr::{self, OcrEngine, PreprocessCfg};
 use crate::sanity;
 use crate::state::{Event, Obs, Tracker};
-use crate::timeparse::{format_ms, has_fraction, parse_time, parse_timer_text, time_shaped};
+use crate::timeparse::{
+    format_ms, has_fraction, parse_marathon_total, parse_time, parse_timer_text, time_shaped,
+};
 use crate::{capture, chat, util};
 use sqlx::SqlitePool;
 
@@ -3319,12 +3321,19 @@ pub async fn run(cfg: Config) -> Result<()> {
         // 1:57.72) are legible enough to parse and, three in a row, to look
         // like a restart; a genuine restart is read at the primary threshold
         // on the very next frame anyway.
-        let parsed = parse_timer_text(&text).filter(|&v| {
-            retry_thr.is_none()
-                || tracker
-                    .smoothed_now(t)
-                    .is_none_or(|s| (v - s).abs() <= cfg.detection.max_jump_ms)
-        });
+        // With a marathon in force the timer is its total, wanted to the
+        // second and read off a big clock at 480p that loses its tenths
+        // digit or its colon on a third of the frames: those readings are
+        // taken too (`parse_marathon_total`). The monotone clock still
+        // judges every value against the run.
+        let parsed = parse_timer_text(&text)
+            .or_else(|| marathon.as_ref().and_then(|_| parse_marathon_total(&text)))
+            .filter(|&v| {
+                retry_thr.is_none()
+                    || tracker
+                        .smoothed_now(t)
+                        .is_none_or(|s| (v - s).abs() <= cfg.detection.max_jump_ms)
+            });
         if let Some(v) = parsed.and_then(|v| timer_clock.push(t, v)) {
             last_timer_seen = Some((v, t));
         }

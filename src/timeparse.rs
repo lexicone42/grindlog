@@ -58,6 +58,53 @@ pub fn parse_timer_text(raw: &str) -> Option<i64> {
     None
 }
 
+/// The marathon total as tesseract reads it off the big clock at 480p, where
+/// [`parse_timer_text`] declines. Measured on a full run of the Big 20: a
+/// third of the read frames lost the tenths digit and kept its separator
+/// ("15:08:", "15:05.", "3:55:28."), a tenth read the colon as a point
+/// ("15.16" for 15:16), and a few came back as bare digits ("1526"). The
+/// total is wanted to the second, and a marathon total under a minute is not
+/// a reading of anything — a run is minutes in before its first row can be
+/// filed — so the point in "15.16" can only have been the colon. Only for
+/// the total: the tracked game's own timer runs from zero and "15.16" is a
+/// time it does show.
+pub fn parse_marathon_total(raw: &str) -> Option<i64> {
+    let t = raw.trim().trim_end_matches(['.', ':']);
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(v) = parse_time(t).filter(|v| *v >= 60_000) {
+        return Some(v);
+    }
+    // "15.16", "1:23.45" with no colon where one has to be: two digits after
+    // the point are the seconds, not the hundredths.
+    if let Some((head, tail)) = t.rsplit_once('.') {
+        if tail.len() == 2 && !head.contains('.') && !head.is_empty() {
+            if let Some(v) = parse_time(&format!("{head}:{tail}")) {
+                if v >= 60_000 {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    // Bare digits: "1526" for 15:26, "13108" for 1:31:08. Three alone are
+    // not: "234" is 2:34 or a fragment of anything.
+    if t.len() >= 4 && t.len() <= 5 && t.chars().all(|c| c.is_ascii_digit()) {
+        let (head, ss) = t.split_at(t.len() - 2);
+        let shaped = if head.len() > 2 {
+            format!(
+                "{}:{}:{ss}",
+                &head[..head.len() - 2],
+                &head[head.len() - 2..]
+            )
+        } else {
+            format!("{head}:{ss}")
+        };
+        return parse_time(&shaped).filter(|v| *v >= 60_000);
+    }
+    None
+}
+
 /// Parse a timer string as produced by OCR into milliseconds.
 ///
 /// Accepted shapes (OCR runs with a `0123456789:.` whitelist):
@@ -352,5 +399,35 @@ mod timer_text_tests {
         assert_eq!(parse_timer_text("34:6012"), None);
         // A value that already carries its point is never re-cut.
         assert_eq!(parse_timer_text("1:23:45.67"), Some(5_025_670));
+    }
+    /// The marathon total off the big clock at 480p: the tenths digit lost
+    /// with its separator kept, the colon read as a point, bare digits — the
+    /// shapes a third of a full run's frames came back as.
+    #[test]
+    fn the_marathon_total_forgives_a_lost_tenths_digit_and_a_colon_read_as_a_point() {
+        let m = |s: &str| parse_marathon_total(s);
+        assert_eq!(m("15:08:"), Some(15 * 60_000 + 8_000));
+        assert_eq!(m("15:05."), Some(15 * 60_000 + 5_000));
+        assert_eq!(m("3:55:28."), Some((3 * 3600 + 55 * 60 + 28) * 1000));
+        assert_eq!(m("3:55:28.3"), Some((3 * 3600 + 55 * 60 + 28) * 1000 + 300));
+        assert_eq!(
+            m("15.16"),
+            Some(15 * 60_000 + 16_000),
+            "the colon read as a point"
+        );
+        assert_eq!(m("1526"), Some(15 * 60_000 + 26_000));
+        assert_eq!(m("13108"), Some((3600 + 31 * 60 + 8) * 1000));
+        // A point for a colon is only ever repaired upwards: "5.16" is 5:16,
+        // never the 5.16 s the game timer's parser would make of it.
+        assert_eq!(m("5.16"), Some(5 * 60_000 + 16_000));
+        // Under a minute is not a total; garbage stays garbage.
+        assert_eq!(m("45.3"), None);
+        assert_eq!(m("234"), None);
+        assert_eq!(m("."), None);
+        assert_eq!(
+            m("19:1084"),
+            None,
+            "the timer parser's own repair is not repeated here"
+        );
     }
 }
