@@ -1590,6 +1590,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fixture_big20_race_early() {
+        // The race board: two rows per game, the game and its category in
+        // brackets under it; a window of nine with the last pinned. Two
+        // games done, the third under way, six rows with dashes. The names
+        // lose their numbers (left of the band) and the bracketed rows their
+        // opening bracket, which the name match forgives for some and not
+        // others ("y% Begmner)"), and "Crisis" reads "Cresis" — six of the
+        // ten names place. Every time cell reads exactly.
+        check(
+            "big20-race-early",
+            Tolerance {
+                title: Title::Fuzzy,
+                names: 0.6,
+                cells: 1.0,
+            },
+        );
+    }
+
     /// The keys the real panes file under, read end to end: the fixture's own
     /// words through `read_board` into `canonical_key`. The titles come back
     /// damaged and cut — "Randomized" alone where "Arcathlon" fell under the
