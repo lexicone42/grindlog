@@ -622,6 +622,20 @@ impl Marathon {
     /// distinct and it is the slots contesting a game that settle which of
     /// them gets it. See [`crate::roster::Rosters::assign`].
     fn canonical(&self, slot: usize) -> Option<&str> {
+        // On an ordered board the slot IS the game: the even slots are the
+        // roster's games in order and the odd ones their category rows,
+        // whatever the name read as. Hydlide's row read "4ydiide Aly?" on
+        // the pass that filed it and went into the database under that.
+        if let Some(event) = self.roster.filter(|e| self.rosters.ordered(*e)) {
+            if slot % 2 == 1 {
+                return None;
+            }
+            return self
+                .rosters
+                .lineup(event)
+                .get(slot / 2)
+                .map(|(name, _)| *name);
+        }
         self.assigned.get(slot)?.as_deref()
     }
 
@@ -4666,5 +4680,41 @@ mod tests {
         assert_eq!(seen[0].game, "Steel Legion");
         assert_eq!(seen[0].segment_ms, 14 * 60_000 + 1_000);
         assert_eq!(seen[0].cumulative_ms, h + 45 * 60_000 + 47_000);
+    }
+    /// On the race board the slot is the game: a row placed between its
+    /// neighbours whose name read as nothing a roster could fold ("4ydiide
+    /// Aly?") is still Hydlide's row, and is filed as Hydlide.
+    #[test]
+    fn on_an_ordered_board_the_slot_names_the_game_whatever_the_row_read_as() {
+        let mut m = race_tracker();
+        let pass = |hyd: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Flintstones", &["27:02", "3:21:54"]),
+                    row("(Any% No Manip)", &["0:30", "3:22:24"]),
+                    row("4ydiide Aly?", hyd),
+                    row("(3 Fairies)", &[]),
+                    row("Yoshi", &[]),
+                    row("Moon Crystal", &[]),
+                ],
+            )
+        };
+        let h = 3_600_000;
+        let dash: &[&str] = &["-", "-"];
+        for i in 0..2 {
+            assert!(m
+                .observe(&pass(dash), 1_000 + i * 60_000, Some(3 * h + 30 * 60_000))
+                .is_empty());
+        }
+        let done = ["22:59", "3:45:24"];
+        let total = Some(3 * h + 45 * 60_000 + 40_000);
+        assert!(m.observe(&pass(&done), 121_000, total).is_empty());
+        let seen = m.observe(&pass(&done), 181_000, total);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Hydlide");
+        assert_eq!(seen[0].as_read.as_deref(), Some("4ydiide Aly?"));
+        assert!(!seen[0].unmatched);
+        assert_eq!(seen[0].slot, 30);
     }
 }
