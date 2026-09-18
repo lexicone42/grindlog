@@ -1908,7 +1908,7 @@ async fn track_marathon(
         };
         match db::insert_run(pool, run).await {
             Ok(_) => info!(
-                "marathon row {}: {}{} finished in {}{} (total {})",
+                "marathon row {}: {}{} finished in {}{}{} (total {})",
                 c.slot + 1,
                 c.game,
                 // The board's own spelling, where the roster gave the run a
@@ -1921,6 +1921,11 @@ async fn track_marathon(
                 format_ms(c.segment_ms),
                 if c.segment_derived {
                     ", from the cumulative column (its own segment column disagreed)"
+                } else {
+                    ""
+                },
+                if c.backfilled {
+                    " (filed from the row below: its own cumulative column never settled)"
                 } else {
                     ""
                 },
