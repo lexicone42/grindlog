@@ -120,7 +120,9 @@ let head = `<tr><th class="n">#</th><th>Game</th>` +
 let body = games.map(g => {
   const cells = runs.map(r => segOf(r, g.game));
   const times = cells.map(c => c && c.ms).filter(t => t != null);
-  const best = times.length ? Math.min(...times) : null;
+  // Fastest per game only when he has run it more than once: with one
+  // full run every cell would be gold and the mark would say nothing.
+  const best = times.length >= 2 ? Math.min(...times) : null;
   return `<tr><td class="n tnum">${g.n}</td>` +
     `<td class="game"><a href="/game/${slugOf(g.game)}/index.html">${esc(g.game)}</a><span class="goal">${esc(g.goal ?? '')}</span></td>` +
     cells.map(c => {
