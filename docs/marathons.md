@@ -63,6 +63,45 @@ own tests hold the other end.
 
 ## The race board (Big 20)
 
+**Placed by the roster, not the window.** The race is run in a fixed order
+and the board prints it so, two rows a game (the game, its category in
+brackets under it) in a window that scrolls with the last row pinned. An
+event marked `ordered = true` in its roster file has every row placed by its
+game's position in the list — the game at slot 2k, its category row at
+2k + 1 — from the names on each pass, never from where the row sits in the
+window (`Marathon::align_ordered`). Rows the names do not place take the
+slot between the placed rows either side where the spacing agrees, and a
+bracketed row directly under a placed game is its category row. Nothing
+scrolls, nothing is superseded, and the pinned last row has one slot from
+the first pass on. Before this, the pinned row moved slots with every
+scroll and a nameless transition row was filed under its stale name as a
+0:30 "Moon Crystal"; a transition row that never got a slot put the
+arithmetic of the rows either side off by exactly its length. Until the
+event is identified (a file of one event needs one row naming one of its
+games) nothing is placed at all.
+
+**The board's own spellings.** The roster's `board = [...]` list, by
+position like `goals`, is what his splits print for each game: "Flintstones",
+"Kid Klown", "Celeste Mario". A row is matched against both the board
+spelling and the full name, the better fit winning and a tie going to the
+board spelling ("World" is Parallel World's row, not the tail of Kid
+Klown's name); the run is filed under the full name. Before this
+"Funtstones", "Kid Kiown" and "World" were filed as read.
+
+**A first time under a watched row.** At 480p the board's "-" cells often
+do not read, so a game's row carries no vote at all until its time
+appears — and a first reading with a time was a baseline, "finished before
+the bot looked". Under a row THIS tracker watched finish (not one recorded
+from the database after a restart), and exceeding it, a first time is a
+completion to judge instead. Crisis Force, "11:30 / 51:59" on four passes
+under a recorded 40:28, was never filed for this.
+
+**The hour carried down.** A cumulative reading as minutes and seconds
+under a recorded row past the hour has lost its hour digit — the column is
+monotone down the board — and takes the hour from the nearest recorded row
+above (one more where that still leaves it short). On the finish board
+every total read "33:41" for 4:33:41 for ten passes running.
+
 **Filed from the row below.** At 480p the theme trades 5, 6 and 8 for each
 other, so a game's cumulative can come back "1:38:25", "1:35:28", "1:35:25"
 on successive passes and never twice the same — and a cumulative that never
@@ -80,6 +119,15 @@ the bot looked, and stays unrecorded, as it always has. The log line says
 "filed from the row below" and the completion carries `backfilled`.
 Measured before the rule, a full run of the twenty filed four games by the
 columns alone, with the transition rows read cleanly all the way down.
+
+**Why a row was or was not filed.** `NG_MARATHON_TRACE=<part of a row name,
+or a slot number, or all>` prints, on every pass, each cumulative an
+unrecorded row has voted for and every guard's answer (settled, coherent,
+denied by its segment, vouched by the total, vouched by the arithmetic),
+with the row's baseline. Run it under `audit --dir` over a board log
+(`boards-<vod>.jsonl` + `obs-<vod>.jsonl`): the tracker is deterministic
+over its inputs, so a game that went missing in a replay can be asked why
+in a second, without the replay. That loop is what found every rule above.
 
 The Big 20 race — and his full practice runs of it, from 2026-09-17 — is
 the same pane in the same place with twenty games instead of ten, and each

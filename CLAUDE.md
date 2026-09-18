@@ -113,7 +113,11 @@ Three rules that must not be got wrong:
   deleted 1888 Ninja Gaiden runs.
 - Run `scripts/audit-arcathlon.sh` before and after any change to
   `marathon.rs`, `roster.rs`, `signature.rs` or the gate in `sanity.rs`,
-  and diff the `REC`, `BAD` and `SUM` lines. It takes about a second over
+  and diff the `REC`, `BAD` and `SUM` lines. For a race board (the Big 20),
+  `NG_MARATHON_TRACE=<row name|slot|all> ngtwitchtimer --config live.toml
+  audit --dir <dir with boards-<vod>.jsonl and obs-<vod>.jsonl>` replays the
+  tracker over a board log in a second and says, per pass, which guard
+  refused each row — see docs/marathons.md. It takes about a second over
   all 38 captures. Its denominator hides its own misses: a clipped row is
   filed as "never settled" and dropped from the count, so a broadcast that
   lost a game can still print `9/9`.
