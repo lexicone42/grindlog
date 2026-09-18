@@ -1417,19 +1417,29 @@ impl Marathon {
         let Expect::Segment(exp) = self.expected_segment(i, cum) else {
             return false;
         };
-        // What the column mostly says, not any settled reading of it: at
-        // 480p a segment of 11:14 came back "13:14" on four passes and
+        // Refused only by a column that NEVER agreed with the arithmetic.
+        // At 480p a segment of 11:14 came back "13:14" on four passes and
         // "12:14" on five beside twelve of "11:14", every one of them
-        // settled, and the row was refused for the rest of the run by the
-        // readings the column itself outvoted. The comparison-time case
-        // this guards against ("20:34 throughout" where the arithmetic
-        // wanted 16:16) is the strongest reading too.
-        self.slots[i]
-            .segment_votes
-            .iter()
-            .filter(|((c, s), v)| *c == cum && *s <= cum && settled(v))
-            .max_by_key(|((_, s), v)| (v.count, *s))
-            .is_some_and(|((_, s), _)| (*s - exp).abs() > SEGMENT_SLACK_MS)
+        // settled, and any settled disagreement refused the row for the
+        // rest of the run; then 11:16 came back "13:16" on six passes and
+        // "11:16" on two, and the strongest reading refused it — where the
+        // cumulative was right on thirteen passes, the delta column agreed,
+        // and `segment_for` would have waited its patience out and filed
+        // the arithmetic's 11:16. The comparison-time case this guards
+        // against ("20:34 throughout" where the arithmetic wanted 16:16)
+        // has no agreeing reading at all.
+        let mut agrees = false;
+        let mut disagrees = false;
+        for ((c, s), v) in &self.slots[i].segment_votes {
+            if *c == cum && *s <= cum && settled(v) {
+                if (*s - exp).abs() <= SEGMENT_SLACK_MS {
+                    agrees = true;
+                } else {
+                    disagrees = true;
+                }
+            }
+        }
+        disagrees && !agrees
     }
 
     /// Does a candidate cumulative sit where the board says it must? The
