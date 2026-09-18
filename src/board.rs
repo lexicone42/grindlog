@@ -140,7 +140,12 @@ fn time_cell(raw: &str) -> Option<(String, bool)> {
     let prefix = &t[..t.len() - body.len()];
     let body = body.trim_end_matches(['.', ':']);
     if body.is_empty() || !time_shaped(body) {
-        return None;
+        // A digit read as the letter it looks like: "$:22" and "S:22" for
+        // 5:22, "18:S2" for 18:52, "O:30" for 0:30. Left as it was, "$:22"
+        // is not a time and glues onto the name — Mini Putt's row read
+        // "Mini Putt $:22 / 2:54:21" on most passes, one cell, and one cell
+        // is no reading at all; the row was filed seventeen minutes late.
+        return glyph_repair(t).and_then(|fixed| time_cell(&fixed));
     }
     let sign = if prefix.contains('+') {
         "+"
@@ -150,6 +155,45 @@ fn time_cell(raw: &str) -> Option<(String, bool)> {
         ""
     };
     Some((format!("{sign}{body}"), body.contains(':')))
+}
+
+/// A time cell with a digit read as the letter it looks like, put back: at
+/// most two such glyphs, in a word that is otherwise digits and separators
+/// and has a colon, and only where the result is time-shaped. A name never
+/// qualifies ("Sandbox)" has letters outside the set); a bare "$" or "S"
+/// has no colon and stays what it was.
+fn glyph_repair(t: &str) -> Option<String> {
+    if !t.contains(':') {
+        return None;
+    }
+    let mut swapped = 0;
+    let fixed: String = t
+        .chars()
+        .map(|c| match c {
+            '$' | 'S' | 's' => ('5', true),
+            'O' | 'o' | 'Q' | 'D' => ('0', true),
+            'l' | 'I' | '|' | 'i' => ('1', true),
+            'B' => ('8', true),
+            'Z' | 'z' => ('2', true),
+            'g' | 'q' => ('9', true),
+            other => (other, false),
+        })
+        .map(|(c, s)| {
+            swapped += usize::from(s);
+            c
+        })
+        .collect();
+    if swapped == 0 || swapped > 2 {
+        return None;
+    }
+    let body = fixed
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .trim_end_matches(['.', ':']);
+    (fixed
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == ':' || c == '.' || DASHES.contains(&c) || c == '+')
+        && time_shaped(body))
+    .then_some(fixed)
 }
 
 /// A word that can be part of a segment name: it has something
@@ -1758,5 +1802,29 @@ mod tests {
             &cfg,
         );
         assert!(ng.is_news_against(Some(&full)));
+    }
+    /// A digit read as the letter it looks like is put back in a time cell:
+    /// "$:22" is 5:22 and "18:S2" is 18:52. A name is never touched, and a
+    /// stray glyph with no colon is not a time.
+    #[test]
+    fn a_digit_read_as_a_letter_is_put_back_in_a_time_cell() {
+        assert_eq!(time_cell("$:22"), Some(("5:22".into(), true)));
+        assert_eq!(time_cell("S:38"), Some(("5:38".into(), true)));
+        assert_eq!(time_cell("18:S2"), Some(("18:52".into(), true)));
+        assert_eq!(time_cell("O:30"), Some(("0:30".into(), true)));
+        assert_eq!(time_cell("2:0l:07"), Some(("2:01:07".into(), true)));
+        assert_eq!(time_cell("-$:22"), Some(("-5:22".into(), true)));
+        assert_eq!(time_cell("Sandbox)"), None);
+        assert_eq!(time_cell("$"), None);
+        assert_eq!(
+            time_cell("SSS:22"),
+            None,
+            "three glyphs is a word, not a time"
+        );
+        assert_eq!(
+            time_cell("5:22"),
+            Some(("5:22".into(), true)),
+            "a clean cell is unchanged"
+        );
     }
 }
