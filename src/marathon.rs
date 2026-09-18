@@ -296,6 +296,15 @@ impl Slot {
         self.recorded
     }
 
+    /// What the row showed when the tracker first looked, once that settled
+    /// as a time: on an ordered board, a finished row's cumulative.
+    fn baseline_value(&self) -> Option<i64> {
+        match self.baseline {
+            Baseline::Was(b) => Some(b),
+            _ => None,
+        }
+    }
+
     /// The row's segment column as most often read, whatever cumulative it
     /// was read beside: for a row whose cumulative column never settled, the
     /// segment column may well have, since it is the shorter number.
@@ -470,6 +479,10 @@ pub struct Marathon {
     /// Cumulative times already in the database for this event, so a restart
     /// mid-event does not record a completion twice.
     known: Vec<i64>,
+    /// The marathon total as of the current pass, where it was read: what
+    /// says whether a row's baseline is behind the clock (a finished row)
+    /// or ahead of it (a comparison not yet reached).
+    total_ms: Option<i64>,
     /// Pane passes seen, for the log.
     passes: u32,
     /// The events this board may be, and the ten games of each. Empty where
@@ -508,6 +521,7 @@ impl Marathon {
             slots: Vec::new(),
             numbers: HashMap::new(),
             known: Vec::new(),
+            total_ms: None,
             passes: 0,
             rosters,
             roster: None,
@@ -702,6 +716,7 @@ impl Marathon {
     /// looked, and otherwise only ever rejects a candidate.
     pub fn observe(&mut self, board: &Board, at_ms: i64, total_ms: Option<i64>) -> Vec<Completion> {
         self.passes += 1;
+        self.total_ms = total_ms;
         if let Some(t) = board.title.as_deref() {
             if let Some(n) = event_number(t) {
                 *self.numbers.entry(n).or_insert(0) += 1;
@@ -1454,9 +1469,35 @@ impl Marathon {
     /// settled: the first row's segment is its cumulative, since the marathon
     /// total starts at zero.
     fn expected_segment(&self, i: usize, cum: i64) -> Expect {
+        // On an ordered board the row above a row that has CHANGED is a
+        // finished row (the games run in order), so what it showed when the
+        // tracker first looked — its settled baseline — is a real
+        // cumulative and anchors the arithmetic where nothing recorded does.
+        // A candidate is always a change from its own row's baseline (a
+        // reading equal to the baseline never gets this far), so the row
+        // above is never the unrun comparison of an unrun row. Measured: a
+        // restart mid-run left every row above the runner as a baseline,
+        // and Steel Legion, finished at 1:45:47 with its cumulative read
+        // three different ways in three minutes, had only the total's
+        // three-minute window to be filed in, and missed it.
         let prev = match i {
             0 => 0,
-            _ => match self.slots[i - 1].settled_cumulative() {
+            _ => match self.slots[i - 1].settled_cumulative().or_else(|| {
+                // Only a row that has never CHANGED since (a row that has
+                // shown another time since its baseline finished after the
+                // tracker looked, and its baseline was its comparison), and
+                // only a baseline BEHIND the clock: one ahead of it is the
+                // comparison of a row not yet reached — Faria's 2:01:38 with
+                // the clock at 1:50 vouched for Monster Party's 2:15:10 from
+                // the day before.
+                (self.ordered() && !self.slots[i - 1].cumulative_votes.values().any(settled))
+                    .then(|| self.slots[i - 1].baseline_value())
+                    .flatten()
+                    .filter(|b| {
+                        self.total_ms
+                            .is_some_and(|total| *b <= total + AHEAD_OF_TOTAL_MS)
+                    })
+            }) {
                 Some(p) => p,
                 None => return Expect::Unanchored,
             },
@@ -4465,18 +4506,19 @@ mod tests {
     #[test]
     fn a_comparison_read_with_and_without_its_hour_is_one_baseline() {
         let mut m = race_tracker();
-        let pass = |kid: &[&str]| {
+        let pass_above = |cf: &[&str], stages: &[&str], kid: &[&str]| {
             board(
                 Some("Practice Run"),
                 vec![
-                    row("Crisis Force", &["11:30", "51:59"]),
-                    row("(3 Stages)", &["0:30", "52:29"]),
+                    row("Crisis Force", cf),
+                    row("(3 Stages)", stages),
                     row("Kid Klown", kid),
                     row("(Any%)", &["0:30", "1:12:58"]),
                     row("Moon Crystal", &["22:25", "5:04:57"]),
                 ],
             )
         };
+        let pass = |kid: &[&str]| pass_above(&["11:30", "51:59"], &["0:30", "52:29"], kid);
         let h = 3_600_000;
         // He is deep in Crisis Force, slower than yesterday; the rows below
         // show yesterday's run, with and without the hour by turns.
@@ -4499,11 +4541,12 @@ mod tests {
             assert!(seen.is_empty(), "at pass {i}: {seen:?}");
         }
         // His real Kid Klown, 24:10, at 1:31:40 on the clock: a change, and a
-        // completion.
+        // completion. The rows above show his real times by then too.
         let total = Some(h + 31 * 60_000 + 50_000);
         let real = ["24:10", "1:31:40"];
-        assert!(m.observe(&pass(&real), 601_000, total).is_empty());
-        let seen = m.observe(&pass(&real), 661_000, total);
+        let done = |kid: &[&str]| pass_above(&["15:01", "1:07:00"], &["0:30", "1:07:30"], kid);
+        assert!(m.observe(&done(&real), 601_000, total).is_empty());
+        let seen = m.observe(&done(&real), 661_000, total);
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert_eq!(seen[0].game, "Kid Klown in Night Mayor World");
         assert_eq!(seen[0].segment_ms, 24 * 60_000 + 10_000);
@@ -4559,5 +4602,59 @@ mod tests {
         let games: Vec<&str> = seen.iter().map(|c| c.game.as_str()).collect();
         assert_eq!(games, ["Crisis Force"], "{seen:?}");
         assert_eq!(seen[0].segment_ms, 11 * 60_000 + 14_000);
+    }
+    /// A restart mid-run: every row above the runner carries its time from
+    /// the first pass and is a baseline, not a recorded row. On an ordered
+    /// board those are finished rows, and their baselines anchor the
+    /// arithmetic for the row that changes next — Steel Legion, finished at
+    /// 1:45:47 well after the total's window, filed against the 1:31:45 of
+    /// the transition above it.
+    #[test]
+    fn after_a_restart_a_finished_rows_baseline_anchors_the_row_below() {
+        let mut m = race_tracker();
+        let pass = |steel: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Excitebike", &["9:11", "1:17:13"]),
+                    row("(Selection A)", &["0:30", "1:17:43"]),
+                    row("Uninvited", &["13:20", "1:31:03"]),
+                    row("(Any%)", &["0:42", "1:31:45"]),
+                    row("Steel Legion", steel),
+                    row("(Any% All Bosses)", &["0:38", "1:52:52"]),
+                    row("Moon Crystal", &["22:25", "5:04:57"]),
+                ],
+            )
+        };
+        let h = 3_600_000;
+        // The tracker starts with Steel Legion under way and its comparison
+        // showing; the rows above are done.
+        let cmp = ["16:07", "1:52:14"];
+        for i in 0..3 {
+            assert!(m
+                .observe(
+                    &pass(&cmp),
+                    1_000 + i * 60_000,
+                    Some(h + 35 * 60_000 + i * 60_000)
+                )
+                .is_empty());
+        }
+        // He finishes at 1:45:47; the cumulative reads three ways before it
+        // reads right twice, by which time the total is well past.
+        let reads = [
+            ["14:01", "1:48:47"],
+            ["14:01", "1:45:47"],
+            ["14:01", "2:22:14"],
+            ["14:01", "1:45:47"],
+        ];
+        let mut seen = Vec::new();
+        for (i, r) in reads.iter().enumerate() {
+            let t = 241_000 + i as i64 * 60_000;
+            seen.extend(m.observe(&pass(r), t, Some(h + 50 * 60_000 + i as i64 * 60_000)));
+        }
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Steel Legion");
+        assert_eq!(seen[0].segment_ms, 14 * 60_000 + 1_000);
+        assert_eq!(seen[0].cumulative_ms, h + 45 * 60_000 + 47_000);
     }
 }
