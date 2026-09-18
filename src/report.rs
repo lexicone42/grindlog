@@ -315,22 +315,35 @@ fn big20_prep(
             .any(|p| c.len() > p.len() && c[..p.len()].eq_ignore_ascii_case(p))
     };
     // A run-through is one run of the race on one set of splits: its rows
-    // in the order he made them, each ending later on the marathon clock
-    // than the last. The clock going backwards is a new run — he reset the
-    // timer — and nothing else is: a bot restart in the middle of a run
-    // opens a new session, and grouping by session cut one evening's run
-    // into three.
+    // in the order he made them, each with its place on the marathon clock.
+    // Not grouped by session — a bot restart in the middle of a run opens a
+    // new session, and grouping by session cut one evening's run into
+    // three — and not by the clock going backwards between neighbours
+    // either (see below).
     let mut race: Vec<&db::OtherRun> = runs.iter().filter(|r| run_cat(&r.category)).collect();
     race.sort_by_key(|r| (r.started_at_ms, r.last_timer_ms));
+    // A run starts where the clock had nothing before the row — its
+    // cumulative is its own segment, the first game of a fresh set of
+    // splits — or after hours away from the board. NOT where the clock
+    // goes backwards from one row to the next: a row is filed a pass or two
+    // after it ends, sometimes twenty minutes after when its cells read
+    // badly, and then sorts after a row that ended later on the clock. That
+    // rule cut one run into three on the page the first evening it was
+    // tracked live.
+    const RUN_START_SLACK_MS: i64 = 60_000;
+    const RUN_GAP_MS: i64 = 2 * 3_600_000;
     let mut groups: Vec<Vec<&db::OtherRun>> = Vec::new();
-    let mut clock: Option<i64> = None;
+    let mut prev_at: Option<i64> = None;
     for r in race {
-        let at = r.last_timer_ms.unwrap_or(0);
-        if groups.is_empty() || clock.is_some_and(|c| at < c) {
+        let cum = r.last_timer_ms.unwrap_or(0);
+        let seg = r.final_time_ms.unwrap_or(0);
+        let fresh = cum - seg < RUN_START_SLACK_MS
+            || prev_at.is_some_and(|p| r.started_at_ms - p > RUN_GAP_MS);
+        if groups.is_empty() || fresh {
             groups.push(Vec::new());
         }
         groups.last_mut().expect("a group was just opened").push(r);
-        clock = Some(at);
+        prev_at = Some(r.started_at_ms);
     }
     let run_throughs: Vec<serde_json::Value> = groups
         .iter()
@@ -1069,6 +1082,16 @@ mod tests {
                     day: "2026-09-17".into(),
                     ..run(6, "Pac-Mania", 200_000)
                 },
+                // Filed late — after Pac-Mania, though it ended earlier on
+                // the clock. The clock going backwards is not a new run.
+                db::OtherRun {
+                    category: "Big 20 #23 run".into(),
+                    final_time_ms: Some(120_000),
+                    last_timer_ms: Some(300_000),
+                    tag: None,
+                    day: "2026-09-17".into(),
+                    ..run(7, "Crisis Force", 120_000)
+                },
                 db::OtherRun {
                     category: "Big 20 #23 run".into(),
                     final_time_ms: Some(130_000),
@@ -1104,14 +1127,18 @@ mod tests {
         assert_eq!(
             rt.len(),
             2,
-            "a run spans the restart; a clock reset starts another"
+            "a run spans the restart and a late-filed row; a fresh first game starts another"
         );
-        assert_eq!(rt[0]["games"], 2);
+        assert_eq!(rt[0]["games"], 3);
         assert_eq!(rt[0]["reached_ms"], 342_000);
         assert_eq!(rt[0]["segments"][0]["game"], "Die Hard");
         assert_eq!(rt[0]["segments"][0]["ms"], 142_000);
-        assert_eq!(rt[0]["segments"][1]["game"], "Pac-Mania");
-        assert_eq!(rt[0]["segments"][1]["cum"], 342_000);
+        assert_eq!(
+            rt[0]["segments"][1]["game"], "Crisis Force",
+            "in clock order, not filing order"
+        );
+        assert_eq!(rt[0]["segments"][2]["game"], "Pac-Mania");
+        assert_eq!(rt[0]["segments"][2]["cum"], 342_000);
         assert_eq!(rt[1]["games"], 1);
         assert_eq!(rt[1]["reached_ms"], 130_000);
         let jaws = by("Jaws");
