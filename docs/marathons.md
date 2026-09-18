@@ -63,6 +63,24 @@ own tests hold the other end.
 
 ## The race board (Big 20)
 
+**Filed from the row below.** At 480p the theme trades 5, 6 and 8 for each
+other, so a game's cumulative can come back "1:38:25", "1:35:28", "1:35:25"
+on successive passes and never twice the same — and a cumulative that never
+settles is never a completion. The row under it is the transition into the
+next game: half a minute long, read the same on every pass, and its
+cumulative includes the game. So once a row is recorded with a settled
+segment beside it, the tracker files the unrecorded row above it at the
+recorded cumulative less that segment, bottom up, each recorded row
+answering for the one above. The segment is the row's own column where it
+agrees with the arithmetic to within two seconds (a derived value carries
+two roundings), the arithmetic where the row above is recorded too and the
+column disagrees. Only a row the tracker first saw EMPTY is filed this way:
+a row already carrying its time when the board appeared was finished before
+the bot looked, and stays unrecorded, as it always has. The log line says
+"filed from the row below" and the completion carries `backfilled`.
+Measured before the rule, a full run of the twenty filed four games by the
+columns alone, with the transition rows read cleanly all the way down.
+
 The Big 20 race — and his full practice runs of it, from 2026-09-17 — is
 the same pane in the same place with twenty games instead of ten, and each
 game as **two rows**: the game (`01 - Die Hard`) and its category in

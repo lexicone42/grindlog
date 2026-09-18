@@ -95,6 +95,11 @@ pub const AGREE_SPREAD_MS: i64 = 45_000;
 /// its cumulative and the previous game's before the reading is held back
 /// for another pass. The board prints whole seconds.
 const SEGMENT_SLACK_MS: i64 = 1000;
+/// The slack for a segment checked against a DERIVED cumulative (see
+/// `backfill`): the derived value is one displayed time less another, and
+/// LiveSplit rounds each of them, so the difference can be out by a second
+/// on top of the second the segment column itself is allowed.
+const DERIVED_SLACK_MS: i64 = 2000;
 
 /// Passes to wait for the segment column to agree with that difference
 /// before recording the difference instead and saying so.
@@ -139,6 +144,10 @@ pub struct Completion {
     /// this row's cumulative and the previous game's, and the difference was
     /// recorded instead.
     pub segment_derived: bool,
+    /// Set when the row was filed from the row under it: its own cumulative
+    /// column never settled, and the row below, recorded with a settled
+    /// segment, said what this one ended at (see `Marathon::backfill`).
+    pub backfilled: bool,
 }
 
 /// What the board showed for one row on one pass.
@@ -217,6 +226,10 @@ struct Slot {
     segment_waits: u32,
     /// The cumulative this row was recorded with, once it has been.
     recorded: Option<i64>,
+    /// When the recorded row ended, as near as the tracker knows: the pass
+    /// that recorded it, or, for a row filed from below, the row below's end
+    /// less the row below's segment.
+    recorded_at_ms: Option<i64>,
 }
 
 impl Slot {
@@ -270,6 +283,32 @@ impl Slot {
     /// looked, which is a time but not one this row was seen to reach.
     fn settled_cumulative(&self) -> Option<i64> {
         self.recorded
+    }
+
+    /// The row's segment column beside a cumulative, once settled.
+    fn settled_segment(&self, cum: i64) -> Option<i64> {
+        self.segment_votes
+            .iter()
+            .filter(|((c, s), v)| *c == cum && *s <= cum && settled(v))
+            .max_by_key(|((_, s), v)| (v.count, *s))
+            .map(|((_, s), _)| *s)
+    }
+
+    /// The row's segment column as most often read, whatever cumulative it
+    /// was read beside: for a row whose cumulative column never settled, the
+    /// segment column may well have, since it is the shorter number.
+    fn best_segment(&self, cum: i64) -> Option<i64> {
+        let mut tally: HashMap<i64, u32> = HashMap::new();
+        for ((_, s), v) in &self.segment_votes {
+            if *s <= cum {
+                *tally.entry(*s).or_insert(0) += v.count;
+            }
+        }
+        tally
+            .into_iter()
+            .filter(|(_, n)| *n >= AGREE)
+            .max_by_key(|(s, n)| (*n, *s))
+            .map(|(s, _)| s)
     }
 }
 
@@ -849,6 +888,7 @@ impl Marathon {
             // broadcast.
             if self.known.contains(&cum) {
                 self.slots[i].recorded = Some(cum);
+                self.slots[i].recorded_at_ms = Some(at_ms);
                 continue;
             }
             // A run has to be filed under a name. A completed row keeps its
@@ -873,6 +913,7 @@ impl Marathon {
             };
             if self.canonical(i).is_none() && bracketed {
                 self.slots[i].recorded = Some(cum);
+                self.slots[i].recorded_at_ms = Some(at_ms);
                 self.known.push(cum);
                 continue;
             }
@@ -903,6 +944,7 @@ impl Marathon {
             }
             let as_read = (game != read).then_some(read);
             self.slots[i].recorded = Some(cum);
+            self.slots[i].recorded_at_ms = Some(at_ms);
             self.known.push(cum);
             out.push(Completion {
                 slot: i,
@@ -915,6 +957,110 @@ impl Marathon {
                 started_at_ms: at_ms - segment_ms,
                 ended_at_ms: at_ms,
                 segment_derived: derived,
+                backfilled: false,
+            });
+        }
+        out.append(&mut self.backfill(at_ms));
+        out
+    }
+
+    /// Rows the board has already answered for. A row this tracker has
+    /// watched finish — recorded, with a settled segment beside it — fixes
+    /// the row above it exactly: that row ended at the recorded cumulative
+    /// less the segment, because the segment is the time between the two.
+    /// So a game whose own cumulative column never reads twice the same way
+    /// is filed from the row under it. Measured on the race board at 480p: a
+    /// game's cumulative came back "1:38:25", "1:35:28", "1:35:25" on
+    /// successive passes (5, 6 and 8 traded for each other), never the same
+    /// twice, and the game was never filed — while its transition row under
+    /// it read "0:41 / 1:36:07" on every pass. A full run of the twenty
+    /// filed four games by the columns alone.
+    ///
+    /// Bottom up, so one well-read row low on the board answers for every
+    /// unrecorded row above it in turn. A derived cumulative is held to the
+    /// same order as any other, between the rows recorded either side; the
+    /// segment is the row's own column where that agrees with the arithmetic
+    /// to within `DERIVED_SLACK_MS`, and the arithmetic where it does not
+    /// and the row above is recorded too.
+    fn backfill(&mut self, at_ms: i64) -> Vec<Completion> {
+        let mut out = Vec::new();
+        for i in (0..self.slots.len().saturating_sub(1)).rev() {
+            // Only a row this tracker first saw EMPTY. A row already carrying
+            // a time when the board first appeared was finished before the
+            // bot looked, and is not recorded (the rule every replay starts
+            // at second 0 for); the row under it says nothing new about it.
+            if self.slots[i].recorded.is_some() || self.slots[i].baseline != Baseline::Empty {
+                continue;
+            }
+            let Some(below_cum) = self.slots[i + 1].recorded else {
+                continue;
+            };
+            let Some(below_seg) = self.slots[i + 1].settled_segment(below_cum) else {
+                continue;
+            };
+            let cum = below_cum - below_seg;
+            if cum <= 0 || !self.coherent(i, cum) {
+                continue;
+            }
+            let ended_at_ms = self.slots[i + 1].recorded_at_ms.unwrap_or(at_ms) - below_seg;
+            if self.known.contains(&cum) {
+                self.slots[i].recorded = Some(cum);
+                self.slots[i].recorded_at_ms = Some(ended_at_ms);
+                continue;
+            }
+            let Some(read) = self.slots[i].name().map(str::to_string) else {
+                continue;
+            };
+            let bracketed = {
+                let t = read.trim();
+                t.starts_with('(') || (t.ends_with(')') && !t.contains('('))
+            };
+            if self.canonical(i).is_none() && bracketed {
+                self.slots[i].recorded = Some(cum);
+                self.slots[i].recorded_at_ms = Some(ended_at_ms);
+                self.known.push(cum);
+                continue;
+            }
+            let column = self.slots[i].best_segment(cum);
+            let (segment_ms, derived) = match (column, self.expected_segment(i, cum)) {
+                (_, Expect::Impossible) => continue,
+                (Some(s), Expect::Segment(exp)) if (s - exp).abs() <= DERIVED_SLACK_MS => {
+                    (s, false)
+                }
+                (_, Expect::Segment(exp)) => (exp, true),
+                (Some(s), Expect::Unanchored) => (s, false),
+                (None, Expect::Unanchored) => continue,
+            };
+            let canonical = self.canonical(i).map(str::to_string);
+            let unmatched = canonical.is_none();
+            let game = canonical.unwrap_or_else(|| read.clone());
+            if self
+                .floors
+                .get(&game)
+                .is_some_and(|floor| segment_ms < *floor)
+            {
+                self.implausible += 1;
+                continue;
+            }
+            if unmatched {
+                self.unmatched += 1;
+            }
+            let as_read = (game != read).then_some(read);
+            self.slots[i].recorded = Some(cum);
+            self.slots[i].recorded_at_ms = Some(ended_at_ms);
+            self.known.push(cum);
+            out.push(Completion {
+                slot: i,
+                game,
+                as_read,
+                unmatched,
+                category: self.category.clone(),
+                segment_ms,
+                cumulative_ms: cum,
+                started_at_ms: ended_at_ms - segment_ms,
+                ended_at_ms,
+                segment_derived: derived,
+                backfilled: true,
             });
         }
         out
@@ -1729,6 +1875,70 @@ mod tests {
         assert_eq!(seen[0].game, "Pac-Mania");
         assert_eq!(seen[0].segment_ms, 446_000);
         assert_eq!(seen[0].cumulative_ms, 618_000);
+    }
+
+    /// A game whose cumulative column never reads twice the same way — the
+    /// race board at 480p trades 5, 6 and 8 for each other on most passes —
+    /// is filed from the row under it: the transition row, half a minute
+    /// long and read the same on every pass, ended at a cumulative that
+    /// includes the game. The game's own segment column, read consistently
+    /// beside its wrong cumulatives, is its time; the derived cumulative
+    /// agrees with it to the second.
+    #[test]
+    fn a_game_whose_cumulative_never_settles_is_filed_from_the_row_below() {
+        let mut m = tracker();
+        let pass = |die: &[&str], any: &[&str], pac: &[&str], sand: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Die Hard", die),
+                    row("(Any% Beginner)", any),
+                    row("Pac-Mania", pac),
+                    row("(Sandbox)", sand),
+                    row("Double Dragon II", &[]),
+                ],
+            )
+        };
+        let none: &[&str] = &[];
+        assert!(m
+            .observe(&pass(none, none, none, none), 1_000, Some(0))
+            .is_empty());
+        assert!(m
+            .observe(&pass(none, none, none, none), 61_000, Some(60_000))
+            .is_empty());
+        let die = ["2:22", "2:22"];
+        let p = pass(&die, none, none, none);
+        assert!(m.observe(&p, 121_000, Some(142_000)).is_empty());
+        assert_eq!(m.observe(&p, 181_000, Some(142_000)).len(), 1);
+        let any = ["0:30", "2:52"];
+        let p = pass(&die, &any, none, none);
+        assert!(m.observe(&p, 241_000, Some(172_000)).is_empty());
+        assert!(m.observe(&p, 301_000, Some(172_000)).is_empty());
+        // Pac-Mania done at 10:18, its transition done at 10:48. The game's
+        // cumulative reads 10:16 and 10:13 by turns; its segment reads 7:26
+        // every time, and so does the transition row.
+        let sand = ["0:30", "10:48"];
+        let p = pass(&die, &any, &["7:26", "10:16"], &sand);
+        assert!(m.observe(&p, 361_000, Some(660_000)).is_empty());
+        let p = pass(&die, &any, &["7:26", "10:13"], &sand);
+        let seen = m.observe(&p, 421_000, Some(720_000));
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Pac-Mania");
+        assert_eq!(
+            seen[0].cumulative_ms, 618_000,
+            "10:48 less the 0:30 under it"
+        );
+        assert_eq!(
+            seen[0].segment_ms, 446_000,
+            "its own column, which the arithmetic agrees with"
+        );
+        assert!(seen[0].backfilled);
+        assert!(!seen[0].segment_derived);
+        // The wrong cumulatives settle on later passes and are not filed
+        // over it: the row is recorded.
+        let p = pass(&die, &any, &["7:26", "10:16"], &sand);
+        assert!(m.observe(&p, 481_000, Some(780_000)).is_empty());
+        assert!(m.observe(&p, 541_000, Some(840_000)).is_empty());
     }
 
     /// The race board scrolls: two rows per game, a window of nine or so
