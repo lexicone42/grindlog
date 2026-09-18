@@ -1609,6 +1609,44 @@ mod tests {
         );
     }
 
+    /// The same board four hours in, scrolled: rows 14-18 with the pinned
+    /// last row under them, three games done in the window and Yoshi under
+    /// way. Hydlide's 18:52 reads "18:32" and its total 3:54:02 reads
+    /// "3:34:02" — the 5 is the digit this theme loses at 480p, which the
+    /// row above gives away (3:35:09 + 18:52). Mini Putt's 5:38 loses its
+    /// first digit to the name. Eight of the twelve time cells read exactly.
+    #[test]
+    fn fixture_big20_race_scrolled() {
+        check(
+            "big20-race-scrolled",
+            Tolerance {
+                title: Title::Fuzzy,
+                names: 0.6,
+                cells: 0.65,
+            },
+        );
+    }
+
+    /// The board at the finish: the last window, every row carrying its
+    /// time and every total an hour long, the run over at 5:04:57.
+    /// At the deployment's board threshold (100) the OCR loses the hour
+    /// digit of nine of the ten totals on this frame ("35:09" for 3:35:09)
+    /// and reads Hydlide's 18:52 as "18:S2"; at 80 the hours come through
+    /// but Hydlide's row is lost and the last total slips. The segments
+    /// are what the tracker files and nine of those ten read exactly; the
+    /// totals are the checksum it does not yet use.
+    #[test]
+    fn fixture_big20_race_end() {
+        check(
+            "big20-race-end",
+            Tolerance {
+                title: Title::Fuzzy,
+                names: 0.6,
+                cells: 0.45,
+            },
+        );
+    }
+
     /// The keys the real panes file under, read end to end: the fixture's own
     /// words through `read_board` into `canonical_key`. The titles come back
     /// damaged and cut — "Randomized" alone where "Arcathlon" fell under the
