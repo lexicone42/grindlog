@@ -11,6 +11,7 @@ mod db;
 mod glyph;
 mod identity;
 mod locate;
+mod lock;
 mod marathon;
 mod ocr;
 mod pane;
@@ -87,6 +88,11 @@ enum Command {
         /// Only this layout
         #[arg(long)]
         layout: Option<String>,
+        /// Write a board-reader fixture (tests/fixtures/board format) of the
+        /// pane as read for --layout at the first --threshold, with an
+        /// `expected` block to fill in by hand
+        #[arg(long, value_name = "FILE")]
+        dump_fixture: Option<std::path::PathBuf>,
     },
     /// The purpose-built timer digit reader: harvest templates from replay
     /// corpora (NG_DUMP_TIMER=all) and score them. Crops are segmented at
@@ -208,7 +214,8 @@ async fn main() -> Result<()> {
             image,
             thresholds,
             layout,
-        } => pane::run(cfg, image, thresholds, layout).await,
+            dump_fixture,
+        } => pane::run(cfg, image, thresholds, layout, dump_fixture).await,
         Command::Audit { dir } => audit::run(&cfg, &dir).map(|_| ()),
         Command::Glyphs { action } => match action {
             GlyphsAction::Train {

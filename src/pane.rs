@@ -27,11 +27,15 @@ pub async fn run(
     image: Option<PathBuf>,
     thresholds: Vec<u8>,
     layout: Option<String>,
+    dump_fixture: Option<PathBuf>,
 ) -> Result<()> {
+    if dump_fixture.is_some() && layout.is_none() {
+        bail!("--dump-fixture needs --layout: a fixture is one layout's pane");
+    }
     let (cw, ch) = (cfg.stream.canvas_w, cfg.stream.canvas_h);
-    let gray = match image {
+    let gray = match &image {
         Some(path) => {
-            let img = image::open(&path).with_context(|| format!("opening {}", path.display()))?;
+            let img = image::open(path).with_context(|| format!("opening {}", path.display()))?;
             let mut g = img.to_luma8();
             if g.dimensions() != (cw, ch) {
                 g = image::imageops::resize(&g, cw, ch, image::imageops::FilterType::Triangle);
@@ -51,17 +55,36 @@ pub async fn run(
         thresholds
     };
     thresholds.dedup();
+    let first = thresholds[0];
     println!(
         "union {},{} {}x{} (canvas); pane rectangles per layout, then rows where three or more read",
         u.0, u.1, u.2, u.3
     );
-    for thr in thresholds {
+    for thr in thresholds.iter().copied() {
         println!("--- threshold {thr}");
         for (li, r) in regs.iter().enumerate() {
             if layout.as_deref().is_some_and(|l| l != names[li]) {
                 continue;
             }
-            let (b, pane) = read(&mut engine, &union_img, r, thr, &cfg).await?;
+            let (b, pane, words, letters) = read(&mut engine, &union_img, r, thr, &cfg).await?;
+            if let Some(path) = dump_fixture.as_ref().filter(|_| thr == first) {
+                write_fixture(
+                    path,
+                    &cfg,
+                    &names[li],
+                    u,
+                    pane,
+                    r,
+                    &words,
+                    &letters,
+                    &b,
+                    image.as_deref(),
+                )?;
+                println!(
+                    "fixture written to {} — fill in `expected` by hand",
+                    path.display()
+                );
+            }
             let named = b.rows.iter().filter(|x| x.name.is_some()).count();
             let verdict = match marathon::classify(&b, &cfg, None) {
                 marathon::Verdict::Board(a) => format!("board-mode {:?}", a.name),
@@ -107,7 +130,7 @@ async fn read(
     r: &Regions,
     threshold: u8,
     cfg: &Config,
-) -> Result<(board::Board, app::R)> {
+) -> Result<(board::Board, app::R, Vec<ocr::Word>, Vec<ocr::Word>)> {
     let up = app::PANE_UP;
     let pane = app::pane_rect(r, union_img.width(), union_img.height());
     let sub = image::imageops::crop_imm(union_img, pane.0, pane.1, pane.2, pane.3).to_image();
@@ -137,7 +160,54 @@ async fn read(
         .into_iter()
         .map(shift)
         .collect();
-    Ok((board::read_board(&words, &letters, up, r.timer), pane))
+    let board = board::read_board(&words, &letters, up, r.timer);
+    Ok((board, pane, words, letters))
+}
+
+/// A board-reader fixture in the shape tests/fixtures/board/README.md
+/// describes: the words in the PANE's pixels (the fixture's crop is the
+/// pane rectangle, in canvas coordinates) and the timer rectangle relative
+/// to it, with an `expected` block copied from what was read, to be
+/// corrected by hand against the frame before it becomes a test.
+#[allow(clippy::too_many_arguments)]
+fn write_fixture(
+    path: &std::path::Path,
+    cfg: &Config,
+    layout: &str,
+    union: app::R,
+    pane: app::R,
+    r: &Regions,
+    words: &[ocr::Word],
+    letters: &[ocr::Word],
+    board: &board::Board,
+    image: Option<&std::path::Path>,
+) -> Result<()> {
+    let up = app::PANE_UP;
+    let unshift = |w: &ocr::Word| {
+        serde_json::json!({
+            "x": w.x - pane.0 * up, "y": w.y - pane.1 * up, "w": w.w, "h": w.h,
+            "conf": w.conf, "text": w.text,
+        })
+    };
+    let fixture = serde_json::json!({
+        "name": path.file_stem().and_then(|s| s.to_str()).unwrap_or("pane"),
+        "source": image.map(|p| p.display().to_string()).unwrap_or_else(|| format!("a frame of {}", cfg.stream.channel)),
+        "scale": up,
+        "crop": {
+            "x": union.0 + pane.0, "y": union.1 + pane.1, "w": pane.2, "h": pane.3,
+            "frame_w": cfg.stream.canvas_w, "frame_h": cfg.stream.canvas_h,
+        },
+        "timer": [r.timer.0 - pane.0, r.timer.1 - pane.1, r.timer.2, r.timer.3],
+        "words": words.iter().map(unshift).collect::<Vec<_>>(),
+        "letters": letters.iter().map(unshift).collect::<Vec<_>>(),
+        "expected": {
+            "title": board.title, "subtitle": board.subtitle, "counter": board.counter,
+            "rows": board.rows.iter().map(|row| serde_json::json!({"name": row.name, "cells": row.cells})).collect::<Vec<_>>(),
+        },
+        "notes": format!("layout {layout}: AS READ — correct `expected` against the frame before this is a test"),
+    });
+    std::fs::write(path, serde_json::to_string_pretty(&fixture)?)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// One whole canvas-scaled frame from the configured source, as `locate`
