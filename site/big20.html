@@ -145,6 +145,32 @@
   .pbs .firsts { color: var(--muted); }
   .pbs .firsts b { color: var(--ink2); font-weight: 500; }
   .note { color: var(--muted); font-size: 12.5px; margin: 18px 0 0; }
+  /* Practice runs: the whole twenty on its own board, run by run. */
+  .pr-head { color: var(--ink2); font-size: 13px; margin: 0 0 12px; }
+  .pr-head b { color: var(--ink); font-family: "Martian Mono", monospace; font-size: 12.5px; font-weight: 600; }
+  .pr-live { background: var(--gold-soft); border-left: 3px solid var(--gold); padding: 8px 12px; border-radius: 4px; margin: 0 0 14px; font-size: 13px; color: var(--ink); }
+  .pr-live b { font-family: "Martian Mono", monospace; font-size: 12.5px; }
+  .pr-chart { display: block; width: 100%; height: 160px; margin: 0 0 14px; }
+  .pr-chart text { font: 10px ui-sans-serif, system-ui, sans-serif; fill: var(--muted); }
+  .pr-chart text.tnum { font-family: "Martian Mono", monospace; font-size: 10px; }
+  .pr-chart .grid { stroke: var(--hairline); stroke-width: 1; }
+  .pr-chart .sob { stroke: var(--gold); stroke-width: 1; stroke-dasharray: 4 3; }
+  .pr-chart .sob-l { fill: var(--gold); }
+  .pr-chart .run { fill: var(--series); }
+  .pr-chart .run.part { fill: var(--card); stroke: var(--series); stroke-width: 1.5; }
+  .pr-chart .run.best { fill: var(--ahead); }
+  .pr-chart .join { fill: none; stroke: var(--series); stroke-width: 1.2; opacity: .7; }
+  .pr-chart .live { fill: var(--gold); }
+  .pr-table td { vertical-align: top; }
+  .pr-table .where { font-size: 12px; color: var(--ink2); max-width: 300px; }
+  .pr-table .where b { font-family: "Martian Mono", monospace; font-size: 11.5px; font-weight: 500; }
+  .pr-table .where a { color: var(--ink2); text-decoration: none; border-bottom: 1px solid var(--hairline); }
+  .pr-table .lose b { color: var(--ink); }
+  .pr-table .gain b { color: var(--ahead); }
+  .pr-table .delta { display: block; color: var(--muted); font-size: 10.5px; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .pr-table .delta.ahead { color: var(--ahead); }
+  .tag { display: inline-block; font-family: "Silkscreen", monospace; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--gold); border: 1px solid var(--gold); border-radius: 3px; padding: 1px 5px; margin-left: 6px; vertical-align: middle; }
+  .pr-note { color: var(--muted); font-size: 12px; margin: 12px 0 0; }
   footer { margin-top: 34px; color: var(--muted); font-size: 12px; }
 </style>
 
@@ -155,6 +181,8 @@
   <div class="strip" id="strip"></div>
   <div class="tiles" id="tiles"></div>
   <section class="card project" id="project" hidden></section>
+  <h2 id="runs-h" hidden>Practice runs</h2>
+  <section class="card" id="runs-card" hidden></section>
   <h2>The twenty, in race order</h2>
   <section class="card scroll"><table id="grid"></table></section>
   <p class="note" id="note"></p>
@@ -283,16 +311,115 @@ if (finished > 0) {
     `<div><div class="lbl">Sum of latest finishes</div><div class="sum plain">${fmt(latest)}</div><div class="over">${over} — nearer what a race day looks like</div>${miss}</div>` +
     fullRuns();
 }
+practiceRuns();
 
 // His full runs of the race on its own board, newest first: how far each
 // got, over how many games. The whole race is the number that matters and
 // this is the nearest thing to it he has run.
 function fullRuns() {
-  const rs = (D.run_throughs || []).slice().sort((a, b) => b.started_at_ms - a.started_at_ms);
+  const rs = D.run_throughs || [];
   if (!rs.length) return '';
-  const line = r => `${esc(dshort(r.started_at_ms))}: <b>${r.games}</b> of ${games.length} games, ${fmt(r.reached_ms)} on the clock`;
-  return `<div><div class="lbl">Full runs</div><div class="runs">${rs.slice(0, 4).map(r => `<div>${line(r)}</div>`).join('')}</div>` +
-    `<div class="miss"><a href="/big20/runs/index.html">every full run, game by game</a> · a full run's games count under "Full run", not as attempts</div></div>`;
+  const done = rs.filter(r => r.games >= games.length && r.reached_ms != null);
+  const best = done.length ? Math.min(...done.map(r => r.reached_ms)) : null;
+  return `<div><div class="lbl">Practice runs</div><div class="runs"><b>${rs.length}</b> run${rs.length === 1 ? '' : 's'} of the twenty` +
+    (best != null ? `, best <b>${fmt(best)}</b>` : `, none over all twenty yet`) + `</div>` +
+    `<div class="miss"><a href="#runs-card">run by run below</a> · <a href="/big20/runs/index.html">game by game</a> · a run's games count under "Full run", not as attempts</div></div>`;
+}
+
+// The practice runs tracked run by run: the whole twenty on its own board,
+// "Practice Run" in its title, which is the nearest thing to the race he
+// runs before the day. Each run: how far it got, the clock at its end,
+// how much of that was in the games and how much between them, and how it
+// sits against his practice bests — where the run lost time and where it
+// beat them. A run in progress sits on top with the clock still running.
+function practiceRuns() {
+  const rs = (D.run_throughs || []).slice().sort((a, b) => a.started_at_ms - b.started_at_ms);
+  if (!rs.length) return;
+  const bestOf = new Map(games.map(g => [g.game, g.bestMs]));
+  const sob = games.every(g => g.bestMs != null) ? games.reduce((n, g) => n + g.bestMs, 0) : null;
+  const live = D.live && D.live.category ? rs[rs.length - 1] : null;
+  let prevDone = null;
+  for (const r of rs) {
+    const segs = (r.segments || []).filter(s => s.ms != null);
+    r.inGame = segs.reduce((n, s) => n + s.ms, 0);
+    r.between = r.reached_ms != null && r.reached_ms >= r.inGame ? r.reached_ms - r.inGame : null;
+    r.deltas = segs.filter(s => bestOf.get(s.game) != null).map(s => ({ game: s.game, d: s.ms - bestOf.get(s.game) }));
+    r.vsBests = r.deltas.length ? r.deltas.reduce((n, x) => n + x.d, 0) : null;
+    r.complete = r.games >= games.length && r.reached_ms != null;
+    r.live = r === live;
+    r.vsPrev = r.complete && prevDone ? r.reached_ms - prevDone.reached_ms : null;
+    if (r.complete) prevDone = r;
+  }
+  const done = rs.filter(r => r.complete);
+  const best = done.length ? done.reduce((m, r) => r.reached_ms < m.reached_ms ? r : m) : null;
+  document.getElementById('runs-h').hidden = false;
+  const card = document.getElementById('runs-card');
+  card.hidden = false;
+  const head = `<p class="pr-head"><b>${rs.length}</b> practice run${rs.length === 1 ? '' : 's'} of the twenty` +
+    (best ? ` · best <b>${fmt(best.reached_ms)}</b> on ${esc(dshort(best.started_at_ms))}` : ` · none over all twenty yet`) +
+    (sob != null && best ? ` · sum of bests <b>${fmt(sob)}</b>, <b>${fmt(best.reached_ms - sob)}</b> above it` : sob != null ? ` · sum of bests <b>${fmt(sob)}</b>` : '') + `</p>`;
+  const banner = live
+    ? `<div class="pr-live">Run in progress · <b>${live.games}</b> of ${games.length} games so far` +
+      (live.reached_ms != null ? `, <b>${fmt(live.reached_ms)}</b> on the clock at the last one` : '') + ` · the page refreshes every few minutes while he is live</div>`
+    : '';
+  card.innerHTML = head + banner + chart(rs, sob, best) + table(rs, best) +
+    `<p class="pr-note">A run's clock is the marathon timer at the last game recorded. "Between games" is that clock less the games' own times: the transitions, and any pause. "Against practice bests" sums, over the games the run reached, how far each was from his best for it in practice; the games named are where the most went and where he beat his practice best inside the run.</p>`;
+
+  function chart(rs, sob, best) {
+    const W = 600, H = 160, L = 58, R = 16, T = 14, B = 26;
+    const ys = rs.filter(r => r.reached_ms != null).map(r => r.reached_ms);
+    if (sob != null) ys.push(sob);
+    if (!ys.length) return '';
+    let lo = Math.min(...ys), hi = Math.max(...ys);
+    const pad = Math.max((hi - lo) * 0.25, 5 * 60000);
+    lo -= pad; hi += pad;
+    const x = i => rs.length === 1 ? (L + (W - R)) / 2 : L + (W - L - R) * i / (rs.length - 1);
+    const y = v => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
+    const hms = ms => { const s = Math.round(ms / 1000); return `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}`; };
+    let out = `<svg class="pr-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="practice runs, the clock at the end of each">`;
+    for (let k = 0; k <= 2; k++) {
+      const v = lo + (hi - lo) * k / 2;
+      out += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>` +
+        `<text class="tnum" x="${L - 6}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end">${hms(v)}</text>`;
+    }
+    if (sob != null) {
+      out += `<line class="sob" x1="${L}" x2="${W - R}" y1="${y(sob).toFixed(1)}" y2="${y(sob).toFixed(1)}"/>` +
+        `<text class="sob-l tnum" x="${W - R}" y="${(y(sob) - 4).toFixed(1)}" text-anchor="end">sum of bests ${fmt(sob)}</text>`;
+    }
+    const pts = rs.map((r, i) => ({ r, cx: x(i), cy: r.reached_ms != null ? y(r.reached_ms) : null }));
+    const joined = pts.filter(p => p.r.complete);
+    if (joined.length > 1) out += `<polyline class="join" points="${joined.map(p => `${p.cx.toFixed(1)},${p.cy.toFixed(1)}`).join(' ')}"/>`;
+    for (const p of pts) {
+      if (p.cy == null) continue;
+      const cls = p.r.live ? 'run live' : p.r === best ? 'run best' : p.r.complete ? 'run' : 'run part';
+      out += `<circle class="${cls}" cx="${p.cx.toFixed(1)}" cy="${p.cy.toFixed(1)}" r="4.5"><title>${esc(dshort(p.r.started_at_ms))}: ${p.r.games} of ${games.length}, ${fmt(p.r.reached_ms)}</title></circle>`;
+      if (!p.r.complete) out += `<text class="tnum" x="${p.cx.toFixed(1)}" y="${(p.cy - 8).toFixed(1)}" text-anchor="middle">${p.r.games}/${games.length}</text>`;
+      out += `<text x="${p.cx.toFixed(1)}" y="${H - 8}" text-anchor="middle">${esc(dshort(p.r.started_at_ms))}</text>`;
+    }
+    return out + '</svg>';
+  }
+
+  function table(rs, best) {
+    const newest = rs.slice().reverse();
+    const sd = ms => (ms < 0 ? '−' : '+') + fmt(Math.abs(ms));
+    const where = r => {
+      const lose = r.deltas.filter(x => x.d > 0).sort((a, b) => b.d - a.d).slice(0, 2);
+      const gain = r.deltas.filter(x => x.d < 0).sort((a, b) => a.d - b.d).slice(0, 2);
+      const item = x => `<a href="/game/${slugOf(x.game)}/index.html">${esc(x.game)}</a> <b>${sd(x.d)}</b>`;
+      return (lose.length ? `<div class="lose">lost most: ${lose.map(item).join(' · ')}</div>` : '') +
+        (gain.length ? `<div class="gain">beat practice: ${gain.map(item).join(' · ')}</div>` : '');
+    };
+    const row = r => `<tr>` +
+      `<td class="tnum">${esc(dshort(r.started_at_ms))}${r.live ? '<span class="tag">in progress</span>' : r === best ? '<span class="tag">best</span>' : ''}</td>` +
+      `<td class="num tnum">${r.games}<span class="delta">of ${games.length}</span></td>` +
+      `<td class="num tnum${r === best ? ' best' : ''}">${fmt(r.reached_ms)}${r.vsPrev != null ? `<span class="delta${r.vsPrev < 0 ? ' ahead' : ''}">${sd(r.vsPrev)} vs previous</span>` : ''}</td>` +
+      `<td class="num tnum">${fmt(r.inGame)}</td>` +
+      `<td class="num tnum">${fmt(r.between)}</td>` +
+      `<td class="num tnum">${r.vsBests != null ? `<span class="${r.vsBests < 0 ? 'best' : ''}">${sd(r.vsBests)}</span><span class="delta">over ${r.deltas.length} game${r.deltas.length === 1 ? '' : 's'}</span>` : '—'}</td>` +
+      `<td class="where">${where(r)}</td></tr>`;
+    return `<div class="scroll"><table class="pr-table"><tr><th>Run</th><th class="num">Games</th><th class="num">Clock</th><th class="num">In the games</th><th class="num">Between games</th><th class="num">Against practice bests</th><th>Where it went</th></tr>` +
+      newest.map(row).join('') + `</table></div>`;
+  }
 }
 
 // The trend cell: attempts left to right; a finish is a point (green when
