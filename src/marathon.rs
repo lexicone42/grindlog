@@ -305,6 +305,21 @@ impl Slot {
         }
     }
 
+    /// Is this candidate the row's baseline with one digit read wrong? Two
+    /// times printed the way the board prints them (h:mm:ss, m:ss), the
+    /// same length, differing in exactly one character: "4:04:57" beside
+    /// "5:04:57". A real completion differs from a comparison in several.
+    fn one_digit_from_baseline(&self, cum: i64) -> bool {
+        let Some(b) = self.baseline_value() else {
+            return false;
+        };
+        let (x, y) = (
+            crate::timeparse::format_ms_seconds(b),
+            crate::timeparse::format_ms_seconds(cum),
+        );
+        x.len() == y.len() && x.chars().zip(y.chars()).filter(|(p, q)| p != q).count() == 1
+    }
+
     /// The row's segment column as most often read, whatever cumulative it
     /// was read beside: for a row whose cumulative column never settled, the
     /// segment column may well have, since it is the shorter number.
@@ -1003,6 +1018,17 @@ impl Marathon {
                         // either the marathon total, or the row's own two
                         // columns against the row above it.
                         && (self.total_agrees(i, *c, total_ms) || self.board_vouches(i, *c))
+                        // A row the total ALONE vouches for — nothing recorded
+                        // above it to check the arithmetic against — must not
+                        // be within a digit of its own comparison: the pinned
+                        // last row's 5:04:57 from the day before read
+                        // "4:04:57" on two passes, the clock passed 4:05 with
+                        // the row's neighbour still unrun, and yesterday's
+                        // Moon Crystal was filed as today's; today's, at
+                        // 4:38:17, was then refused as already recorded.
+                        && (self.board_vouches(i, *c)
+                            || self.arithmetic_backs(i, *c)
+                            || !self.slots[i].one_digit_from_baseline(*c))
                 })
                 .max_by_key(|(c, v)| (v.count, *c))
             else {
@@ -4716,5 +4742,53 @@ mod tests {
         assert_eq!(seen[0].as_read.as_deref(), Some("4ydiide Aly?"));
         assert!(!seen[0].unmatched);
         assert_eq!(seen[0].slot, 30);
+    }
+    /// The pinned last row shows the previous run's time all day and its
+    /// neighbour is unrun until the end, so nothing checks its arithmetic:
+    /// a comparison of 5:04:57 read "4:04:57" on two passes, and the total
+    /// passing 4:05 filed yesterday's Moon Crystal as today's. A row the
+    /// total alone vouches for is not filed within a digit of its own
+    /// comparison; the real completion, 4:38:17, is.
+    #[test]
+    fn a_comparison_one_digit_off_is_not_a_completion_on_the_totals_word_alone() {
+        let mut m = race_tracker();
+        let pass = |moon: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Celeste Mario", &["26:43", "4:33:06"]),
+                    row("(Any%)", &["0:35", "4:33:41"]),
+                    row("Jaws", &["8:17", "4:41:59"]),
+                    row("(Any%)", &["0:32", "4:42:31"]),
+                    row("Moon Crystal", moon),
+                ],
+            )
+        };
+        let h = 3_600_000;
+        let cmp = ["22:25", "5:04:57"];
+        for i in 0..3 {
+            let total = Some(3 * h + 50 * 60_000 + i * 60_000);
+            assert!(m.observe(&pass(&cmp), 1_000 + i * 60_000, total).is_empty());
+        }
+        // The hour digit slips as the clock sweeps through 4:05.
+        for i in 3..8 {
+            let total = Some(4 * h + 3 * 60_000 + (i - 3) * 60_000);
+            let read = if i % 2 == 1 {
+                ["22:25", "4:04:57"]
+            } else {
+                cmp
+            };
+            let seen = m.observe(&pass(&read), 1_000 + i * 60_000, total);
+            assert!(seen.is_empty(), "at {i}: {seen:?}");
+        }
+        // The real thing, 19:11 at 4:38:17.
+        let real = ["19:11", "4:38:17"];
+        let total = Some(4 * h + 38 * 60_000 + 40_000);
+        assert!(m.observe(&pass(&real), 601_000, total).is_empty());
+        let seen = m.observe(&pass(&real), 661_000, total);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Moon Crystal");
+        assert_eq!(seen[0].segment_ms, 19 * 60_000 + 11_000);
+        assert_eq!(seen[0].cumulative_ms, 4 * h + 38 * 60_000 + 17_000);
     }
 }
