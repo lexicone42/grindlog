@@ -78,7 +78,7 @@ crop_h = 90
                                 #   go to tesseract, which also always reads the
                                 #   splits/counter crops. Light digits on a dark
                                 #   background only: on a dark-on-light timer it
-                                #   declines every frame. Retraining: README,
+                                #   declines every frame. Retraining: docs/detection.md,
                                 #   "Reading the timer with templates"
 # glyph_templates = "assets/glyphs.json"  # templates for the glyph reader (from
                                 #   `glyphs train`; the shipped file is trained on
@@ -342,7 +342,7 @@ category = "Any%"
 # out which of them a board is from the names it read, folds every row onto
 # one of that event's ten, and counts what it could not place in the
 # session's health events. See assets/arcathlon-rosters.toml (which is the
-# format, and the example) and the README, "Marathon days".
+# format, and the example) and docs/marathons.md.
 [[games]]
 name = "Arcathlon"
 category = "10 games"

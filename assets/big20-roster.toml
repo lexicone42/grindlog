@@ -12,12 +12,15 @@
 # Man 6 is in both Arcathlon #9 and this race, so merging the two files would
 # break that assumption for every board either way.
 #
-# What it is FOR, today: the Big 20 is not a marathon board — each game is its
-# own splits file with its own attempt counter — so there is no board to
-# identify. These names are used to recognise a game the pane is timing that
-# is KNOWN NOT TO BE the tracked one, which is stronger evidence than a
-# header simply failing to match (see src/identity.rs). Canonicalising runs
-# under them comes when the tracker records these games at all.
+# What it is FOR: two things. His per-game practice boards name these games
+# in their headers, and a game the pane is timing that is KNOWN NOT TO BE the
+# tracked one is stronger evidence than a header simply failing to match
+# (see src/identity.rs); the attempts are filed under `category`. And since
+# 2026-09-17 the race board itself — `[[games]] name = "Big 20 #23 run",
+# mode = "board"` in live.toml — is tracked by its rows: `ordered = true`
+# places each row by its game's position here, `board` is what the splits
+# print for it, and the runs are filed under the full names (see
+# docs/marathons.md, "The race board").
 #
 # `goals` is what each game has to be finished to, matched to `games` BY
 # POSITION (the parser refuses a list of a different length). The goal is a

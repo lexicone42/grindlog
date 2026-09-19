@@ -122,6 +122,20 @@ Everything in `summary.json` plus:
 - `recent_runs` — the last 15 runs by id, with the same fields as `runs`.
 - `sessions[*].events` — diagnostic layout events (locks, re-anchors, the
   once-a-minute title reads).
+- `channel` — the streamer's Twitch login, so the page can link the stream
+  (an owner's decision, 2026-09-09; off by default elsewhere).
+- `now` — the live panel: `live`, `game`, `category`, `at_ms`, and
+  `marathon` (`{category, games, reached_ms, since_ms}`) while a marathon
+  board is in force — the run's games recorded so far across the broadcast
+  and the clock at the last one.
+- `other_events` — his marathons and practice days, newest first: `day`,
+  `label` (the event, or the games practised), `practice`, `randomized`,
+  `total_ms` and `games[]` with each row's `final_time_ms`/`last_timer_ms`.
+- `big20` — the race he is preparing for: `race`, `date`, `url`, `games[]`
+  in race order (`n`, `goal`, practice `attempts`/`finished`/`best_ms`, the
+  Arcathlon `marathon_ms`, and `run_ms`/`run_count` from his full runs), and
+  `run_throughs[]` — `day`, `started_at_ms`, `games`, `reached_ms`,
+  `segments_ms`, `segments[{game, ms, cum}]` per full run of the race.
 
 ## The per-day feed: `manifest.json` and `days/`
 

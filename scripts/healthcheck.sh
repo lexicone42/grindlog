@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Dead-man check for the live deployment, for a ten-minute cron (see
-# crontab.example). Each pass reads seven signals:
+# crontab.example). Each pass reads eleven signals (the last four since
+# 2026-09-17):
+#
+#   database      ninja-gaiden.db opens and answers a query
+#   tracker-churn at most two board-tracker rebuilds in the last hour
+#   tracker-stall a marathon in force has recorded a completion within the hour
+#   site-stale    while a session is open, the public page is under 30 min old
 #
 #   supervisor  the tmux session "ngtimer" (scripts/run-live.sh) exists
 #   bot         exactly one `ngtwitchtimer --config live.toml run` is alive

@@ -145,8 +145,16 @@ consecutive passes agree on replaces the one in force (`pane geometry
 re-measured: …`). One morning the bot locked on the stream's opening scene,
 where the pane is drawn larger and cropped, and the geometry from that
 frame lost a whole day's run numbers and splits; now it holds for ten
-seconds. Layouts whose timer rectangles overlap are told apart the same
-way: the one whose splits column reads as times wins.
+seconds. Layouts whose timer rectangles overlap are told apart by their panes: each
+is placed where its own probe candidate read the timer (a layout with no
+reading of its own is shifted to the winner's timer), and the one whose
+pane NAMES the board — the tracked game's header, or a game the rosters
+know — wins before the one whose splits column reads the most rows. The
+Ninja Gaiden layout's splits crop happened to read six rows of a Moon
+Crystal practice board and held it for three hours; its header crop never
+saw the name, and every run on that board was one nothing named, dropped
+at close. Not under a lock the board granted: the board probe chose that
+layout by the rows its pane reads.
 
 **The pane's own words.** A second, unrestricted sparse-text pass over the
 same crop reads the letters: at every lock (with `[splits]` enabled) and
@@ -495,8 +503,9 @@ the tracked game's own board into completion tracking.
 What it takes to read a board rather than a timer: a cumulative counts only
 once two pane passes agree on it, since a single-frame digit slip does not
 repeat in static text re-read a minute later; rows are matched to slots by
-name, so a row that goes unread does not shift the ones below it into each
-other's games; a numbered event prints its comparison times from the first
+name — on an event run in a fixed order (`ordered = true` in its roster) by
+the game's position in that order — so a row that goes unread does not
+shift the ones below it into each other's games; a numbered event prints its comparison times from the first
 frame, so a row is finished when its cumulative *changes* from the one it
 first showed, which on one measured board was a difference of five seconds;
 a randomized event instead reveals each game as it is drawn, and its first

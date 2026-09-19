@@ -38,7 +38,13 @@ Layout of `src/`:
   different games, tracked by which of them have completed rather than by
   the timer (`[[games]] mode = "board"`); `roster.rs` — which of an event's
   ten games a row's OCR-read name is; `audit.rs` — the harness that scores a
-  replayed marathon against the key its own board derives (`audit`).
+  replayed marathon against the key its own board derives (`audit`;
+  `NG_MARATHON_TRACE` prints every guard's answer per row).
+- `identity.rs` — the gate that decides whether the pane is timing the
+  tracked game or another (header, category, counter, rows), which is what
+  files a foreign run under its own game or drops one nothing names;
+  `locate.rs` — finding the pane in a frame (`locate`); `pane.rs` — what a
+  pane pass reads, per layout and threshold (`pane`, `--dump-fixture`).
 - `capture.rs` / `twitch_hls.rs` — stream and VOD decoding via ffmpeg;
   `config.rs` — the TOML config (every field documented in
   `config.example.toml`); `db.rs`, `stats.rs`, `report.rs` — persistence and
@@ -156,8 +162,10 @@ frame needs `tesseract` (see [docs/install.md](docs/install.md)).
   fragments. `scripts/list-vods.sh <channel> --game "ninja gaiden"` gives
   the ids with dates.
 - The site (`site/template.html` + `report --json`) is one self-contained
-  page; `scripts/build-site.sh` builds it and `scripts/deploy-site.sh`
-  uploads it. A single uncaught JavaScript error blanks the whole page, so
+  page, plus a page per event, per game and the Big 20 pages under
+  `site/big20/`, all rendered by `scripts/build-site.sh`; `scripts/deploy-site.sh`
+  uploads them from an explicit page list — a new kind of page has to be
+  added there or it silently never ships. A single uncaught JavaScript error blanks the whole page, so
   check it in a browser after touching the template.
 - The same build writes the machine-readable feed (`site/api/v1/`, see the
   README's *Machine-readable data*, fields in site/static/api/v1/README.md): `latest.json` comes from
