@@ -3079,11 +3079,28 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let mut best: Option<(bool, usize)> = None;
                     let mut choice = (new_layout, new_off, new_regs.clone());
                     for (li, r) in regs.iter().enumerate() {
-                        let off = (
-                            (win_t.0 as i64 - r.timer.0 as i64) as i32,
-                            (win_t.1 as i64 - r.timer.1 as i64) as i32,
-                        );
-                        let Some(sr) = shifted(r, off) else { continue };
+                        // Where this layout's OWN timer reads, when its probe
+                        // candidate has one: two layouts' timers can sit far
+                        // apart on the canvas, and putting a layout's timer
+                        // where the winner's is then puts its pane off the
+                        // board — the tall practice layout, shifted to the
+                        // Ninja Gaiden layout's timer, read nothing, and the
+                        // Ninja Gaiden layout kept a board it could not name.
+                        let own = cands
+                            .iter()
+                            .filter(|c| c.layout == li && c.streak > 0)
+                            .max_by_key(|c| c.streak);
+                        let (off, sr) = match own {
+                            Some(c) => (c.off, c.regs.clone()),
+                            None => {
+                                let off = (
+                                    (win_t.0 as i64 - r.timer.0 as i64) as i32,
+                                    (win_t.1 as i64 - r.timer.1 as i64) as i32,
+                                );
+                                let Some(sr) = shifted(r, off) else { continue };
+                                (off, sr)
+                            }
+                        };
                         let Some(splits_rect) = sr.splits else {
                             continue;
                         };
