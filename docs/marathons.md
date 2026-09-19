@@ -85,7 +85,12 @@ position like `goals`, is what his splits print for each game: "Flintstones",
 "Kid Klown", "Celeste Mario". A row is matched against both the board
 spelling and the full name, the better fit winning and a tie going to the
 board spelling ("World" is Parallel World's row, not the tail of Kid
-Klown's name); the run is filed under the full name. Before this
+Klown's name). And on an ordered board the slot itself says what a row's
+run is filed under — the even slots are the games in order, the odd ones
+their category rows, never filed as games whatever their name came back as
+("(Any%)" read "au" and its 0:30 went in as a game before this) — so a
+row that read as nothing any roster folds ("4ydiide Aly?" was Hydlide's)
+is still filed as its game; the reading stays in the log. Before this
 "Funtstones", "Kid Kiown" and "World" were filed as read.
 
 **A first time under a watched row.** At 480p the board's "-" cells often
@@ -128,6 +133,67 @@ with the row's baseline. Run it under `audit --dir` over a board log
 (`boards-<vod>.jsonl` + `obs-<vod>.jsonl`): the tracker is deterministic
 over its inputs, so a game that went missing in a replay can be asked why
 in a second, without the replay. That loop is what found every rule above.
+
+**Comparisons.** From the second run on, his splits carry the previous run
+as the comparison, so every unrun row shows a time from the first pass — a
+baseline, as on an Arcathlon board — and three rules keep a comparison from
+being taken for a completion. A comparison read with and without its hour
+digit ("12:28" for 1:12:28) is one baseline, kept under the reading that
+has the hour, and a reading that is the baseline without its hour clears
+the row's votes as the baseline does. "Just now" — a row arriving with its
+time where the total stands — speaks only for a row that has never yet
+shown a time: the unrun rows were on the board with their comparisons all
+along, and a tracker started with the total at 51:00 filed Crisis Force's
+51:59 comparison on its second pass before this. And a candidate the total
+ALONE vouches for (nothing recorded above it, no settled segment agreeing
+with the arithmetic) is refused when it is the row's own comparison with
+one digit read wrong: the pinned last row's 5:04:57 read "4:04:57", the
+clock passed 4:05 with the row's neighbour still unrun, and yesterday's
+Moon Crystal was filed as today's — and today's, at 4:38:17, refused as
+already recorded.
+
+**The segment column's word.** The column refuses a candidate only when no
+settled reading of it agrees with the arithmetic (the comparison case:
+"20:34 throughout" where 16:16 was wanted). Any settled disagreement used
+to refuse, and then the strongest reading did; at 480p a segment of 11:14
+came back "13:14" on four passes and "12:14" on five beside twelve of
+"11:14", and 11:16 came back "13:16" six times against two of "11:16" —
+in both the cumulative was right on every pass and the delta column agreed
+with it. Where the column's strongest reading still disagrees, `segment_for`
+waits its patience out and files the arithmetic's value, marked derived.
+
+**After a restart.** A rollout mid-run (three of them on 2026-09-18) hands
+the new tracker a board where the games already finished are baselines,
+not completions it watched, so nothing above the runner is recorded and
+the next completion had only the total's three-minute window — a
+cumulative read three ways in three minutes missed it. On an ordered board
+a settled baseline of a row above that has never been followed by a
+settled other reading, and that is behind the clock, is a finished row's
+real cumulative and anchors the arithmetic for the row below (Steel Legion
+14:03 against the 1:31:45 above it). Behind the clock matters: a baseline
+ahead of it is the comparison of a row not yet reached, and without that
+check Faria's 2:01:38 vouched for Monster Party's 2:15:10 from the day
+before. The games finished between two restarts are still lost live; the
+replay from second 0 is what files them.
+
+**What the timer is worth here.** The marathon total is the timer read off
+the big clock, and it is the only witness for a row nothing above it
+anchors. Two things made it worth more. The clock is right-aligned and
+grows LEFT with the hours: the `big20-race` timer crop that fitted "10:18.3"
+cut the hour digit of "3:55:28.3" four hours in, tesseract read "155:09.3",
+and the total was hours from the truth on the frames it parsed at all; the
+crop is wide enough now (`live.toml`, `crop_x = 320`). And with a marathon
+in force the frame loop takes readings the timer parser declines
+(`timeparse::parse_marathon_total`): a lost tenths digit with its separator
+kept ("15:08:", "3:55:28."), a colon read as a point ("15.16" for 15:16 —
+a total under a minute is not a reading of anything, so the point can only
+have been the colon), bare digits ("1526"). The tracked game's own timer is
+untouched. The board's cells get one repair of their own: a digit read as
+the letter it looks like ("$:22" for 5:22, "18:S2" for 18:52) is put back
+where the word has a colon and the result is time-shaped
+(`board::glyph_repair`) — left as it was, "$:22" glued onto the name and
+the row read as one cell, which is no reading at all; Mini Putt was filed
+seventeen minutes late for it.
 
 The Big 20 race — and his full practice runs of it, from 2026-09-17 — is
 the same pane in the same place with twenty games instead of ten, and each
@@ -179,7 +245,7 @@ does for this board that an Arcathlon never needed:
   unlocks, feeds the run state machine nothing, and is let go when no
   marathon is in force five minutes after the grant. `live.toml` carries
   the entry (`[[games]] name = "Big 20 #23 run", mode = "board"`) and the
-  `big20-race` layout whose splits crop takes the names column in. The pane binarises differently per theme — at the deployment's
+  `big20-race` layout whose splits crop takes the names column in and whose timer crop is wide enough for the clock past the hour (see "What the timer is worth here"). The pane binarises differently per theme — at the deployment's
   `[splits] threshold` (150) the race board reads one to four rows a pass,
   at 100 ten, and at 100 his Ninja Gaiden pane's title reads as noise and
   the gate convicts its own board — so the board probe tries the configured

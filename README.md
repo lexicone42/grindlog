@@ -32,6 +32,13 @@ record semantics are all configuration.
   counter, and a plausibility floor so a frozen timer is never a finish.
 - **It backfills.** Old VODs stream straight from Twitch and land on the
   original broadcast timeline.
+- **It reads a whole marathon board.** A ten-game Arcathlon or the twenty-game
+  Big 20 race is tracked by which rows have completed, not by the timer:
+  cumulatives that agree across passes, the board's own arithmetic as the
+  check on every row, rows placed by the roster's order, and the previous
+  run's times told apart from today's. The site gets a page per event and,
+  for the race, a prep dashboard (`/big20/`) and a run-by-run comparison
+  (`/big20/runs/`). See [docs/marathons.md](docs/marathons.md).
 
 Rust, no Python in the toolchain. The bot shells out only to `ffmpeg` and
 `tesseract`; the scripts also use `sqlite3`, `curl`, `jq`, `flock` and the
@@ -75,6 +82,8 @@ ngtwitchtimer locate             # find the LiveSplit pane in a frame
 ngtwitchtimer pane [--image f.png] # what the pane pass reads, per layout and threshold
 ngtwitchtimer calibrate          # tune the timer crop by eye
 ngtwitchtimer glyphs train|test|boxes   # the timer's template reader
+ngtwitchtimer audit --dir arcathlon-db  # score a replayed marathon against its own board (NG_MARATHON_TRACE=<row> says why a row was or was not filed)
+ngtwitchtimer report --api-dir site/api/v1   # the per-day feed
 RUST_LOG=ngtwitchtimer=debug ngtwitchtimer   # per-frame tracing
 ```
 

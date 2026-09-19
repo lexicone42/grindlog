@@ -93,8 +93,13 @@ edge sat at x = 595–604 on every sample; only its top moved:
 | 6 | Kid Klown | 410, 819, 189, 71 |
 | 7 | Flintstones | 423, 829, 177, 66 |
 
-`live.toml` carries three `[[layouts]]` for them — `big20-top`, `big20-short`,
-`big20-mid` — each holding its class with 20 px of slack at zero offset. One
+`live.toml` carries four `[[layouts]]` for them — `big20-top`, `big20-short`,
+`big20-mid` and `big20-tall` — each holding its class with 20 px of slack at
+zero offset. `big20-tall` came last (2026-09-18): his Moon Crystal board,
+eight segments with the big timer under them, is taller than the three were
+measured for, and none of their pane crops reached its "Moon Crystal / Any%"
+header, so no layout could name the board and an evening of attempts was
+dropped at close. One
 crop for the whole 560–736 span was tried first and was worse: with the
 four-row panes at its bottom edge, Uninvited and Faria stopped recording.
 Validated by replaying every unrecorded stretch of that VOD: Crisis Force
@@ -112,7 +117,10 @@ problems, not layout ones:
   It could relax when the pool holds exactly one game of that stem, which
   is the case here and not for Zelda / Zelda II.
 - **Mini Putt**'s one-row pane reads "Traditional" for its title — the
-  course, or the category — and nothing on any roster is called that.
+  course, or the category — and nothing on any roster is called that. Its
+  time cell read "$:22" for 5:22 besides, the 5 as a dollar sign, which
+  made the word part of the name; `board::glyph_repair` puts such a digit
+  back (2026-09-18), and the title is the part that stays open.
 
 A board that locks, convicts, and names nothing is what the drop rule in
 `app.rs` is for (`close_would_fabricate`, see [detection.md](detection.md)):
@@ -170,16 +178,48 @@ by itself and the page reads as before.
 From 2026-09-17 he also runs the whole race on its own splits ("Big 20 #23
 / Practice Run"). That is a marathon board, tracked by its rows, and it has
 its own section in [marathons](marathons.md#the-race-board-big-20): the
-replay script, the bracketed transition rows, the scrolling, and how the
-live bot locks on it. Its rows are filed under `Big 20 #23 run`, apart from
-the per-game practice attempts.
+replay script, the bracketed transition rows, the rows placed by the
+roster's order, and how the live bot locks on it. Its rows are filed under
+`Big 20 #23 run`, apart from the per-game practice attempts.
+
+On the site those runs are the **practice runs** section of `/big20/`: how
+many, the best and its distance above the sum of bests; a chart of each
+run's clock against the sum-of-bests line (a run cut short is a hollow
+point labelled with how far it got); and a table, newest first, with the
+clock at the last game, the time in the games and between them, how the run
+sat against his practice bests over the games it reached, and where that
+went — the two games that cost most and the two where he beat his practice
+best inside the run. A run in progress sits on top with the clock at its
+last game, read from the report's live panel (`now.marathon`). `/big20/runs/`
+(`site/big20-runs.html`) is the twenty games down the side and one column
+per run, the fastest per game marked once he has run it more than once.
+
+The report carries them as `big20.run_throughs[]` — `day`, `started_at_ms`,
+`games`, `reached_ms`, `segments_ms` and `segments[{game, ms, cum}]` in the
+order he reached them — grouped by one rule (`report.rs`): a run starts
+where the marathon clock had nothing before the row, its cumulative being
+its own segment (the first game of a fresh set of splits), or after two
+hours away from the board. Not by session — a bot restart mid-run opens a
+new one, and grouping by session cut one evening's run into three — and not
+by the clock stepping backwards between neighbouring rows: a row is filed a
+pass or two after it ends, sometimes twenty minutes after when its cells
+read badly, and then sorts after a row that ended later on the clock; that
+rule cut the second run into three on the page. A row filed out of order
+stays in its run, in clock order. A new kind of page has to be added to
+`deploy-site.sh`'s explicit page list or it silently never ships;
+`/big20/*` is one invalidation.
 
 ## The next race
 
 A roster edit, not a code change. `assets/big20-roster.toml` carries the
 race's `name`, `games` (in race order), `goals` (matched **by position** —
 a list of a different length is refused rather than silently attaching every
-goal to the wrong game), `url`, `date` and `category`. Point
+goal to the wrong game), `board` (what his splits print for each game, by
+position too: "Flintstones", "Kid Klown", "Celeste Mario" — the rows are
+matched against these and the full names both, the runs filed under the
+full names), `ordered = true` (the games are run and printed in this order,
+so the tracker places every row of the board by its position in the list),
+`url`, `date` and `category`. Point
 `roster::BIG20_RACE` at the new event name and the prep page follows.
 
 Keep it a separate file from `assets/arcathlon-rosters.toml`.
