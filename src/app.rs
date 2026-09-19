@@ -3065,10 +3065,18 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // layouts' timers where this one's is installed one of THEM,
                 // whose crops bound another pane — the reads that followed
                 // had no title and no names.
+                // And before the count of rows, whether the layout's pane NAMES
+                // the board: a layout whose header crop reads the board's name
+                // (the tracked game's, or one the rosters know) over one that
+                // reads a column of times under a header it cannot see. The
+                // Ninja Gaiden layout's splits crop happened to read six rows
+                // of a Moon Crystal practice board and won the lock for three
+                // hours; its header crop never saw the name, every run on that
+                // board was one nothing named, and none was filed.
                 if regs.len() > 1 && new_regs.splits.is_some() && !lock.is_board() {
                     let rows = shared.acts.len().max(1) as u32;
                     let win_t = new_regs.timer;
-                    let mut best: Option<usize> = None;
+                    let mut best: Option<(bool, usize)> = None;
                     let mut choice = (new_layout, new_off, new_regs.clone());
                     for (li, r) in regs.iter().enumerate() {
                         let off = (
@@ -3090,23 +3098,44 @@ pub async fn run(cfg: Config) -> Result<()> {
                         .iter()
                         .filter(|v| v.is_some())
                         .count();
+                        let named = {
+                            let (_, _, board, _) = measure_pane(
+                                &mut ocr_engine,
+                                &union_img,
+                                splits_rect,
+                                sr.timer,
+                                rows,
+                                &pre_splits,
+                            )
+                            .await?;
+                            let reading = fingerprint.read(
+                                board.title.as_deref(),
+                                board.subtitle.as_deref(),
+                                &board,
+                            );
+                            reading.named.is_some() || !reading.for_it.is_empty()
+                        };
                         debug!(
-                            "layout {:?} at {:+},{:+}: {n}/{rows} split rows read",
+                            "layout {:?} at {:+},{:+}: {n}/{rows} split rows read, names the board: {named}",
                             layout_names[li], off.0, off.1
                         );
+                        let score = (named, n);
                         let better = match best {
                             None => true,
-                            Some(b) => n > b || (n == b && li == new_layout),
+                            Some(b) => score > b || (score == b && li == new_layout),
                         };
                         if better {
-                            best = Some(n);
+                            best = Some(score);
                             choice = (li, off, sr);
                         }
                     }
                     if choice.0 != new_layout {
+                        let (named, n) = best.unwrap_or((false, 0));
                         info!(
-                            "layout {:?} explains the timer too, but its splits column reads ({}/{rows} rows); taking it over {:?}",
-                            layout_names[choice.0], best.unwrap_or(0), layout_names[new_layout]
+                            "layout {:?} explains the timer too, but its splits column reads ({n}/{rows} rows{}); taking it over {:?}",
+                            layout_names[choice.0],
+                            if named { ", and its pane names the board" } else { "" },
+                            layout_names[new_layout]
                         );
                     }
                     (new_layout, new_off, new_regs) = choice;

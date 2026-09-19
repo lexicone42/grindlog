@@ -298,3 +298,13 @@ category = "Big 20 #23 run"
 match = ["big 20", "big20", "practice run"]
 mode = "board"
 roster = "assets/big20-roster.toml"
+
+[[layouts]]
+# His per-game practice board at its tallest (Moon Crystal: eight segments,
+# the big timer under them, the header above), which the three practice
+# layouts sit below — none of their pane crops reached the header, so no
+# layout could name the board and every run on it was dropped (2026-09-18).
+name = "big20-tall"
+timer = { crop_x = 332, crop_y = 746, crop_w = 284, crop_h = 195 }
+splits = { crop_x = 290, crop_y = 448, crop_w = 380, crop_h = 330 }
+attempts_counter = { crop_x = 545, crop_y = 448, crop_w = 90, crop_h = 50 }
