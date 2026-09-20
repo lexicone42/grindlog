@@ -57,7 +57,8 @@ calibrated for — `locate` and `calibrate` exist to make new ones quick.
   with `--features leptess-ocr` (about 1.4x faster). Root is not required.
   [docs/install.md](docs/install.md) has all three routes.
 
-SQLite, HLS resolution and Twitch chat are compiled in.
+SQLite, HLS resolution and Twitch chat are compiled in; a clean build needs
+`cmake` and a C compiler for the TLS library the chat client links.
 
 ## Setup
 

@@ -193,6 +193,14 @@ fn limit_openmp_threads() {
     eprintln!("could not re-exec with OMP_THREAD_LIMIT=1 ({err}); continuing");
 }
 
+/// Name the process-level TLS crypto provider. Two are compiled in — ring
+/// through reqwest, aws-lc-rs through twitch-irc's rustls default — and
+/// `rustls::ClientConfig::builder()`, which twitch-irc calls, panics with both
+/// present until one is installed. Idempotent.
+fn install_tls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Die quietly on a closed pipe (`report | head`) like a normal unix tool
@@ -201,10 +209,10 @@ async fn main() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     limit_openmp_threads();
+    install_tls_provider();
     // Logs go to stderr, every subcommand: `report --json` prints the site's
-    // JSON on stdout, and a config-time INFO line — the [[games]] roster
-    // load, once live.toml carried one — landed in front of it and the site
-    // build rejected its own report for half a day.
+    // JSON on stdout, and a config-time INFO line (the [[games]] roster load)
+    // in front of it would break the site build.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -248,5 +256,15 @@ async fn main() -> Result<()> {
                 min_score.zip(min_margin),
             ),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_tls_client_config_builds_once_the_provider_is_named() {
+        super::install_tls_provider();
+        super::install_tls_provider();
+        let _ = rustls::ClientConfig::builder();
     }
 }
