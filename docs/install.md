@@ -3,6 +3,9 @@
 The bot needs `ffmpeg` and `tesseract`. This page is the detail for
 getting tesseract working, including without root.
 
+- **cmake and a C compiler** for a clean build: the TLS library behind the
+  chat client (aws-lc, through rustls) compiles from source once per target
+  directory. Ubuntu: `apt install cmake build-essential`; Gentoo has both.
 - **ffmpeg** (video decode)
 - **tesseract** for OCR — any of the following. The in-process build does
   not fully replace the CLI: `locate` always shells out to it, and the

@@ -131,7 +131,9 @@ Three rules that must not be got wrong:
 
 The unit tests run without ffmpeg or tesseract. Anything that needs video
 needs `ffmpeg`; anything that reads splits, the counter or a fallback timer
-frame needs `tesseract` (see [docs/install.md](docs/install.md)).
+frame needs `tesseract` (see [docs/install.md](docs/install.md)). A clean
+build needs `cmake` and a C compiler: the TLS library behind the chat
+client (aws-lc, through rustls) compiles from source once per target dir.
 
 ## Operating facts
 
