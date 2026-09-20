@@ -241,6 +241,8 @@ struct Slot {
     /// was recorded from the database (finished before this tracker looked),
     /// not watched to finish — which is what the rows under it go by.
     recorded_at_ms: Option<i64>,
+    /// Refused under the game's floor on some pass; counted once.
+    implausible: bool,
 }
 
 impl Slot {
@@ -310,7 +312,16 @@ impl Slot {
     /// same length, differing in exactly one character: "4:04:57" beside
     /// "5:04:57". A real completion differs from a comparison in several.
     fn one_digit_from_baseline(&self, cum: i64) -> bool {
-        let Some(b) = self.baseline_value() else {
+        // The comparison the row showed, whether or not it settled as the
+        // baseline: a row chained under a watched row is `Empty` by rule
+        // and keeps its comparison only in the votes.
+        let Some(b) = self.baseline_value().or_else(|| {
+            self.baseline_votes
+                .iter()
+                .filter_map(|(k, v)| k.map(|b| (v.count, b)))
+                .max()
+                .map(|(_, b)| b)
+        }) else {
             return false;
         };
         let (x, y) = (
@@ -674,7 +685,10 @@ impl Marathon {
         // Which event this is, from the names that are legible: a slot the
         // reader has never got a word out of says nothing about the board.
         let legible: Vec<&str> = read.iter().flatten().copied().collect();
-        self.roster = self.rosters.identify(&legible);
+        // An event, once identified, is not dropped by a pass with fewer
+        // legible names: the board is the same board, and the slots its
+        // rows were placed in depend on the roster staying in force.
+        self.roster = self.rosters.identify(&legible).or(self.roster);
         // And then the board, all of it at once and in slot order, because
         // no two slots of one event may come out as the same game.
         self.assigned = self
@@ -807,37 +821,72 @@ impl Marathon {
         self.harvest(at_ms, total_ms)
     }
 
+    /// A row refused under its game's floor, counted once however many
+    /// passes retry it.
+    fn refuse(&mut self, i: usize) {
+        if !self.slots[i].implausible {
+            self.slots[i].implausible = true;
+            self.implausible += 1;
+        }
+    }
+
+    /// A cumulative that reads as minutes and seconds under a row recorded
+    /// at an hour or more has lost its hour digit: the column is monotone
+    /// down the board, so it cannot be under the row above ("33:41" under a
+    /// recorded 4:33:06 is 4:33:41; at 480p the thin hour digit goes on most
+    /// passes late in a run). The hour is the nearest recorded row's, or one
+    /// more where that still leaves it short; with nothing recorded above,
+    /// the hour that puts the reading nearest the row's own comparison or
+    /// the row above's. A repaired value is a vote like any other and faces
+    /// the same guards.
+    fn carry_hour(&self, i: usize, cells: &mut Cells) {
+        let Some(c) = cells.cumulative_ms else { return };
+        if c >= HOUR_MS {
+            return;
+        }
+        let hours = |ms: i64| (ms / HOUR_MS) * HOUR_MS;
+        // A row this tracker watched finish above is a floor: this row's
+        // cumulative is past it, so the hour is that row's or the next.
+        if let Some(prev) = self.slots[..i].iter().rev().find_map(|s| s.recorded) {
+            if prev < HOUR_MS {
+                return;
+            }
+            let mut fixed = c + hours(prev);
+            if fixed < prev {
+                fixed += HOUR_MS;
+            }
+            cells.cumulative_ms = Some(fixed);
+            return;
+        }
+        // Nothing watched above (a tracker started mid-run): the nearest
+        // comparison, this row's own or the row above's, is the previous
+        // run's time here — minutes from this one, not an hour. The hour that
+        // puts the reading nearest it, the reading itself included: a
+        // reading within the hour of a comparison of 1:05 is as read.
+        let Some(near) = self.slots[..=i]
+            .iter()
+            .rev()
+            .find_map(|s| s.baseline_value())
+        else {
+            return;
+        };
+        if near < HOUR_MS {
+            return;
+        }
+        let fixed = [0, hours(near) - HOUR_MS, hours(near), hours(near) + HOUR_MS]
+            .into_iter()
+            .map(|h| c + h)
+            .min_by_key(|f| (f - near).abs())
+            .unwrap_or(c);
+        cells.cumulative_ms = Some(fixed);
+    }
+
     /// File one pass's reading of a row: first settle what the row showed
     /// before anything happened to it, then watch for that to change.
     ///
     /// `alone` says this pass brought at most one row the board did not have,
     /// which is what tells a game just finished from a board that arrived
     /// with its times already on it.
-    /// A cumulative that reads as minutes and seconds under a row recorded
-    /// at an hour or more has lost its hour digit: the column is monotone
-    /// down the board, so it cannot be under the row above ("33:41" under a
-    /// recorded 4:33:06 is 4:33:41; at 480p the thin hour digit goes on most
-    /// passes late in a run). The hour is the nearest recorded row's, or one
-    /// more where that still leaves it short. A repaired value is a vote
-    /// like any other and faces the same guards.
-    fn carry_hour(&self, i: usize, cells: &mut Cells) {
-        let Some(c) = cells.cumulative_ms else { return };
-        if c >= HOUR_MS {
-            return;
-        }
-        let Some(prev) = self.slots[..i].iter().rev().find_map(|s| s.recorded) else {
-            return;
-        };
-        if prev < HOUR_MS {
-            return;
-        }
-        let mut fixed = c + (prev / HOUR_MS) * HOUR_MS;
-        if fixed < prev {
-            fixed += HOUR_MS;
-        }
-        cells.cumulative_ms = Some(fixed);
-    }
-
     fn vote(&mut self, i: usize, cells: Cells, alone: bool, total_ms: Option<i64>, at_ms: i64) {
         if self.slots[i].recorded.is_some() {
             return;
@@ -1052,10 +1101,7 @@ impl Marathon {
             // bracket anywhere is the mark too; a game with brackets in its
             // name ("SMB3 (Warpless)") carries its own and is not caught,
             // and a roster match keeps a row whatever it looks like.
-            let bracketed = {
-                let t = read.trim();
-                t.starts_with('(') || (t.ends_with(')') && !t.contains('('))
-            };
+            let bracketed = bracketed(&read);
             // On an ordered board the odd slots are the category rows by
             // construction, whatever their name came back as ("au" for
             // "(Any%)", which the bracket rule cannot see).
@@ -1076,9 +1122,6 @@ impl Marathon {
             // was left — the reading stands and is counted.
             let canonical = self.canonical(i).map(str::to_string);
             let unmatched = canonical.is_none();
-            if unmatched {
-                self.unmatched += 1;
-            }
             let game = canonical.unwrap_or_else(|| read.clone());
             // Under half his own best for the game this is a misread, not a
             // completion: left unrecorded, so a later pass reading the row
@@ -1088,8 +1131,11 @@ impl Marathon {
                 .get(&game)
                 .is_some_and(|floor| segment_ms < *floor)
             {
-                self.implausible += 1;
+                self.refuse(i);
                 continue;
+            }
+            if unmatched {
+                self.unmatched += 1;
             }
             let as_read = (game != read).then_some(read);
             self.slots[i].recorded = Some(cum);
@@ -1217,10 +1263,7 @@ impl Marathon {
             let Some(read) = self.slots[i].name().map(str::to_string) else {
                 continue;
             };
-            let bracketed = {
-                let t = read.trim();
-                t.starts_with('(') || (t.ends_with(')') && !t.contains('('))
-            };
+            let bracketed = bracketed(&read);
             // On an ordered board the odd slots are the category rows by
             // construction, whatever their name came back as: "(Any%)" read
             // "au" on a live pass and its 0:30 was filed as a game.
@@ -1249,7 +1292,7 @@ impl Marathon {
                 .get(&game)
                 .is_some_and(|floor| segment_ms < *floor)
             {
-                self.implausible += 1;
+                self.refuse(i);
                 continue;
             }
             if unmatched {
@@ -1374,9 +1417,10 @@ impl Marathon {
     ///
     /// A cumulative board is one equation per row: this row's cumulative is
     /// the row above's plus this row's segment, and the board prints both
-    /// sides. So when the row above is one THIS tracker watched finish — a
-    /// cumulative it measured, not a comparison time it found already
-    /// printed — and the candidate's own segment column is that difference to
+    /// sides. So when the row above is anchored — a cumulative THIS tracker
+    /// watched it reach, or on an ordered board the settled comparison of a
+    /// row that never changed, behind the clock (`expected_segment`) — and
+    /// the candidate's own segment column is that difference to
     /// the second, the candidate is not a number read off the wrong column or
     /// a digit slipped in the cumulative: it continues a chain the tracker
     /// built, and the row's other column agrees. Both columns would have to be
@@ -1477,10 +1521,10 @@ impl Marathon {
     /// error from taking a real one down with it. A row recorded BELOW this
     /// one, at a time earlier than this candidate, contradicts it — and one
     /// of the two is wrong. Where the board's own arithmetic vouches for the
-    /// candidate, the row below is the one to doubt: the chain is a
-    /// cumulative this tracker watched the row above reach, plus this row's
-    /// own segment column, two columns of static text agreeing to the
-    /// second. Nothing checked the row below in the same way.
+    /// candidate, the row below is the one to doubt: the chain is the row
+    /// above's anchor (`board_vouches`), plus this row's own segment
+    /// column, two columns of static text agreeing to the second. Nothing
+    /// checked the row below in the same way.
     ///
     /// Measured: one board's last row printed a comparison time of 3:24:31
     /// for a game the runner never played, it was recorded, and Rockin'
@@ -1519,10 +1563,12 @@ impl Marathon {
                 // Only a row that has never CHANGED since (a row that has
                 // shown another time since its baseline finished after the
                 // tracker looked, and its baseline was its comparison), and
-                // only a baseline BEHIND the clock: one ahead of it is the
-                // comparison of a row not yet reached — Faria's 2:01:38 with
-                // the clock at 1:50 vouched for Monster Party's 2:15:10 from
-                // the day before.
+                // only a baseline BEHIND the clock (the caller's monotone
+                // clock, extrapolated over a pass the timer did not read):
+                // one ahead of it is the comparison of a row not yet
+                // reached, and vouches for the previous run's time on the
+                // row below (Faria's 2:01:38 with the clock at 1:50 for
+                // Monster Party's 2:15:10).
                 (self.ordered() && !self.slots[i - 1].cumulative_votes.values().any(settled))
                     .then(|| self.slots[i - 1].baseline_value())
                     .flatten()
@@ -1618,12 +1664,7 @@ impl Marathon {
                     .map(|k| 2 * k)
             })
             .collect();
-        let bracketed = |i: usize| {
-            names[i].as_deref().is_some_and(|t| {
-                let t = t.trim();
-                t.starts_with('(') || (t.ends_with(')') && !t.contains('('))
-            })
-        };
+        let bracketed = |i: usize| names[i].as_deref().is_some_and(bracketed);
         let placed: Vec<(usize, usize)> = out
             .iter()
             .enumerate()
@@ -1731,9 +1772,8 @@ impl Marathon {
     /// position, one game of this board, which a fixed board never shows. A
     /// row unread in the middle of a fixed board puts the rows under it one
     /// slot down, not two, and continuing under those would give the pane's
-    /// footer — read as an eleventh row now and then — a slot of its own:
-    /// the Arcathlon audit recorded a game never played the first time this
-    /// continued unconditionally.
+    /// footer — read as an eleventh row now and then — a slot of its own,
+    /// and a game never played on the record.
     ///
     /// An anchor has to keep the board's spacing: a row anchored to a slot
     /// no further below the previous anchor's than the rows between them
@@ -1963,6 +2003,15 @@ pub fn clean_name(raw: &str) -> Option<String> {
 /// decision, and it is made here.
 pub fn row_cumulative_ms(row: &BoardRow) -> Option<i64> {
     read_cells(row).cumulative_ms
+}
+
+/// A name that is a bracketed category row: it opens with a bracket, or
+/// closes with one and opens with none (OCR loses the opening bracket far
+/// more often than the closing one). A game with brackets in its name
+/// ("SMB3 (Warpless)") carries both and is not caught.
+fn bracketed(name: &str) -> bool {
+    let t = name.trim();
+    t.starts_with('(') || (t.ends_with(')') && !t.contains('('))
 }
 
 /// Is this cumulative where the marathon total stands right now? At the
@@ -2478,14 +2527,25 @@ mod tests {
             .observe(&pass(&["1:07", "1:07"]), 181_000, Some(67_000))
             .is_empty());
         assert_eq!(m.implausible(), 1);
-        // Read right, the row files.
+        // Retried on a third pass: still one row refused, and a refused row
+        // is not an unmatched one.
         assert!(m
-            .observe(&pass(&["8:14", "8:14"]), 241_000, Some(494_000))
+            .observe(&pass(&["1:07", "1:07"]), 201_000, Some(67_000))
             .is_empty());
-        let seen = m.observe(&pass(&["8:14", "8:14"]), 301_000, Some(494_000));
+        assert_eq!(m.implausible(), 1);
+        assert_eq!(m.unmatched(), 0);
+        // Read right, the row files once the right reading has as many
+        // votes as the refused one.
+        for t in [241_000, 301_000] {
+            assert!(m
+                .observe(&pass(&["8:14", "8:14"]), t, Some(494_000))
+                .is_empty());
+        }
+        let seen = m.observe(&pass(&["8:14", "8:14"]), 361_000, Some(494_000));
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].game, "Faria");
         assert_eq!(seen[0].segment_ms, 494_000);
+        assert_eq!(m.unmatched(), 1, "counted when filed, once");
     }
 
     /// A completion is filed under the roster's name for the game, whatever
@@ -3964,12 +4024,11 @@ mod tests {
 
     /// An event is taken up the way it is let go: on three passes agreeing.
     ///
-    /// The five passes are VOD 2830524439 at t=18190..18430 s, verbatim,
-    /// half an hour after the marathon ended and while he was running Ninja
-    /// Gaiden. Their labels are damaged into words of their own and stop
-    /// matching each other, and on an earlier build three of them read as a
-    /// marathon board and started an event that recorded "Act 1" as a
-    /// finished game of 47.5 s.
+    /// The five passes are VOD 2830524439 at t=18190..18430 s, verbatim: a
+    /// Ninja Gaiden splits pane half an hour after a marathon, its labels
+    /// damaged into words of their own that stop matching each other. Read
+    /// as a marathon board, three of them start an event that records "Act
+    /// 1" as a finished game of 47.5 s.
     ///
     /// Now none of them does — the column they are read over tops out at
     /// 11:37 — so the take-up count is the second line of defence rather
@@ -4773,5 +4832,106 @@ mod tests {
         assert_eq!(seen[0].game, "Moon Crystal");
         assert_eq!(seen[0].segment_ms, 19 * 60_000 + 11_000);
         assert_eq!(seen[0].cumulative_ms, 4 * h + 38 * 60_000 + 17_000);
+    }
+
+    /// After a restart nothing above the runner is recorded, and a
+    /// cumulative that lost its hour has no recorded row to take it from.
+    /// The row's own comparison is the previous run's time here, minutes
+    /// away: the hour is the one that puts the reading nearest it.
+    #[test]
+    fn after_a_restart_a_cumulative_that_lost_its_hour_takes_it_from_the_comparison() {
+        let mut m = race_tracker();
+        let pass = |steel: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Excitebike", &["9:11", "1:17:13"]),
+                    row("(Selection A)", &["0:30", "1:17:43"]),
+                    row("Uninvited", &["13:20", "1:31:03"]),
+                    row("(Any%)", &["0:42", "1:31:45"]),
+                    row("Steel Legion", steel),
+                    row("(Any% All Bosses)", &["0:38", "1:52:52"]),
+                    row("Moon Crystal", &["22:25", "5:04:57"]),
+                ],
+            )
+        };
+        let h = 3_600_000;
+        let cmp = ["16:07", "1:52:14"];
+        for i in 0..3 {
+            assert!(m
+                .observe(
+                    &pass(&cmp),
+                    1_000 + i * 60_000,
+                    Some(h + 35 * 60_000 + i * 60_000)
+                )
+                .is_empty());
+        }
+        // He finishes at 1:45:47; the hour digit never reads.
+        let done = ["14:01", "45:47"];
+        let total = Some(h + 50 * 60_000);
+        assert!(m.observe(&pass(&done), 241_000, total).is_empty());
+        let seen = m.observe(&pass(&done), 301_000, total);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Steel Legion");
+        assert_eq!(seen[0].cumulative_ms, h + 45 * 60_000 + 47_000);
+        assert_eq!(seen[0].segment_ms, 14 * 60_000 + 1_000);
+    }
+
+    /// Rows above the first row the names place count back from it: a game
+    /// whose name reads as nothing the roster folds, above a placed one,
+    /// has the slot the board's order gives it and is filed as that game.
+    #[test]
+    fn a_row_above_the_first_placed_one_takes_the_slot_the_order_gives_it() {
+        let mut m = race_tracker();
+        let pass = |hyd: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Wyrm Tide", hyd),
+                    row("", &[]),
+                    row("Yoshi", &[]),
+                    row("(A Type Any%)", &[]),
+                    row("Celeste Mario", &[]),
+                    row("Moon Crystal", &[]),
+                ],
+            )
+        };
+        let h = 3_600_000;
+        assert!(m
+            .observe(&pass(&[]), 1_000, Some(3 * h + 53 * 60_000))
+            .is_empty());
+        assert!(m
+            .observe(&pass(&[]), 61_000, Some(3 * h + 54 * 60_000))
+            .is_empty());
+        let done = ["18:52", "3:54:02"];
+        let total = Some(3 * h + 54 * 60_000 + 30_000);
+        assert!(m.observe(&pass(&done), 121_000, total).is_empty());
+        let seen = m.observe(&pass(&done), 181_000, total);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Hydlide");
+        assert_eq!(seen[0].slot, 30, "the sixteenth game's row");
+        assert_eq!(seen[0].segment_ms, 18 * 60_000 + 52_000);
+    }
+
+    /// The one-digit guard reads the comparison from the votes when the
+    /// baseline settled as `Empty`: a row chained under a watched row keeps
+    /// its comparison only there.
+    #[test]
+    fn the_one_digit_guard_sees_a_comparison_that_never_settled() {
+        let mut slot = Slot::default();
+        let h = 3_600_000;
+        let misread = 4 * h + 4 * 60_000 + 57_000;
+        assert!(!slot.one_digit_from_baseline(misread));
+        slot.baseline = Baseline::Empty;
+        slot.baseline_votes.insert(
+            Some(5 * h + 4 * 60_000 + 57_000),
+            Vote {
+                count: 1,
+                first_ms: 0,
+                last_ms: 0,
+            },
+        );
+        assert!(slot.one_digit_from_baseline(misread));
+        assert!(!slot.one_digit_from_baseline(4 * h + 38 * 60_000 + 17_000));
     }
 }

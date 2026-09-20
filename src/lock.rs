@@ -5,12 +5,12 @@
 //! to carry between them: `layout_locked`, `ever_locked`, `board_locked`,
 //! the board threshold and grant time, the dark-frame count, the quality
 //! window, the clipped streak, the board probe's hit count and cadence.
-//! Every defect of the race board's first live day was an interaction
-//! between two of them: timer candidates re-granting a lock the board had
-//! granted, the grant's geometry pass under a board lock, the quality judge
-//! unlocking a board lock over a timer it was never meant to read. This is
-//! those variables as one value with explicit transitions, in the shape
-//! `state.rs` gives the run: pure, and tested on its own.
+//! Its defects were interactions between two of them: timer candidates
+//! re-granting a lock the board had granted, the grant's geometry pass
+//! under a board lock, the quality judge unlocking a board lock over a
+//! timer it was never meant to read. This is those variables as one value
+//! with explicit transitions, in the shape `state.rs` gives the run: pure,
+//! and tested on its own.
 //!
 //! Three states:
 //!
@@ -65,9 +65,8 @@ pub enum Unlock {
     NoMarathon,
 }
 
-/// The thresholds. Defaults are the values the frame loop has carried
-/// since each rule was added; `dark_frames` comes from
-/// `layout_search.dark_frames_search`.
+/// The thresholds. The defaults are the frame loop's; `dark_frames` comes
+/// from `layout_search.dark_frames_search`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LockCfg {
     pub dark_frames: u32,
