@@ -99,8 +99,8 @@ struct RawEvent {
     /// not the game's name: his LiveSplit splits say "Flintstones" and "Kid
     /// Klown" and "Celeste Mario" for games whose names run to eight words.
     /// A damaged reading of a short split name is within a letter or two of
-    /// the split name and nowhere near the full one — "Funtstones", "Kid
-    /// Kiown" and a bare "World" were filed as read for want of this. Where
+    /// the split name and nowhere near the full one ("Funtstones", "Kid
+    /// Kiown", a bare "World"). Where
     /// given, an event's rows are matched against these; the full names are
     /// what the runs are filed under and the site shows. Optional, and by
     /// position like `goals`: same length or nothing.

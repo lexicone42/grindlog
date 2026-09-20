@@ -324,12 +324,11 @@ fn big20_prep(
     race.sort_by_key(|r| (r.started_at_ms, r.last_timer_ms));
     // A run starts where the clock had nothing before the row — its
     // cumulative is its own segment, the first game of a fresh set of
-    // splits — or after hours away from the board. NOT where the clock
-    // goes backwards from one row to the next: a row is filed a pass or two
-    // after it ends, sometimes twenty minutes after when its cells read
-    // badly, and then sorts after a row that ended later on the clock. That
-    // rule cut one run into three on the page the first evening it was
-    // tracked live.
+    // splits — or after hours away from the board. Not where the clock goes
+    // backwards from one row to the next: a row is filed a pass or two after
+    // it ends, sometimes much later when its cells read badly, and then
+    // sorts after a row that ended later on the clock; that rule cut one run
+    // into three.
     const RUN_START_SLACK_MS: i64 = 60_000;
     const RUN_GAP_MS: i64 = 2 * 3_600_000;
     let mut groups: Vec<Vec<&db::OtherRun>> = Vec::new();

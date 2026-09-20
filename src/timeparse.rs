@@ -59,15 +59,13 @@ pub fn parse_timer_text(raw: &str) -> Option<i64> {
 }
 
 /// The marathon total as tesseract reads it off the big clock at 480p, where
-/// [`parse_timer_text`] declines. Measured on a full run of the Big 20: a
-/// third of the read frames lost the tenths digit and kept its separator
-/// ("15:08:", "15:05.", "3:55:28."), a tenth read the colon as a point
-/// ("15.16" for 15:16), and a few came back as bare digits ("1526"). The
-/// total is wanted to the second, and a marathon total under a minute is not
-/// a reading of anything — a run is minutes in before its first row can be
-/// filed — so the point in "15.16" can only have been the colon. Only for
-/// the total: the tracked game's own timer runs from zero and "15.16" is a
-/// time it does show.
+/// [`parse_timer_text`] declines: a lost tenths digit with its separator kept
+/// ("15:08:", "15:05.", "3:55:28.") on a third of the read frames, the colon
+/// read as a point ("15.16" for 15:16) on a tenth, bare digits ("1526") on a
+/// few. The total is wanted to the second, and a total under a minute is not
+/// a reading of anything, so the point in "15.16" can only have been the
+/// colon. Only for the total: the tracked game's own timer runs from zero and
+/// "15.16" is a time it does show.
 pub fn parse_marathon_total(raw: &str) -> Option<i64> {
     let t = raw.trim().trim_end_matches(['.', ':']);
     if t.is_empty() {

@@ -279,10 +279,10 @@ match = ["arcath", "randomized"]
 # to take the title rows in with the time columns.
 [[layouts]]
 name = "big20-race"
-# The marathon clock is right-aligned and grows to the LEFT as the hours
-# come: a crop that fitted "10:18.3" cut the hour digit of "3:55:28.3" and
-# tesseract read "155:09.3". Wide enough for h:mm:ss.d with the re-anchor's
-# drift on top (measured +22 px); an unused margin costs nothing.
+# The marathon clock is right-aligned and grows to the left as the hours
+# come: a crop that fits "10:18.3" cuts the hour digit of "3:55:28.3"
+# ("155:09.3"). Wide enough for h:mm:ss.d plus the re-anchor's drift (up to
+# about 22 px); an unused margin costs nothing.
 timer = { crop_x = 320, crop_y = 950, crop_w = 262, crop_h = 62 }
 splits = { crop_x = 128, crop_y = 450, crop_w = 492, crop_h = 465 }
 
@@ -300,10 +300,10 @@ mode = "board"
 roster = "assets/big20-roster.toml"
 
 [[layouts]]
-# His per-game practice board at its tallest (Moon Crystal: eight segments,
-# the big timer under them, the header above), which the three practice
-# layouts sit below — none of their pane crops reached the header, so no
-# layout could name the board and every run on it was dropped (2026-09-18).
+# His per-game practice board at its tallest (eight segments, the big timer
+# under them, the header above). The three layouts above sit lower: none of
+# their pane crops reaches this board's header, so none can name it, and a
+# run on a board nothing names is dropped at close.
 name = "big20-tall"
 timer = { crop_x = 332, crop_y = 746, crop_w = 284, crop_h = 195 }
 splits = { crop_x = 290, crop_y = 448, crop_w = 380, crop_h = 330 }

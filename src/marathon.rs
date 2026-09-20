@@ -813,16 +813,13 @@ impl Marathon {
     /// `alone` says this pass brought at most one row the board did not have,
     /// which is what tells a game just finished from a board that arrived
     /// with its times already on it.
-    /// A cumulative that reads as minutes and seconds under a row this
-    /// tracker recorded at an hour or more has lost its hour digit: the
-    /// column is monotone down the board, so it cannot be under the row
-    /// above. At 480p the theme's thin hour digit goes on most passes late
-    /// in a run ("33:41" for 4:33:41 on ten passes running at the finish),
-    /// and a cumulative under an hour is incoherent below a recorded
-    /// 4:33:06 and never a completion. The hour is the nearest recorded
-    /// row's, or one more where that still leaves it short; nothing else
-    /// fits between the rows. A repaired value is a vote like any other and
-    /// faces the same guards.
+    /// A cumulative that reads as minutes and seconds under a row recorded
+    /// at an hour or more has lost its hour digit: the column is monotone
+    /// down the board, so it cannot be under the row above ("33:41" under a
+    /// recorded 4:33:06 is 4:33:41; at 480p the thin hour digit goes on most
+    /// passes late in a run). The hour is the nearest recorded row's, or one
+    /// more where that still leaves it short. A repaired value is a vote
+    /// like any other and faces the same guards.
     fn carry_hour(&self, i: usize, cells: &mut Cells) {
         let Some(c) = cells.cumulative_ms else { return };
         if c >= HOUR_MS {
@@ -856,18 +853,15 @@ impl Marathon {
         // from the moment this tracker starts, so it never reaches
         // `harvest`, where `known` is otherwise applied.
         let already = observed.is_some_and(|c| self.known.contains(&c));
-        // A row whose first time comes under a row THIS tracker recorded, and
-        // exceeds it, finished after a game the tracker watched — on its
-        // watch, not before it looked. Its time is a completion to judge,
-        // not a baseline. Measured: the race board's "-" cells often do not
-        // read at 480p, so a game's row carried no vote at all until its time
-        // appeared, and that time was then taken for a baseline; Crisis
-        // Force, read "11:30 / 51:59" on four passes under a recorded 40:28,
-        // was never filed, nor the pinned last row of the run. Never the
-        // first row, where the arithmetic holds of any number at all, and
-        // only under a row this tracker WATCHED finish: a row recorded from
-        // the database after a restart was finished before the bot looked,
-        // and so may the rows under it have been.
+        // A row whose first time comes under a row this tracker watched
+        // finish, and exceeds it, finished on the tracker's watch: its time
+        // is a completion to judge, not a baseline. The race board's "-"
+        // cells often do not read at 480p, so a row can carry no vote until
+        // its time appears, and that time was taken for a baseline ("11:30 /
+        // 51:59" under a recorded 40:28, never filed). Never the first row,
+        // where the arithmetic holds of any number; and never under a row
+        // recorded from the database after a restart, which was finished
+        // before the tracker looked, as the rows under it may have been.
         let chained = i > 0
             && self.slots[i - 1].recorded_at_ms.is_some()
             && observed.is_some_and(|c| self.arithmetic_backs(i, c));
@@ -876,8 +870,8 @@ impl Marathon {
         // happens to stand near while the row's baseline is still unsettled
         // is not a game that just finished: it was on the board before. So
         // there "just now" speaks only for a row that has never yet shown a
-        // time. Measured: a tracker started with the total at 51:00 filed
-        // Crisis Force's 51:59 comparison as today's run on its second pass.
+        // time (a tracker started with the total at 51:00 otherwise files a
+        // 51:59 comparison on its second pass).
         let ordered = self.roster.is_some_and(|e| self.rosters.ordered(e));
         let slot = &mut self.slots[i];
         let fresh = !ordered || slot.baseline_votes.keys().all(|k| k.is_none());
@@ -909,8 +903,7 @@ impl Marathon {
                 // comparison of 1:12:28 that comes back "12:28" on half the
                 // passes would otherwise split its votes, settle on
                 // whichever pair came first, and then meet its other half as
-                // a change — and a comparison time taken for a completion is
-                // yesterday's run filed as today's.
+                // a change — a comparison time taken for a completion.
                 let observed = match observed {
                     Some(c) => {
                         let twin = slot
@@ -1018,14 +1011,14 @@ impl Marathon {
                         // either the marathon total, or the row's own two
                         // columns against the row above it.
                         && (self.total_agrees(i, *c, total_ms) || self.board_vouches(i, *c))
-                        // A row the total ALONE vouches for — nothing recorded
+                        // A row the total alone vouches for — nothing recorded
                         // above it to check the arithmetic against — must not
                         // be within a digit of its own comparison: the pinned
-                        // last row's 5:04:57 from the day before read
-                        // "4:04:57" on two passes, the clock passed 4:05 with
-                        // the row's neighbour still unrun, and yesterday's
-                        // Moon Crystal was filed as today's; today's, at
-                        // 4:38:17, was then refused as already recorded.
+                        // last row's comparison 5:04:57 read "4:04:57" on two
+                        // passes with its neighbour still unrun, the clock
+                        // passed 4:05, and the previous run's time was filed
+                        // as this run's, whose real completion was then
+                        // refused as already recorded.
                         && (self.board_vouches(i, *c)
                             || self.arithmetic_backs(i, *c)
                             || !self.slots[i].one_digit_from_baseline(*c))
@@ -1064,8 +1057,8 @@ impl Marathon {
                 t.starts_with('(') || (t.ends_with(')') && !t.contains('('))
             };
             // On an ordered board the odd slots are the category rows by
-            // construction, whatever their name came back as: "(Any%)" read
-            // "au" on a live pass and its 0:30 was filed as a game.
+            // construction, whatever their name came back as ("au" for
+            // "(Any%)", which the bracket rule cannot see).
             let category_row = self.ordered() && i % 2 == 1;
             if category_row || (self.canonical(i).is_none() && bracketed) {
                 self.slots[i].recorded = Some(cum);
@@ -1179,17 +1172,12 @@ impl Marathon {
         }
     }
 
-    /// Rows the board has already answered for. A row this tracker has
-    /// watched finish — recorded, with a settled segment beside it — fixes
-    /// the row above it exactly: that row ended at the recorded cumulative
-    /// less the segment, because the segment is the time between the two.
-    /// So a game whose own cumulative column never reads twice the same way
-    /// is filed from the row under it. Measured on the race board at 480p: a
-    /// game's cumulative came back "1:38:25", "1:35:28", "1:35:25" on
-    /// successive passes (5, 6 and 8 traded for each other), never the same
-    /// twice, and the game was never filed — while its transition row under
-    /// it read "0:41 / 1:36:07" on every pass. A full run of the twenty
-    /// filed four games by the columns alone.
+    /// Rows the board has already answered for. A recorded row with a
+    /// settled segment beside it fixes the row above it: that row ended at
+    /// the recorded cumulative less the segment. So a game whose own
+    /// cumulative column never reads twice the same way ("1:38:25",
+    /// "1:35:28", "1:35:25" on successive passes at 480p) is filed from the
+    /// row under it, whose "0:41 / 1:36:07" read the same on every pass.
     ///
     /// Bottom up, so one well-read row low on the board answers for every
     /// unrecorded row above it in turn. A derived cumulative is held to the
@@ -1457,17 +1445,14 @@ impl Marathon {
         let Expect::Segment(exp) = self.expected_segment(i, cum) else {
             return false;
         };
-        // Refused only by a column that NEVER agreed with the arithmetic.
-        // At 480p a segment of 11:14 came back "13:14" on four passes and
-        // "12:14" on five beside twelve of "11:14", every one of them
-        // settled, and any settled disagreement refused the row for the
-        // rest of the run; then 11:16 came back "13:16" on six passes and
-        // "11:16" on two, and the strongest reading refused it — where the
-        // cumulative was right on thirteen passes, the delta column agreed,
-        // and `segment_for` would have waited its patience out and filed
-        // the arithmetic's 11:16. The comparison-time case this guards
-        // against ("20:34 throughout" where the arithmetic wanted 16:16)
-        // has no agreeing reading at all.
+        // Refused only by a column no settled reading of which agrees with
+        // the arithmetic — the comparison-time case, "20:34 throughout"
+        // where 16:16 was wanted. At 480p the column splits ("13:14" on four
+        // passes, "12:14" on five, "11:14" on twelve; "13:16" on six against
+        // "11:16" on two), and a settled minority, or even a majority, that
+        // disagrees does not refuse a row whose cumulative is right:
+        // `segment_for` waits its patience out and files the arithmetic's
+        // value.
         let mut agrees = false;
         let mut disagrees = false;
         for ((c, s), v) in &self.slots[i].segment_votes {
@@ -1519,17 +1504,15 @@ impl Marathon {
     /// settled: the first row's segment is its cumulative, since the marathon
     /// total starts at zero.
     fn expected_segment(&self, i: usize, cum: i64) -> Expect {
-        // On an ordered board the row above a row that has CHANGED is a
-        // finished row (the games run in order), so what it showed when the
-        // tracker first looked — its settled baseline — is a real
-        // cumulative and anchors the arithmetic where nothing recorded does.
-        // A candidate is always a change from its own row's baseline (a
-        // reading equal to the baseline never gets this far), so the row
-        // above is never the unrun comparison of an unrun row. Measured: a
-        // restart mid-run left every row above the runner as a baseline,
-        // and Steel Legion, finished at 1:45:47 with its cumulative read
-        // three different ways in three minutes, had only the total's
-        // three-minute window to be filed in, and missed it.
+        // On an ordered board the row above a row that has changed is a
+        // finished row (the games run in order), so its settled baseline is
+        // a real cumulative and anchors the arithmetic where nothing
+        // recorded does. A candidate is always a change from its own row's
+        // baseline, so the row above is never the unrun comparison of an
+        // unrun row. After a restart every row above the runner is such a
+        // baseline, and without this the next completion has only the
+        // total's three-minute window, which a cumulative read three ways in
+        // three minutes misses.
         let prev = match i {
             0 => 0,
             _ => match self.slots[i - 1].settled_cumulative().or_else(|| {
@@ -1609,11 +1592,11 @@ impl Marathon {
     /// names on THIS pass, one game per row, and never from where the row
     /// sits in the window. No scroll to follow and no stale slot to clear:
     /// the pinned last row is the last game and sits at 2(n − 1) from the
-    /// first pass to the last. Measured before this: the pinned row moved
-    /// slots each time the board scrolled, a nameless transition row was
-    /// filed under its stale name as a 0:30 "Moon Crystal", and a transition
-    /// row that never got a slot put the arithmetic of the rows either side
-    /// off by exactly its length.
+    /// first pass to the last. Placed by the window instead, the pinned row
+    /// moved slots each time the board scrolled and left its name on a slot
+    /// a nameless transition row was then filed under, and a transition row
+    /// that never got a slot put the arithmetic of the rows either side off
+    /// by exactly its length.
     ///
     /// Rows the names do not place — a bracketed row, a row whose name did
     /// not read — take the slot between the placed rows either side where
@@ -4551,7 +4534,7 @@ mod tests {
     /// comparison of 1:12:28 comes back "12:28" on half the passes, and the
     /// two readings are one baseline, not a baseline and a change: the
     /// marathon total passing 1:12 while the row is still unrun must not
-    /// file yesterday's Kid Klown as today's. The row's real time, when it
+    /// file the previous run's Kid Klown as this run's. The row's real time, when it
     /// comes, is the change.
     #[test]
     fn a_comparison_read_with_and_without_its_hour_is_one_baseline() {
@@ -4570,8 +4553,8 @@ mod tests {
         };
         let pass = |kid: &[&str]| pass_above(&["11:30", "51:59"], &["0:30", "52:29"], kid);
         let h = 3_600_000;
-        // He is deep in Crisis Force, slower than yesterday; the rows below
-        // show yesterday's run, with and without the hour by turns.
+        // He is deep in Crisis Force, slower than the previous run; the rows
+        // below show that run, with and without the hour by turns.
         let reads = [
             ["19:58", "1:12:28"],
             ["19:58", "12:28"],
@@ -4746,7 +4729,7 @@ mod tests {
     /// The pinned last row shows the previous run's time all day and its
     /// neighbour is unrun until the end, so nothing checks its arithmetic:
     /// a comparison of 5:04:57 read "4:04:57" on two passes, and the total
-    /// passing 4:05 filed yesterday's Moon Crystal as today's. A row the
+    /// passing 4:05 filed the previous run's Moon Crystal as this run's. A row the
     /// total alone vouches for is not filed within a digit of its own
     /// comparison; the real completion, 4:38:17, is.
     #[test]

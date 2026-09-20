@@ -3065,27 +3065,23 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // layouts' timers where this one's is installed one of THEM,
                 // whose crops bound another pane — the reads that followed
                 // had no title and no names.
-                // And before the count of rows, whether the layout's pane NAMES
+                // And before the count of rows, whether the layout's pane names
                 // the board: a layout whose header crop reads the board's name
                 // (the tracked game's, or one the rosters know) over one that
-                // reads a column of times under a header it cannot see. The
-                // Ninja Gaiden layout's splits crop happened to read six rows
-                // of a Moon Crystal practice board and won the lock for three
-                // hours; its header crop never saw the name, every run on that
-                // board was one nothing named, and none was filed.
+                // reads a column of times under a header it cannot see — a run
+                // on a board nothing names is dropped at close, so the layout
+                // that reads the most rows but not the name records nothing.
                 if regs.len() > 1 && new_regs.splits.is_some() && !lock.is_board() {
                     let rows = shared.acts.len().max(1) as u32;
                     let win_t = new_regs.timer;
                     let mut best: Option<(bool, usize)> = None;
                     let mut choice = (new_layout, new_off, new_regs.clone());
                     for (li, r) in regs.iter().enumerate() {
-                        // Where this layout's OWN timer reads, when its probe
+                        // Where this layout's own timer reads, when its probe
                         // candidate has one: two layouts' timers can sit far
                         // apart on the canvas, and putting a layout's timer
                         // where the winner's is then puts its pane off the
-                        // board — the tall practice layout, shifted to the
-                        // Ninja Gaiden layout's timer, read nothing, and the
-                        // Ninja Gaiden layout kept a board it could not name.
+                        // board, where it reads nothing.
                         let own = cands
                             .iter()
                             .filter(|c| c.layout == li && c.streak > 0)
