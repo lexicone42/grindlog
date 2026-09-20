@@ -4,7 +4,8 @@ Notes for an AI assistant (or a new contributor) working in this repository.
 The README explains what the bot does and how to run it; this file is about
 how to change it without breaking the deployment that depends on it.
 
-Deeper detail lives in `docs/`: [detection](docs/detection.md) (how video
+Deeper detail lives in `docs/`: [overview](docs/overview.md) (the map:
+pipeline, kinds of record, glossary, reading order), [detection](docs/detection.md) (how video
 becomes runs, and why each step is shaped that way),
 [operations](docs/operations.md) (running the deployed bot),
 [marathons](docs/marathons.md) (the ten-game days and their own tooling),

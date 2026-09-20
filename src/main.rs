@@ -1,3 +1,11 @@
+//! The `ngtwitchtimer` binary: one subcommand per job. `run` is the bot
+//! (`app.rs`); `report` projects the database for the site and the feed
+//! (`report.rs`, `api.rs`); `locate`, `calibrate` and `pane` are the layout
+//! tools (`locate.rs`, `calibrate.rs`, `pane.rs`); `glyphs` trains and tests
+//! the timer's template reader (`glyph.rs`); `audit` replays the marathon
+//! tracker over recorded board logs (`audit.rs`). Logging goes to stderr so
+//! `report --json` stays valid JSON on stdout. See docs/overview.md.
+
 mod api;
 mod app;
 mod audit;

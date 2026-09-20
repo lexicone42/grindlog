@@ -44,6 +44,9 @@ Rust, no Python in the toolchain. The bot shells out only to `ffmpeg` and
 `tesseract`; the scripts also use `sqlite3`, `curl`, `jq`, `flock` and the
 AWS CLI for the site deploy.
 
+**How it works**, in one page with a diagram and a glossary:
+[docs/overview.md](docs/overview.md).
+
 **Status:** in daily use. Expect rough edges on layouts it was not
 calibrated for — `locate` and `calibrate` exist to make new ones quick.
 
@@ -127,6 +130,7 @@ gets a new version path.
 
 | | |
 |---|---|
+| [docs/overview.md](docs/overview.md) | the map: the pipeline, the three kinds of record, a glossary, a reading order |
 | [docs/detection.md](docs/detection.md) | how video becomes runs, and why each step is shaped that way |
 | [docs/operations.md](docs/operations.md) | running the deployed bot: scripts, schedule, known footguns |
 | [docs/marathons.md](docs/marathons.md) | the ten-game days, and the tooling that is theirs alone |
