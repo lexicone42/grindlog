@@ -104,8 +104,10 @@ under a recorded 40:28, was never filed for this.
 **The hour carried down.** A cumulative reading as minutes and seconds
 under a recorded row past the hour has lost its hour digit — the column is
 monotone down the board — and takes the hour from the nearest recorded row
-above (one more where that still leaves it short). On the finish board
-every total read "33:41" for 4:33:41 for ten passes running.
+above (one more where that still leaves it short). With nothing recorded
+above — a tracker started mid-run — the hour is the one that puts the
+reading nearest the row's own comparison, or the row above's. On the
+finish board every total read "33:41" for 4:33:41 for ten passes running.
 
 **Filed from the row below.** At 480p the theme trades 5, 6 and 8 for each
 other, so a game's cumulative can come back "1:38:25", "1:35:28", "1:35:25"

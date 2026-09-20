@@ -323,11 +323,9 @@ pub(crate) fn title_lines(
     // the category on its second, the attempt count at the right of the
     // second. So of the header lines with enough letters to be a name, the
     // lowest two are (game, category) and a lone one is the game. Density
-    // decided this until 2026-09-16, yielding to the line above only when the
-    // denser line read as a category by its words; "Traditional" does not, so
-    // Mini Putt's pane answered "what is this timing?" with its category and
-    // the game one line up went unread. Density cannot be the tie-break
-    // either: "Faria" over "Save Princess / Dungeon 1" is a short game over a
+    // cannot decide it: "Traditional" has no category word, so by density
+    // Mini Putt's pane answers with its category and the game one line up
+    // goes unread. Density cannot be the tie-break either: "Faria" over "Save Princess / Dungeon 1" is a short game over a
     // wordy category with no category word in it. What does tell a game from
     // a line above it is a category UNDER it — a candidate followed by a
     // line that reads as a category is the game, whatever sits above.

@@ -334,9 +334,12 @@ fn big20_prep(
     let mut groups: Vec<Vec<&db::OtherRun>> = Vec::new();
     let mut prev_at: Option<i64> = None;
     for r in race {
-        let cum = r.last_timer_ms.unwrap_or(0);
         let seg = r.final_time_ms.unwrap_or(0);
-        let fresh = cum - seg < RUN_START_SLACK_MS
+        // A row without a cumulative says nothing about where the run
+        // starts; it joins the run in progress.
+        let fresh = r
+            .last_timer_ms
+            .is_some_and(|cum| cum - seg < RUN_START_SLACK_MS)
             || prev_at.is_some_and(|p| r.started_at_ms - p > RUN_GAP_MS);
         if groups.is_empty() || fresh {
             groups.push(Vec::new());
@@ -1184,5 +1187,34 @@ mod tests {
         assert_eq!(out[0]["randomized"], false);
         assert_eq!(out[0]["practice"], false);
         assert_eq!(out[0]["total_ms"], 142_000 + 446_000 + 1_749_000);
+    }
+
+    /// A row filed without a cumulative (its column never read) says
+    /// nothing about where a run starts: it joins the run in progress.
+    #[test]
+    fn a_row_without_a_cumulative_does_not_start_a_run() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.other_category = "Other".into();
+        let race = |game: &'static str, at: i64, seg: i64, cum: Option<i64>| db::OtherRun {
+            category: "Big 20 #23 run".into(),
+            started_at_ms: at,
+            final_time_ms: Some(seg),
+            last_timer_ms: cum,
+            tag: None,
+            day: "2026-09-17".into(),
+            ..run(5, game, seg)
+        };
+        let out = big20_prep(
+            &[],
+            &[
+                race("Die Hard", 10_000, 142_000, Some(142_000)),
+                race("Pac-Mania", 20_000, 200_000, None),
+                race("Crisis Force", 30_000, 120_000, Some(462_000)),
+            ],
+            &cfg,
+        );
+        let rt = out["run_throughs"].as_array().unwrap();
+        assert_eq!(rt.len(), 1, "{rt:?}");
+        assert_eq!(rt[0]["games"], 3);
     }
 }
