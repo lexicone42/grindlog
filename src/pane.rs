@@ -1,10 +1,9 @@
 //! `pane`: what the pane pass would read off one frame, for every layout —
 //! the board as read (title, rows, cells), what `marathon::classify` calls
-//! it, and the board probe's score at each threshold. This is the loop that
-//! took twelve replay trials against his stream on 2026-09-17, done by hand
-//! with a debug line each time: which layout's rectangle reads the rows,
-//! at which threshold the names come through, and whether the verdict is
-//! the board's. Ten seconds now.
+//! it, and the board probe's score at each threshold: which layout's
+//! rectangle reads the rows, at which threshold the names come through, and
+//! whether the verdict is the board's — in seconds, where a replay trial per
+//! question takes minutes.
 //!
 //! Reads a PNG (a canvas-scaled frame, `calibrate --full-frame` saves one)
 //! or grabs one frame from the configured source, crops the decoded union

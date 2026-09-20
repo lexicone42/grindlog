@@ -142,9 +142,8 @@ fn time_cell(raw: &str) -> Option<(String, bool)> {
     if body.is_empty() || !time_shaped(body) {
         // A digit read as the letter it looks like: "$:22" and "S:22" for
         // 5:22, "18:S2" for 18:52, "O:30" for 0:30. Left as it was, "$:22"
-        // is not a time and glues onto the name — Mini Putt's row read
-        // "Mini Putt $:22 / 2:54:21" on most passes, one cell, and one cell
-        // is no reading at all; the row was filed seventeen minutes late.
+        // is not a time and glues onto the name, leaving the row one cell —
+        // and one cell is no reading of the row at all.
         return glyph_repair(t).and_then(|fixed| time_cell(&fixed));
     }
     let sign = if prefix.contains('+') {
