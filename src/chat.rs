@@ -446,6 +446,20 @@ async fn build_reply(ctx: &ChatCtx, cmd: &Cmd) -> Result<Option<String>> {
 mod tests {
     use super::*;
 
+    /// Network: the IRC transport's TLS handshake with the crypto provider
+    /// `main` installs, against the real server. Run by hand:
+    /// `cargo test --release -- --ignored the_irc_transport`.
+    #[tokio::test]
+    #[ignore]
+    async fn the_irc_transport_connects_over_tls() {
+        crate::install_tls_provider();
+        let (mut incoming, client) =
+            IrcClient::new(ClientConfig::new_simple(StaticLoginCredentials::anonymous()));
+        client.join("twitch".to_string()).expect("a channel name");
+        let first = tokio::time::timeout(std::time::Duration::from_secs(20), incoming.recv()).await;
+        assert!(matches!(first, Ok(Some(_))), "{first:?}");
+    }
+
     #[test]
     fn parses_viewer_commands() {
         assert_eq!(parse_command("!pb"), Some(Cmd::Pb));
