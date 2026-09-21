@@ -306,7 +306,6 @@ if [ "$open" -gt 0 ] && [ -n "$site" ] && command -v jq >/dev/null; then
   fi
 fi
 
-$1
 if [ ${#alerts[@]} -gt 0 ] || [ ${#clears[@]} -gt 0 ]; then
   body=""
   for a in ${alerts[@]+"${alerts[@]}"}; do body+="ALERT $a"$'\n'; done
