@@ -103,8 +103,11 @@ scripts `curl`, `jq` and `flock`, and `deploy-site.sh` the AWS CLI.
 pane pass — the board as read, title, counter and every row with its name and
 time cells. It is what explains a board day afterwards (which rows were read,
 at which pass a name settled, what a phantom completion was read off), and
-it is what a replay of the same VOD is compared against. The supervisor
-rotates it with the obs log at 100 MB. For a frame in front of you, `pane` is
+it is what a replay of the same VOD is compared against. A replay writes its
+own board log in its work directory, never this one; before 2026-09-21
+`replay-window.sh` and `replay-big20.sh` appended to the live file, so a
+pass in it from before then may be a replay's, stamped with that VOD's
+clock. The supervisor rotates it with the obs log at 100 MB. For a frame in front of you, `pane` is
 quicker: `ngtwitchtimer --config live.toml pane [--image calibration/full.png]
 [--threshold N]... [--layout NAME]` prints, per layout and threshold, the pane
 rectangle the pass would read, the rows and names it gets, the title, and
