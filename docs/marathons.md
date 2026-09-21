@@ -202,8 +202,13 @@ the big clock, and it is the only witness for a row nothing above it
 anchors. Two things made it worth more. The clock is right-aligned and
 grows LEFT with the hours: the `big20-race` timer crop that fitted "10:18.3"
 cut the hour digit of "3:55:28.3" four hours in, tesseract read "155:09.3",
-and the total was hours from the truth on the frames it parsed at all; the
-crop is wide enough now (`live.toml`, `crop_x = 320`). And with a marathon
+and the total was hours from the truth on the frames it parsed at all. Widened
+to start at 320, the crop then began over the pane's corner ornament, which
+tesseract read as a "7" in front of the time ("7 4:24:11", 74 hours) on a
+quarter of the frames, and it ended before the hundredths; it now starts at
+the first digit and ends past them (`live.toml`, `crop_x = 376`, `crop_w =
+236`: on the same two minutes of footage, prefixed reads 224 to 3, parsed
+frames 232 to 803). And with a marathon
 in force the frame loop takes readings the timer parser declines
 (`timeparse::parse_marathon_total`): a lost tenths digit with its separator
 kept ("15:08:", "3:55:28."), a colon read as a point ("15.16" for 15:16 —
