@@ -17,6 +17,7 @@
 /// tracker's own consistency checks (a reading must advance with the wall
 /// clock) are what keep a repaired misread from becoming a run.
 pub fn parse_timer_text(raw: &str) -> Option<i64> {
+    let raw = without_stray_prefix(raw);
     if let Some(v) = parse_time(raw) {
         return Some(v);
     }
@@ -67,7 +68,7 @@ pub fn parse_timer_text(raw: &str) -> Option<i64> {
 /// colon. Only for the total: the tracked game's own timer runs from zero and
 /// "15.16" is a time it does show.
 pub fn parse_marathon_total(raw: &str) -> Option<i64> {
-    let t = raw.trim().trim_end_matches(['.', ':']);
+    let t = without_stray_prefix(raw).trim_end_matches(['.', ':']);
     if t.is_empty() {
         return None;
     }
@@ -101,6 +102,24 @@ pub fn parse_marathon_total(raw: &str) -> Option<i64> {
         return parse_time(&shaped).filter(|v| *v >= 60_000);
     }
     None
+}
+
+/// A stray digit in front of a time that already has its hour ("7 4:24:11"):
+/// something at the crop's edge read as a digit, and joined to the time it
+/// makes a 74-hour reading the monotone clock then follows. The time is the
+/// part with the colons.
+fn without_stray_prefix(raw: &str) -> &str {
+    let t = raw.trim();
+    match t.split_once(' ') {
+        Some((head, tail))
+            if head.len() == 1
+                && head.chars().all(|c| c.is_ascii_digit())
+                && tail.matches(':').count() == 2 =>
+        {
+            tail.trim()
+        }
+        _ => t,
+    }
 }
 
 /// Parse a timer string as produced by OCR into milliseconds.
@@ -169,6 +188,11 @@ pub fn parse_time(raw: &str) -> Option<i64> {
     // With an hours field, minutes must be a real 0-59; without one LiveSplit
     // would normally have rolled to H:MM:SS, but be lenient up to 599 minutes.
     if (parts.len() == 3 && m >= 60) || m >= 600 {
+        return None;
+    }
+    // No timer this reads runs a day: a two-digit hour past 23 is a digit
+    // glued on ("94:24:23").
+    if h >= 24 {
         return None;
     }
     Some(((h * 60 + m) * 60 + sec) * 1000 + frac_ms)
@@ -427,5 +451,18 @@ mod timer_text_tests {
             None,
             "the timer parser's own repair is not repeated here"
         );
+    }
+
+    /// A stray digit in front of a time that has its hour is not the hour,
+    /// and a two-digit hour past 23 is not a time.
+    #[test]
+    fn a_stray_digit_before_a_time_with_its_hour_is_not_the_hour() {
+        let t = 4 * 3_600_000 + 24 * 60_000 + 11_000;
+        assert_eq!(parse_timer_text("7 4:24:11"), Some(t));
+        assert_eq!(parse_marathon_total("7 4:24:11..."), Some(t));
+        assert_eq!(parse_time("74:24:11"), None);
+        assert_eq!(parse_time("94:24:23.7"), None);
+        // A gap where the point was is still that.
+        assert_eq!(parse_timer_text("1 86"), Some(1_860));
     }
 }
