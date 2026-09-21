@@ -42,7 +42,7 @@
 #   lock events / poor-lock re-probes (the trailing "grown" column counted
 #   crop auto-grow events, a feature since removed; it is always 0 now).
 #
-# Work files land in replays/<label>/ (config, db, obs log, bot log), ignored
+# Work files land in replays/<label>/ (config, db, obs log, board log, bot log), ignored
 # by git; a rerun with the same label replaces the last capture. The config's
 # own db/obs paths are overridden and chat is forced off whatever it says, so
 # hand it the live config (or a variant of it) rather than a backfill one:
@@ -79,7 +79,8 @@ if [ -n "$file" ]; then
   epoch=$(date -u -d "@$(( 946684800 + fstart ))" +%Y-%m-%dT%H:%M:%SZ)
   sed -e "s|^source = .*|source = \"file\"|" -e "s|^input = .*|input = \"$file\"|" \
       -e "s|^start_secs = .*|start_secs = $fsecs|" -e "s|^recorded_start = .*|recorded_start = \"$epoch\"|" \
-      -e "s|^path = .*|path = \"$work/db.sqlite\"|" -e "s|^obs_log = .*|obs_log = \"$work/obs.jsonl\"|" "$cfg" > "$work/cfg.toml"
+      -e "s|^path = .*|path = \"$work/db.sqlite\"|" -e "s|^obs_log = .*|obs_log = \"$work/obs.jsonl\"|" \
+      -e "s|^board_log = .*|board_log = \"$work/boards.jsonl\"|" "$cfg" > "$work/cfg.toml"
   grep -q '^source = "file"' "$work/cfg.toml" || sed -i 's/^\[stream\]/[stream]\nsource = "file"/' "$work/cfg.toml"
   grep -q '^input = ' "$work/cfg.toml" || sed -i "s|^\[stream\]|[stream]\ninput = \"$file\"|" "$work/cfg.toml"
   grep -q '^start_secs = ' "$work/cfg.toml" || sed -i "s/^\[stream\]/[stream]\nstart_secs = $fsecs/" "$work/cfg.toml"
@@ -87,7 +88,8 @@ if [ -n "$file" ]; then
 else
   sed -e "s|^source = .*|source = \"vod\"|" -e "s|^vod_id = .*|vod_id = \"$vod\"|" \
       -e "s|^start_secs = .*|start_secs = $start|" \
-      -e "s|^path = .*|path = \"$work/db.sqlite\"|" -e "s|^obs_log = .*|obs_log = \"$work/obs.jsonl\"|" "$cfg" > "$work/cfg.toml"
+      -e "s|^path = .*|path = \"$work/db.sqlite\"|" -e "s|^obs_log = .*|obs_log = \"$work/obs.jsonl\"|" \
+      -e "s|^board_log = .*|board_log = \"$work/boards.jsonl\"|" "$cfg" > "$work/cfg.toml"
   grep -q '^source = "vod"' "$work/cfg.toml" || sed -i 's/^\[stream\]/[stream]\nsource = "vod"/' "$work/cfg.toml"
   grep -q '^vod_id = ' "$work/cfg.toml" || sed -i "s/^\[stream\]/[stream]\nvod_id = \"$vod\"/" "$work/cfg.toml"
   grep -q '^start_secs = ' "$work/cfg.toml" || sed -i "s/^\[stream\]/[stream]\nstart_secs = $start/" "$work/cfg.toml"

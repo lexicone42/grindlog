@@ -23,6 +23,7 @@
 # Per VOD it writes, under $BIG20_OUT (default big20-db/):
 #   vod-<id>.db        the runs and the session
 #   obs-<id>.jsonl     the per-frame observation log
+#   boards-<id>.jsonl  the board as read at each pane pass (debug.board_log)
 #   log-<id>.txt       the bot's own log
 # A rerun replaces an earlier pass over the same VOD. Nothing here touches
 # the live database or the running bot; land it with import-big20.sh.
@@ -57,7 +58,8 @@ for id in "$@"; do
       -e "s|^vod_id = .*|vod_id = \"$id\"|" \
       -e "s|^start_secs = .*|start_secs = $start|" \
       -e "s|^path = .*|path = \"$out/vod-$id.db\"|" \
-      -e "s|^obs_log = .*|obs_log = \"$out/obs-$id.jsonl\"|" "$src" > "$cfg"
+      -e "s|^obs_log = .*|obs_log = \"$out/obs-$id.jsonl\"|" \
+      -e "s|^board_log = .*|board_log = \"$out/boards-$id.jsonl\"|" "$src" > "$cfg"
   for line in 'source = "vod"' "vod_id = \"$id\"" "start_secs = $start"; do
     key=${line%% =*}
     grep -q "^$key = " "$cfg" || sed -i "s|^\[stream\]|[stream]\n$line|" "$cfg"
