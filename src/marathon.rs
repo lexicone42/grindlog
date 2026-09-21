@@ -77,6 +77,7 @@ use crate::config::{Config, GameAlias, GameMode};
 use crate::roster::Rosters;
 use crate::signature::{BoardSignature, Labels, Shape};
 use crate::timeparse::{parse_time, time_shaped};
+use tracing::{info, warn};
 
 /// Passes that must agree before a cumulative time is believed. The board is
 /// static text re-read once a minute, so a real value repeats and a digit
@@ -124,6 +125,10 @@ const AHEAD_OF_TOTAL_MS: i64 = 60_000;
 /// that has only just finished. Three minutes: the board is read once a
 /// minute, and the total is frozen through the pause between games anyway.
 const JUST_NOW_MS: i64 = 180_000;
+
+/// Passes a settled, coherent cumulative can go with nothing vouching for it
+/// before the log says so.
+const UNVOUCHED_PASSES: u32 = 5;
 
 /// A game the board says is finished, ready to be recorded as a run.
 #[derive(Debug, Clone, PartialEq)]
@@ -243,6 +248,9 @@ struct Slot {
     recorded_at_ms: Option<i64>,
     /// Refused under the game's floor on some pass; counted once.
     implausible: bool,
+    /// Passes on which a settled, coherent cumulative had nothing to vouch
+    /// for it.
+    unvouched: u32,
 }
 
 impl Slot {
@@ -538,6 +546,11 @@ pub struct Marathon {
     floors: HashMap<String, i64>,
     /// Completions refused under the floor, for the log.
     implausible: u32,
+    /// The largest time any cell has shown, comparisons included: the bound
+    /// on what the marathon total can read.
+    board_max_ms: Option<i64>,
+    /// Passes whose total was refused as beyond the board.
+    total_refused: u32,
 }
 
 impl Marathon {
@@ -556,6 +569,8 @@ impl Marathon {
             unmatched: 0,
             floors: HashMap::new(),
             implausible: 0,
+            board_max_ms: None,
+            total_refused: 0,
         }
     }
 
@@ -620,7 +635,7 @@ impl Marathon {
             })
             .collect();
         format!(
-            "{} of {} rows recorded over {} passes{}{}{}: {}",
+            "{} of {} rows recorded over {} passes{}{}{}{}: {}",
             self.slots.iter().filter(|s| s.recorded.is_some()).count(),
             self.slots.len(),
             self.passes,
@@ -636,6 +651,17 @@ impl Marathon {
             match self.implausible() {
                 0 => String::new(),
                 n => format!(", {n} refused under the floor"),
+            },
+            match self
+                .slots
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.recorded.is_none() && s.unvouched >= UNVOUCHED_PASSES)
+                .map(|(i, s)| self.canonical(i).or_else(|| s.name()).unwrap_or("?"))
+                .collect::<Vec<_>>()
+            {
+                v if v.is_empty() => String::new(),
+                v => format!(", unvouched: {}", v.join(", ")),
             },
             names.join(", ")
         )
@@ -759,6 +785,33 @@ impl Marathon {
     /// looked, and otherwise only ever rejects a candidate.
     pub fn observe(&mut self, board: &Board, at_ms: i64, total_ms: Option<i64>) -> Vec<Completion> {
         self.passes += 1;
+        // The largest time any cell has shown, comparisons included, bounds
+        // the total: a reading more than an hour past it is not this clock.
+        // Measured: "7 4:24:11" read as 74:24:11 on a quarter of the frames
+        // for four hours, and the monotone clock followed it.
+        for row in &board.rows {
+            if let Some(c) = read_cells(row).cumulative_ms {
+                self.board_max_ms = Some(self.board_max_ms.map_or(c, |m| m.max(c)));
+            }
+        }
+        let total_ms = match (total_ms, self.board_max_ms) {
+            (Some(t), Some(m)) if t > m + HOUR_MS => {
+                self.total_refused += 1;
+                if self.total_refused == 1
+                    || self.total_refused == 5
+                    || self.total_refused.is_multiple_of(30)
+                {
+                    warn!(
+                        "marathon total {} is beyond anything the board shows ({}); ignored, {} pass(es) so far",
+                        crate::timeparse::format_ms_seconds(t),
+                        crate::timeparse::format_ms_seconds(m),
+                        self.total_refused
+                    );
+                }
+                None
+            }
+            (t, _) => t,
+        };
         self.total_ms = total_ms;
         if let Some(t) = board.title.as_deref() {
             if let Some(n) = event_number(t) {
@@ -818,7 +871,21 @@ impl Marathon {
         // Which of the configured events this board is, before anything is
         // filed under one of its games.
         self.identify();
-        self.harvest(at_ms, total_ms)
+        let out = self.harvest(at_ms, total_ms);
+        // A row said to be unvouched, now filed: said too, so the two lines
+        // pair up in the log and a watcher can tell a row in limbo from one
+        // that stayed lost.
+        for (i, s) in self.slots.iter_mut().enumerate() {
+            if s.recorded.is_some() && s.unvouched >= UNVOUCHED_PASSES {
+                info!(
+                    "marathon row {}: filed after {} unvouched passes",
+                    i + 1,
+                    s.unvouched
+                );
+                s.unvouched = 0;
+            }
+        }
+        out
     }
 
     /// A row refused under its game's floor, counted once however many
@@ -1043,7 +1110,7 @@ impl Marathon {
             // away, taking the row's real completion down with it: a row
             // still being played read its segment column as a cumulative
             // three times before its real cumulative appeared twice.
-            let Some((cum, _)) = self.slots[i]
+            let best = self.slots[i]
                 .cumulative_votes
                 .iter()
                 .map(|(c, v)| (*c, *v))
@@ -1072,8 +1139,39 @@ impl Marathon {
                             || self.arithmetic_backs(i, *c)
                             || !self.slots[i].one_digit_from_baseline(*c))
                 })
-                .max_by_key(|(c, v)| (v.count, *c))
-            else {
+                .max_by_key(|(c, v)| (v.count, *c));
+            let Some((cum, _)) = best else {
+                // A settled, coherent cumulative the segment column does not
+                // deny, with nothing to vouch for it: the board says he is
+                // past this row and neither the total nor the row above
+                // confirms it. Passes of that are a lost anchor or a wrong
+                // total, and the log says so once per row.
+                let unvouched = self.slots[i]
+                    .cumulative_votes
+                    .iter()
+                    .filter(|(c, v)| {
+                        settled(v) && self.coherent(i, **c) && !self.segment_denies(i, **c)
+                    })
+                    .max_by_key(|(c, v)| (v.count, **c))
+                    .map(|(c, _)| *c);
+                if let Some(c) = unvouched {
+                    self.slots[i].unvouched += 1;
+                    if self.slots[i].unvouched == UNVOUCHED_PASSES {
+                        let name = self
+                            .canonical(i)
+                            .or_else(|| self.slots[i].name())
+                            .unwrap_or("?")
+                            .to_string();
+                        warn!(
+                            "marathon row {}: {} settled at {} on {} passes and nothing vouches for it (total {})",
+                            i + 1,
+                            name,
+                            crate::timeparse::format_ms_seconds(c),
+                            UNVOUCHED_PASSES,
+                            total_ms.map_or("none".to_string(), crate::timeparse::format_ms_seconds)
+                        );
+                    }
+                }
                 continue;
             };
             // Recorded already, by an earlier run of the bot over this
@@ -1083,6 +1181,18 @@ impl Marathon {
                 // an earlier run of the bot recorded it, so it stands for
                 // nothing about the rows under it (no `recorded_at_ms`).
                 self.slots[i].recorded = Some(cum);
+                continue;
+            }
+            // On an ordered board the odd slots are the category rows by
+            // construction, whatever their name came back as ("au" for
+            // "(Any%)", which the bracket rule cannot see) or whether it came
+            // back at all: a category row whose name never reads still ends
+            // at the cumulative the row under it is measured from, and left
+            // unrecorded it breaks the chain for every row below.
+            if self.ordered() && i % 2 == 1 {
+                self.slots[i].recorded = Some(cum);
+                self.slots[i].recorded_at_ms = Some(at_ms);
+                self.known.push(cum);
                 continue;
             }
             // A run has to be filed under a name. A completed row keeps its
@@ -1101,12 +1211,7 @@ impl Marathon {
             // bracket anywhere is the mark too; a game with brackets in its
             // name ("SMB3 (Warpless)") carries its own and is not caught,
             // and a roster match keeps a row whatever it looks like.
-            let bracketed = bracketed(&read);
-            // On an ordered board the odd slots are the category rows by
-            // construction, whatever their name came back as ("au" for
-            // "(Any%)", which the bracket rule cannot see).
-            let category_row = self.ordered() && i % 2 == 1;
-            if category_row || (self.canonical(i).is_none() && bracketed) {
+            if self.canonical(i).is_none() && bracketed(&read) {
                 self.slots[i].recorded = Some(cum);
                 self.slots[i].recorded_at_ms = Some(at_ms);
                 self.known.push(cum);
@@ -1260,15 +1365,18 @@ impl Marathon {
                 self.slots[i].recorded_at_ms = Some(ended_at_ms);
                 continue;
             }
+            // On an ordered board the odd slots are the category rows by
+            // construction, named or not (as in `harvest`).
+            if self.ordered() && i % 2 == 1 {
+                self.slots[i].recorded = Some(cum);
+                self.slots[i].recorded_at_ms = Some(ended_at_ms);
+                self.known.push(cum);
+                continue;
+            }
             let Some(read) = self.slots[i].name().map(str::to_string) else {
                 continue;
             };
-            let bracketed = bracketed(&read);
-            // On an ordered board the odd slots are the category rows by
-            // construction, whatever their name came back as: "(Any%)" read
-            // "au" on a live pass and its 0:30 was filed as a game.
-            let category_row = self.ordered() && i % 2 == 1;
-            if category_row || (self.canonical(i).is_none() && bracketed) {
+            if self.canonical(i).is_none() && bracketed(&read) {
                 self.slots[i].recorded = Some(cum);
                 self.slots[i].recorded_at_ms = Some(ended_at_ms);
                 self.known.push(cum);
@@ -4933,5 +5041,131 @@ mod tests {
         );
         assert!(slot.one_digit_from_baseline(misread));
         assert!(!slot.one_digit_from_baseline(4 * h + 38 * 60_000 + 17_000));
+    }
+
+    /// A category row whose name never reads is still recorded: it ends at
+    /// the cumulative the row under it is measured from, and with it in the
+    /// chain the game below is vouched for by the board whatever the total
+    /// says. Measured: four games of a twenty-game run refused this way,
+    /// the board showing every one, with the total reading 74 hours.
+    #[test]
+    fn a_category_row_without_a_name_still_anchors_the_row_below() {
+        let mut m = race_tracker();
+        let pass = |mario: &[&str], cat: &[&str], jaws: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Yoshi", &["7:28", "3:56:40"]),
+                    row("pe Any%)", &["0:30", "3:57:11"]),
+                    row("Mario", mario),
+                    row("", cat),
+                    row("jaws", jaws),
+                    row("", &[]),
+                    row("doon Crystal", &["19:11", "4:38:17"]),
+                ],
+            )
+        };
+        let h = 3_600_000;
+        // Celeste under way with its comparison showing; the clock is right.
+        let cmp = ["21:09", "4:18:21"];
+        let jaws_cmp = ["7:57", "18:35"];
+        for i in 0..3 {
+            let total = Some(4 * h + 10 * 60_000 + i * 60_000);
+            assert!(m
+                .observe(&pass(&cmp, &[], &jaws_cmp), 1_000 + i * 60_000, total)
+                .is_empty());
+        }
+        // Celeste finishes at 4:16:20 with the total agreeing.
+        let mario = ["19:08", "4:16:20"];
+        let total = Some(4 * h + 16 * 60_000 + 40_000);
+        assert!(m
+            .observe(&pass(&mario, &[], &jaws_cmp), 181_000, total)
+            .is_empty());
+        let seen = m.observe(&pass(&mario, &[], &jaws_cmp), 241_000, total);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Celeste Mario's Zap n Dash");
+        // From here the total reads 74 hours. The category row ends at
+        // 4:16:50, its name never reading; then Jaws finishes at 4:24:10.
+        let bad_total = Some(74 * h + 24 * 60_000);
+        let cat = ["0:30", "4:16:50"];
+        for t in [301_000, 361_000] {
+            assert!(m
+                .observe(&pass(&mario, &cat, &jaws_cmp), t, bad_total)
+                .is_empty());
+        }
+        let done = ["7:20", "4:24:10"];
+        assert!(m
+            .observe(&pass(&mario, &cat, &done), 421_000, bad_total)
+            .is_empty());
+        let seen = m.observe(&pass(&mario, &cat, &done), 481_000, bad_total);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Jaws");
+        assert_eq!(seen[0].cumulative_ms, 4 * h + 24 * 60_000 + 10_000);
+        assert_eq!(seen[0].segment_ms, 7 * 60_000 + 20_000);
+        assert!(!seen[0].backfilled);
+    }
+
+    /// A total further than an hour past anything the board shows is not
+    /// this clock; the board's comparisons bound it from the first pass.
+    #[test]
+    fn a_total_beyond_the_board_is_ignored() {
+        let mut m = race_tracker();
+        let b = board(
+            Some("Practice Run"),
+            vec![
+                row("Jaws", &["7:57", "4:18:35"]),
+                row("(Any%)", &[]),
+                row("Moon Crystal", &["19:11", "4:38:17"]),
+            ],
+        );
+        let h = 3_600_000;
+        assert!(m.observe(&b, 1_000, Some(74 * h + 24 * 60_000)).is_empty());
+        assert_eq!(
+            m.total_ms, None,
+            "74 hours against a board topping out at 4:38:17"
+        );
+        assert_eq!(m.total_refused, 1);
+        assert!(m.observe(&b, 61_000, Some(4 * h + 20 * 60_000)).is_empty());
+        assert_eq!(m.total_ms, Some(4 * h + 20 * 60_000));
+        assert!(m.observe(&b, 121_000, Some(5 * h + 30 * 60_000)).is_empty());
+        assert_eq!(
+            m.total_ms,
+            Some(5 * h + 30 * 60_000),
+            "within the hour past the board"
+        );
+    }
+
+    /// A settled, coherent cumulative that nothing vouches for is counted
+    /// per pass, and the session-close line names the row.
+    #[test]
+    fn a_row_nothing_vouches_for_is_named_on_the_close_line() {
+        let mut m = race_tracker();
+        let pass = |jaws: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Mario", &["19:08", "4:16:20"]),
+                    row("(Any%)", &[]),
+                    row("Jaws", jaws),
+                    row("(Any%)", &[]),
+                    row("Moon Crystal", &["19:11", "4:38:17"]),
+                ],
+            )
+        };
+        for i in 0..3 {
+            assert!(m
+                .observe(&pass(&["7:57", "4:18:35"]), 1_000 + i * 60_000, None)
+                .is_empty());
+        }
+        // Jaws finishes; no category row above ever read, and no total.
+        let done = ["7:20", "4:24:10"];
+        for i in 3..10 {
+            assert!(m.observe(&pass(&done), 1_000 + i * 60_000, None).is_empty());
+        }
+        assert_eq!(
+            m.slots[36].unvouched, 6,
+            "counted from the pass the votes settled"
+        );
+        assert!(m.describe().contains("unvouched: Jaws"), "{}", m.describe());
     }
 }

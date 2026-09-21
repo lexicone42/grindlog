@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Dead-man check for the live deployment, for a ten-minute cron (see
-# crontab.example). Each pass reads eleven signals (the last four since
-# 2026-09-17):
+# crontab.example). Each pass reads thirteen signals:
 #
 #   database      ninja-gaiden.db opens and answers a query
 #   tracker-churn at most two board-tracker rebuilds in the last hour
 #   tracker-stall a marathon in force has recorded a completion within the hour
+#   tracker-unvouched no row the board shows finished has been unvouched for
+#               over ten minutes without being filed (a lost anchor, a wrong total)
+#   tracker-total the marathon total has not been refused as beyond the board
+#               on five passes (the timer being misread)
 #   site-stale    while a session is open, the public page is under 30 min old
 #
 #   supervisor  the tmux session "ngtimer" (scripts/run-live.sh) exists
@@ -250,6 +253,37 @@ if [ "$open" -gt 0 ] && command -v jq >/dev/null; then
       fi;;
     *) check tracker-stall 0 "no marathon in force";;
   esac
+fi
+
+# --- board tracker: a row the board shows finished that nothing confirms.
+# The tracker says "nothing vouches for it" once a settled, coherent
+# cumulative has gone five passes with neither the marathon total nor the
+# row above to vouch for it, and "filed after N unvouched passes" when such
+# a row is filed after all. A row said more than ten minutes ago and not
+# filed since is a lost anchor or a wrong total: a game the site will be
+# missing until the day is replayed (docs/big20.md).
+lost=$(plain | awk -v since="$(date -u -d "@$((now - 3600))" +%Y-%m-%dT%H:%M:%S)" -v aged="$(date -u -d "@$((now - 600))" +%Y-%m-%dT%H:%M:%S)" '
+  $1 >= since && /nothing vouches for it/ && match($0, /marathon row [0-9]+: /) {
+    k = substr($0, RSTART + 13, RLENGTH - 15); if ($1 <= aged) said[k] = $0; else delete said[k] }
+  $1 >= since && /filed after [0-9]+ unvouched passes/ && match($0, /marathon row [0-9]+: /) {
+    delete said[substr($0, RSTART + 13, RLENGTH - 15)] }
+  END { for (k in said) { s = said[k]; sub(/.*marathon row [0-9]+: /, "", s); sub(/ on [0-9]+ passes.*/, "", s); printf "%s%s", sep, s; sep = ", " } }')
+if [ -n "$lost" ]; then
+  check tracker-unvouched 1 "rows the board shows finished, unvouched for over ten minutes: $lost (logs/live.log 'nothing vouches')"
+else
+  check tracker-unvouched 0 "no row unvouched for over ten minutes"
+fi
+
+# --- board tracker: the marathon total refused as beyond anything the board
+# shows. The tracker says so at the first refused pass, the fifth and every
+# thirtieth; five is the timer being misread (a stray digit, a shifted crop),
+# which leaves the board alone to vouch for every row.
+refused=$(plain | awk -v since="$(date -u -d "@$((now - 3600))" +%Y-%m-%dT%H:%M:%S)" \
+  '$1 >= since && /marathon total .* ignored, [0-9]+ pass/ { n = $0; sub(/.*ignored, /, "", n); sub(/ pass.*/, "", n); if (n + 0 > max) max = n + 0 } END { print max + 0 }')
+if [ "$refused" -ge 5 ]; then
+  check tracker-total 1 "the marathon total has been refused on $refused passes: the timer is being misread (logs/live.log 'beyond anything the board shows')"
+else
+  check tracker-total 0 "$refused refused total pass(es)"
 fi
 
 # --- site: while a session is open the ten-minute deploy keeps the public

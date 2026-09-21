@@ -94,6 +94,24 @@ if [ "$finished" -gt 0 ]; then
   say "finishes: ${fins%, }"
 fi
 
+# --- a race board's run-through: every game of the roster should be a row
+# under the board's [[games]] name. Fewer is a game the tracker refused
+# (healthcheck 'tracker-unvouched' names it) and a replay of the day
+# (docs/big20.md).
+while IFS='|' read -r bname broster; do
+  [ -n "$bname" ] || continue
+  n=$(q "SELECT COUNT(*) FROM runs WHERE category = '$(esc "$bname")' AND started_at_ms >= $s_ms AND started_at_ms < $e_ms")
+  [ "${n:-0}" -gt 0 ] || continue
+  size=$(sed -n '/^games = \[/,/^\]/p' "$broster" 2>/dev/null | grep -c '"')
+  reached=$(q "SELECT COALESCE(MAX(last_timer_ms),0) FROM runs WHERE category = '$(esc "$bname")' AND started_at_ms >= $s_ms AND started_at_ms < $e_ms")
+  line="$bname: $n of ${size:-?} games recorded, reached $(fmt "$reached")"
+  if [ "${size:-0}" -gt 0 ] && [ "$n" -lt "$size" ]; then
+    line+=" -- SHORT: $((size - n)) game(s) not filed; replay the day (docs/big20.md)"
+  fi
+  say "$line"
+done < <(awk '/^\[\[/{if(m&&n)print n"|"r; n="";r="";m=0} /^name = /{n=$0} /^roster = /{r=$0} /^mode = "board"/{m=1} END{if(m&&n)print n"|"r}' live.toml \
+         | sed 's/^name = "\([^"]*\)"|roster = "\([^"]*\)"$/\1|\2/')
+
 # --- resets by act: the same buckets as stats::death_chart, a reset falls in
 # the first act whose end_ms its last timer value is under; the last act (no
 # end_ms) takes the rest. Runs with no last timer value are not counted.

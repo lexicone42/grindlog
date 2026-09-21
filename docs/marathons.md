@@ -88,10 +88,29 @@ board spelling ("World" is Parallel World's row, not the tail of Kid
 Klown's name). And on an ordered board the slot itself says what a row's
 run is filed under — the even slots are the games in order, the odd ones
 their category rows, never filed as games whatever their name came back as
-("(Any%)" read "au" and its 0:30 went in as a game before this) — so a
+("(Any%)" read "au" and its 0:30 went in as a game before this), and
+recorded whether or not it came back at all: a category row whose name
+never reads still ends at the cumulative the row under it is measured
+from, and left unrecorded it breaks the chain for every row below (four
+games of one twenty-game run, the board showing every one) — so a
 row that read as nothing any roster folds ("4ydiide Aly?" was Hydlide's)
 is still filed as its game; the reading stays in the log. Before this
 "Funtstones", "Kid Kiown" and "World" were filed as read.
+
+**What the total is worth.** The total is bounded by the board: a reading
+more than an hour past the largest time any cell has shown, comparisons
+included, is not this clock and is ignored ("7 4:24:11" off the crop's
+edge parsed as 74:24:11 on a quarter of the frames, and the monotone clock
+followed it for four hours; the parser now drops a lone digit in front of
+a time that has its hour, and refuses a two-digit hour past 23). The log
+says when a total is ignored (`tracker-total` in `healthcheck.sh` at five
+refused passes: the timer is being misread), and says once per row when a
+settled, coherent cumulative has gone five passes with neither the total
+nor the row above to vouch for it ("nothing vouches for it"), and again
+when such a row is filed after all ("filed after N unvouched passes") — a
+row said and not filed within ten minutes is a lost anchor or a wrong
+total, `healthcheck.sh` raises it as `tracker-unvouched`, and the
+session-close line lists the rows still unfiled.
 
 **A first time under a watched row.** At 480p the board's "-" cells often
 do not read, so a game's row carries no vote at all until its time
