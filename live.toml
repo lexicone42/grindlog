@@ -283,7 +283,7 @@ name = "big20-race"
 # come: a crop that fits "10:18.3" cuts the hour digit of "3:55:28.3"
 # ("155:09.3"). Wide enough for h:mm:ss.d plus the re-anchor's drift (up to
 # about 22 px); an unused margin costs nothing.
-timer = { crop_x = 320, crop_y = 950, crop_w = 262, crop_h = 62 }
+timer = { crop_x = 376, crop_y = 952, crop_w = 236, crop_h = 52 }
 splits = { crop_x = 128, crop_y = 450, crop_w = 492, crop_h = 465 }
 
 # The race board — "Big 20 #23 / Practice Run", the twenty games two rows each
