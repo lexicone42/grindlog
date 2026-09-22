@@ -7,7 +7,8 @@ have bitten before.
 | script | purpose |
 |---|---|
 | `scripts/build-release.sh` | build `target/release/ngtwitchtimer`, with the in-process OCR engine when the `~/.local/opt/ocr-dev` toolchain is staged (see Requirements), else the CLI engine |
-| `scripts/run-live.sh` | supervise the live bot (restart on exit, log rotation, `logs/live.log`); run it inside tmux |
+| `scripts/start-supervisor.sh` | start `run-live.sh` in tmux on the bot's own server (socket `grindlog`), where `tmux attach` never lands; idempotent, and retires a session left on the default server by an older crontab (bot and all, so between runs). Watch with `tmux -L grindlog attach -t ngtimer` |
+| `scripts/run-live.sh` | supervise the live bot (restart on exit, log rotation, `logs/live.log`); started by `start-supervisor.sh` |
 | `scripts/rollout.sh [--allow-dirty] [--smoke-vod <id>]` | ship a build to the live bot: refuses unless on `main` with a clean tree, builds (`build-release.sh`), runs the tests, smoke-replays two minutes of the most recent VOD session (from 40 minutes in) and refuses unless the timer read ≥80%, waits (up to an hour) for the bot to be between runs or offline, SIGTERMs it so the `run-live.sh` supervisor restarts it on the new binary (refuses if no supervisor is running), and confirms the new process came up |
 | `scripts/replay-window.sh <cfg> <vod_id>\|<window.mp4> <start_secs> <dur_secs> [binary] [label]` | replay one window of a VOD and score the capture against the runner's own attempt counter (runs found, run numbers, lock events); run it with the old and the new binary before trusting any OCR or detection change. An existing `.mp4`/`.mkv` in place of the id replays a local recording (`source = "file"`); a file named `<label>-<vod>-<start>.mp4` is taken to begin at second `<start>` of its VOD, so the start is still given on the VOD's timeline, and its runs are dated from a placeholder epoch so the window count works |
 | `scripts/obs-accuracy.sh <obs.jsonl>` | the label-free misread check over an observation log: consecutive running frames must advance by one frame interval within ±60 ms (`TOL_MS`); resets, frozen timers, values under 10 s, event frames and the frames after a lock are excluded and counted by reason. Prints the rate per pair and per frame, per reader, and the worst frames with the readings around them |
@@ -33,7 +34,7 @@ have bitten before.
 | `scripts/make-test-video.sh` | synthetic timer video for end-to-end tests |
 | `infra/site-stack.yml` | CloudFormation for the site (S3 + CloudFront + certificate + Route53 alias); pass your own `HostedZoneId` |
 
-Typical rhythm: the live bot runs all day under `run-live.sh` in tmux from
+Typical rhythm: the live bot runs all day under `run-live.sh` in its own tmux server from
 the tracked `live.toml`; a change reaches it through `rollout.sh`; cron
 (`scripts/crontab.example`, installed by `install-cron.sh`) runs
 `deploy-if-live.sh` every ten minutes, `deploy-site.sh` and `backup-db.sh`

@@ -138,10 +138,12 @@ client (aws-lc, through rustls) compiles from source once per target dir.
 ## Operating facts
 
 - The live bot runs supervised (`scripts/run-live.sh`, in a tmux session on
-  the reference box) and logs to `logs/live.log`; observations go to
-  `obs-live.jsonl`. `kill` (SIGTERM) is a clean stop; the supervisor
-  restarts it. The schedule lives in `scripts/crontab.example` (a reboot
-  line that restarts the supervisor, the site deploys, the nightly
+  the bot's own tmux server: `scripts/start-supervisor.sh`, socket
+  `grindlog`, so a plain `tmux attach` never lands in it) and logs to
+  `logs/live.log`; observations go to `obs-live.jsonl`. `kill` (SIGTERM) is
+  a clean stop; the supervisor restarts it; `tmux -L grindlog attach -t
+  ngtimer` watches it. The schedule lives in `scripts/crontab.example` (a
+  reboot line that restarts the supervisor, the site deploys, the nightly
   `backup-db.sh`, the ten-minute `healthcheck.sh` and the 23:58
   `daily-summary.sh`); `scripts/install-cron.sh` installs it idempotently.
   Backups land in `backups/` (ignored by git), 30 days kept.
