@@ -149,11 +149,17 @@ seconds. Layouts whose timer rectangles overlap are told apart by their panes: e
 is placed where its own probe candidate read the timer (a layout with no
 reading of its own is shifted to the winner's timer), and the one whose
 pane NAMES the board — the tracked game's header, or a game the rosters
-know — wins before the one whose splits column reads the most rows. The
-Ninja Gaiden layout's splits crop happened to read six rows of a Moon
-Crystal practice board and held it for three hours; its header crop never
-saw the name, and every run on that board was one nothing named, dropped
-at close. Not under a lock the board granted: the board probe chose that
+know — wins before the one whose splits column reads the most rows, and
+among those that name it with the same rows, the tightest pane rectangle
+wins: crops drawn for this pane enclose it closely, and a wider board's
+crops that happen to cover it take in what lies beside it. The Ninja
+Gaiden layout's splits crop happened to read six rows of a Moon Crystal
+practice board and held it for three hours; its header crop never saw the
+name, and every run on that board was one nothing named, dropped at
+close. The race board's crops cover the Moon Crystal pane and name it at
+the lock, then read its title as "ystal" on every later pass with the
+sprites beside the pane in the rectangle; the tall layout's pane is 20%
+smaller and reads the name. Not under a lock the board granted: the board probe chose that
 layout by the rows its pane reads.
 
 **The pane's own words.** A second, unrestricted sparse-text pass over the

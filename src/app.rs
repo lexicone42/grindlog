@@ -3077,7 +3077,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 if regs.len() > 1 && new_regs.splits.is_some() && !lock.is_board() {
                     let rows = shared.acts.len().max(1) as u32;
                     let win_t = new_regs.timer;
-                    let mut best: Option<(bool, usize)> = None;
+                    let mut best: Option<(bool, usize, std::cmp::Reverse<u64>)> = None;
                     let mut choice = (new_layout, new_off, new_regs.clone());
                     for (li, r) in regs.iter().enumerate() {
                         // Where this layout's own timer reads, when its probe
@@ -3135,7 +3135,14 @@ pub async fn run(cfg: Config) -> Result<()> {
                             "layout {:?} at {:+},{:+}: {n}/{rows} split rows read, names the board: {named}",
                             layout_names[li], off.0, off.1
                         );
-                        let score = (named, n);
+                        // Among layouts that name the board and read the same
+                        // rows, the tightest pane: crops drawn for THIS pane
+                        // enclose it closely, and a wider board's crops that
+                        // happen to cover it take in what lies beside it,
+                        // where the title then reads as a fragment on every
+                        // later pass ("ystal": nothing to file under).
+                        let (_, _, pw, ph) = pane_rect(&sr, union_img.width(), union_img.height());
+                        let score = (named, n, std::cmp::Reverse(pw as u64 * ph as u64));
                         let better = match best {
                             None => true,
                             Some(b) => score > b || (score == b && li == new_layout),
@@ -3146,7 +3153,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         }
                     }
                     if choice.0 != new_layout {
-                        let (named, n) = best.unwrap_or((false, 0));
+                        let (named, n, _) = best.unwrap_or((false, 0, std::cmp::Reverse(0)));
                         info!(
                             "layout {:?} explains the timer too, but its splits column reads ({n}/{rows} rows{}); taking it over {:?}",
                             layout_names[choice.0],
@@ -3923,13 +3930,18 @@ pub async fn run(cfg: Config) -> Result<()> {
                     // The header's own counter, read with the pane's words:
                     // a second source for the run's number, at the pane
                     // cadence, for a board whose counter crop reads nothing.
+                    // Only while the timer is being accepted, as the crop
+                    // read is: a restart the state machine has not yet seen
+                    // leaves the run open with the counter already bumped.
+                    let timer_fresh = tracker.accepted_age_ms(t).is_some_and(|a| a <= 3_000);
                     if let (Some(v), Some(cr)) = (
                         board
                             .counter
                             .as_deref()
                             .and_then(crate::timeparse::parse_counter),
                         current.as_mut().filter(|c| {
-                            c.ls_attempt.is_none()
+                            timer_fresh
+                                && c.ls_attempt.is_none()
                                 && !c.orphaned
                                 && (pane_identity.ok() || c.foreign.is_some())
                         }),
