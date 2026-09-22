@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Dead-man check for the live deployment, for a ten-minute cron (see
-# crontab.example). Each pass reads thirteen signals:
+# crontab.example). Each pass reads fourteen signals:
 #
 #   database      ninja-gaiden.db opens and answers a query
 #   tracker-churn at most two board-tracker rebuilds in the last hour
@@ -11,7 +11,10 @@
 #               on five passes (the timer being misread)
 #   site-stale    while a session is open, the public page is under 30 min old
 #
-#   supervisor  the tmux session "ngtimer" (scripts/run-live.sh) exists
+#   supervisor  the tmux session "ngtimer" exists and scripts/run-live.sh is
+#               alive in it (the server outlives a closed window)
+#   clock       the box is within a minute of the public site's HTTP Date
+#               (a reboot without a time daemon; deploys fail to sign)
 #   bot         exactly one `ngtwitchtimer --config live.toml run` is alive
 #   restarts    run-live.sh started the bot at most 3 times in the last 30
 #               minutes ("[wrapper] starting bot" lines in logs/live.log;
@@ -90,11 +93,16 @@ check() {
   fi
 }
 
-# --- supervisor: the tmux session run-live.sh lives in (=name: exact match).
-if tmux has-session -t =ngtimer 2>/dev/null; then
-  check supervisor 0 "tmux session ngtimer present"
-else
+# --- supervisor: the tmux session run-live.sh lives in (=name: exact match),
+# AND the wrapper alive inside it. The server outlives its windows: a session
+# whose bot window was closed by hand still answers has-session while nothing
+# restarts the bot.
+if ! tmux has-session -t =ngtimer 2>/dev/null; then
   check supervisor 1 "no tmux session ngtimer (tmux new-session -d -s ngtimer scripts/run-live.sh)"
+elif ! pgrep -f 'scripts/run-live\.s[h]' >/dev/null; then
+  check supervisor 1 "tmux session ngtimer has no run-live.sh in it (tmux kill-session -t ngtimer; tmux new-session -d -s ngtimer scripts/run-live.sh)"
+else
+  check supervisor 0 "tmux session ngtimer present, run-live.sh alive"
 fi
 
 # --- bot: the process itself, not `... live.toml report --json` from the site
@@ -292,6 +300,24 @@ fi
 # page's address is the last "live:" line a deploy wrote, so nothing here
 # names the site.
 site=$(grep '^live: ' "$DEPLOY_LOG" 2>/dev/null | tail -1 | awk '{print $2}')
+
+# --- clock: the box against the public site's HTTP Date. A reboot without a
+# time daemon came up five minutes behind; the deploy's uploads went through
+# and its CloudFront request was refused as expired ("Signature expired"),
+# with nothing naming the cause. AWS allows five minutes; a minute is already
+# wrong.
+if [ -n "$site" ] && command -v curl >/dev/null; then
+  remote=$(curl -sI --max-time 10 "${site%/}/" 2>/dev/null | awk 'tolower($1)=="date:" {sub(/^[^ ]+ /, ""); print}' | tr -d '\r')
+  remote_s=$(date -u -d "$remote" +%s 2>/dev/null || echo 0)
+  if [ "$remote_s" -gt 0 ]; then
+    skew=$(( $(date +%s) - remote_s ))
+    if [ "${skew#-}" -gt 60 ]; then
+      check clock 1 "the clock is ${skew#-} s $([ "$skew" -lt 0 ] && echo behind || echo ahead) of the site's server (deploys will fail to sign; start chronyd)"
+    else
+      check clock 0 "within ${skew#-} s of the site's server"
+    fi
+  fi
+fi
 if [ "$open" -gt 0 ] && [ -n "$site" ] && command -v jq >/dev/null; then
   gen=$(curl -s --max-time 10 "${site%/}/index.html?hc=$now" -H 'Cache-Control: no-cache' \
     | sed -n '/<script id="data"/,/<\/script>/p' | sed '1d;$d' | jq -r '.generated_at_ms // 0' 2>/dev/null)
