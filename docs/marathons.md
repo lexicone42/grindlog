@@ -171,7 +171,10 @@ with the arithmetic) is refused when it is the row's own comparison with
 one digit read wrong: the pinned last row's 5:04:57 read "4:04:57", the
 clock passed 4:05 with the row's neighbour still unrun, and yesterday's
 Moon Crystal was filed as today's — and today's, at 4:38:17, refused as
-already recorded.
+already recorded. A segment under half his own best for the game is a
+misread, not a run: that candidate is refused and the next most voted one
+is tried on the same pass, so a misreading read once more than the real
+completion cannot hold the row.
 
 **The segment column's word.** The column refuses a candidate only when no
 settled reading of it agrees with the arithmetic (the comparison case:

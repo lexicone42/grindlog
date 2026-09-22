@@ -1110,7 +1110,7 @@ impl Marathon {
             // away, taking the row's real completion down with it: a row
             // still being played read its segment column as a cumulative
             // three times before its real cumulative appeared twice.
-            let best = self.slots[i]
+            let mut cands: Vec<(i64, Vote)> = self.slots[i]
                 .cumulative_votes
                 .iter()
                 .map(|(c, v)| (*c, *v))
@@ -1139,8 +1139,12 @@ impl Marathon {
                             || self.arithmetic_backs(i, *c)
                             || !self.slots[i].one_digit_from_baseline(*c))
                 })
-                .max_by_key(|(c, v)| (v.count, *c));
-            let Some((cum, _)) = best else {
+                .collect();
+            // Most voted first. A candidate the floor refuses gives way to the
+            // next: a misreading read once more than the real completion
+            // must not hold the row.
+            cands.sort_by_key(|(c, v)| std::cmp::Reverse((v.count, *c)));
+            if cands.is_empty() {
                 // A settled, coherent cumulative the segment column does not
                 // deny, with nothing to vouch for it: the board says he is
                 // past this row and neither the total nor the row above
@@ -1173,92 +1177,95 @@ impl Marathon {
                     }
                 }
                 continue;
-            };
-            // Recorded already, by an earlier run of the bot over this
-            // broadcast.
-            if self.known.contains(&cum) {
-                // Recorded, but not WATCHED: the row was finished by the time
-                // an earlier run of the bot recorded it, so it stands for
-                // nothing about the rows under it (no `recorded_at_ms`).
-                self.slots[i].recorded = Some(cum);
-                continue;
             }
-            // On an ordered board the odd slots are the category rows by
-            // construction, whatever their name came back as ("au" for
-            // "(Any%)", which the bracket rule cannot see) or whether it came
-            // back at all: a category row whose name never reads still ends
-            // at the cumulative the row under it is measured from, and left
-            // unrecorded it breaks the chain for every row below.
-            if self.ordered() && i % 2 == 1 {
+            for (cum, _) in cands {
+                // Recorded already, by an earlier run of the bot over this
+                // broadcast.
+                if self.known.contains(&cum) {
+                    // Recorded, but not WATCHED: the row was finished by the time
+                    // an earlier run of the bot recorded it, so it stands for
+                    // nothing about the rows under it (no `recorded_at_ms`).
+                    self.slots[i].recorded = Some(cum);
+                    break;
+                }
+                // On an ordered board the odd slots are the category rows by
+                // construction, whatever their name came back as ("au" for
+                // "(Any%)", which the bracket rule cannot see) or whether it came
+                // back at all: a category row whose name never reads still ends
+                // at the cumulative the row under it is measured from, and left
+                // unrecorded it breaks the chain for every row below.
+                if self.ordered() && i % 2 == 1 {
+                    self.slots[i].recorded = Some(cum);
+                    self.slots[i].recorded_at_ms = Some(at_ms);
+                    self.known.push(cum);
+                    break;
+                }
+                // A run has to be filed under a name. A completed row keeps its
+                // name for the rest of the event, so waiting costs a pass.
+                let Some(read) = self.slots[i].name().map(str::to_string) else {
+                    break;
+                };
+                // The race board prints each game as two rows: the game, and its
+                // category in brackets under it, which is the transition into
+                // the next game. The bracketed row fits no roster name and is
+                // not a game, so nothing is filed under it — but its cumulative
+                // stands, because the row under it derives its segment from it
+                // (Pac-Mania's 7:26 is 10:18 less the 2:52 the bracketed row
+                // reached). OCR loses the opening bracket far more often than
+                // the closing one, so a name that ends in one with no opening
+                // bracket anywhere is the mark too; a game with brackets in its
+                // name ("SMB3 (Warpless)") carries its own and is not caught,
+                // and a roster match keeps a row whatever it looks like.
+                if self.canonical(i).is_none() && bracketed(&read) {
+                    self.slots[i].recorded = Some(cum);
+                    self.slots[i].recorded_at_ms = Some(at_ms);
+                    self.known.push(cum);
+                    break;
+                }
+                let Some((segment_ms, derived)) = self.segment_for(i, cum) else {
+                    continue;
+                };
+                // The roster's spelling of the game, so a reading missing its
+                // first letter is the same game's history as a clean one. Where
+                // no roster name fits — or where another slot of this event took
+                // the game this one's reading fits best, and nothing acceptable
+                // was left — the reading stands and is counted.
+                let canonical = self.canonical(i).map(str::to_string);
+                let unmatched = canonical.is_none();
+                let game = canonical.unwrap_or_else(|| read.clone());
+                // Under half his own best for the game this is a misread, not a
+                // completion: left unrecorded, so a later pass reading the row
+                // right can still file it.
+                if self
+                    .floors
+                    .get(&game)
+                    .is_some_and(|floor| segment_ms < *floor)
+                {
+                    self.refuse(i);
+                    continue;
+                }
+                if unmatched {
+                    self.unmatched += 1;
+                }
+                let as_read = (game != read).then_some(read);
                 self.slots[i].recorded = Some(cum);
                 self.slots[i].recorded_at_ms = Some(at_ms);
                 self.known.push(cum);
-                continue;
+                out.push(Completion {
+                    slot: i,
+                    game,
+                    as_read,
+                    unmatched,
+                    category: self.category.clone(),
+                    segment_ms,
+                    cumulative_ms: cum,
+                    started_at_ms: at_ms - segment_ms,
+                    ended_at_ms: at_ms,
+                    segment_derived: derived,
+                    backfilled: false,
+                });
+                break;
             }
-            // A run has to be filed under a name. A completed row keeps its
-            // name for the rest of the event, so waiting costs a pass.
-            let Some(read) = self.slots[i].name().map(str::to_string) else {
-                continue;
-            };
-            // The race board prints each game as two rows: the game, and its
-            // category in brackets under it, which is the transition into
-            // the next game. The bracketed row fits no roster name and is
-            // not a game, so nothing is filed under it — but its cumulative
-            // stands, because the row under it derives its segment from it
-            // (Pac-Mania's 7:26 is 10:18 less the 2:52 the bracketed row
-            // reached). OCR loses the opening bracket far more often than
-            // the closing one, so a name that ends in one with no opening
-            // bracket anywhere is the mark too; a game with brackets in its
-            // name ("SMB3 (Warpless)") carries its own and is not caught,
-            // and a roster match keeps a row whatever it looks like.
-            if self.canonical(i).is_none() && bracketed(&read) {
-                self.slots[i].recorded = Some(cum);
-                self.slots[i].recorded_at_ms = Some(at_ms);
-                self.known.push(cum);
-                continue;
-            }
-            let Some((segment_ms, derived)) = self.segment_for(i, cum) else {
-                continue;
-            };
-            // The roster's spelling of the game, so a reading missing its
-            // first letter is the same game's history as a clean one. Where
-            // no roster name fits — or where another slot of this event took
-            // the game this one's reading fits best, and nothing acceptable
-            // was left — the reading stands and is counted.
-            let canonical = self.canonical(i).map(str::to_string);
-            let unmatched = canonical.is_none();
-            let game = canonical.unwrap_or_else(|| read.clone());
-            // Under half his own best for the game this is a misread, not a
-            // completion: left unrecorded, so a later pass reading the row
-            // right can still file it.
-            if self
-                .floors
-                .get(&game)
-                .is_some_and(|floor| segment_ms < *floor)
-            {
-                self.refuse(i);
-                continue;
-            }
-            if unmatched {
-                self.unmatched += 1;
-            }
-            let as_read = (game != read).then_some(read);
-            self.slots[i].recorded = Some(cum);
-            self.slots[i].recorded_at_ms = Some(at_ms);
-            self.known.push(cum);
-            out.push(Completion {
-                slot: i,
-                game,
-                as_read,
-                unmatched,
-                category: self.category.clone(),
-                segment_ms,
-                cumulative_ms: cum,
-                started_at_ms: at_ms - segment_ms,
-                ended_at_ms: at_ms,
-                segment_derived: derived,
-                backfilled: false,
-            });
         }
         out.append(&mut self.backfill(at_ms));
         out
@@ -2642,14 +2649,12 @@ mod tests {
             .is_empty());
         assert_eq!(m.implausible(), 1);
         assert_eq!(m.unmatched(), 0);
-        // Read right, the row files once the right reading has as many
-        // votes as the refused one.
-        for t in [241_000, 301_000] {
-            assert!(m
-                .observe(&pass(&["8:14", "8:14"]), t, Some(494_000))
-                .is_empty());
-        }
-        let seen = m.observe(&pass(&["8:14", "8:14"]), 361_000, Some(494_000));
+        // Read right, the row files on the second reading, though the refused
+        // one was read three times: a refused candidate gives way to the next.
+        assert!(m
+            .observe(&pass(&["8:14", "8:14"]), 241_000, Some(494_000))
+            .is_empty());
+        let seen = m.observe(&pass(&["8:14", "8:14"]), 301_000, Some(494_000));
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].game, "Faria");
         assert_eq!(seen[0].segment_ms, 494_000);
