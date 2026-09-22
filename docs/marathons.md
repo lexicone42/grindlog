@@ -183,8 +183,13 @@ to refuse, and then the strongest reading did; at 480p a segment of 11:14
 came back "13:14" on four passes and "12:14" on five beside twelve of
 "11:14", and 11:16 came back "13:16" six times against two of "11:16" —
 in both the cumulative was right on every pass and the delta column agreed
-with it. Where the column's strongest reading still disagrees, `segment_for`
-waits its patience out and files the arithmetic's value, marked derived.
+with it. Between readings tied on votes, the one the arithmetic agrees with
+is the column's word: the last game's 13:14 read 13:14, 13:24, 13:14,
+13:24, 13:34 beside a cumulative read the same five times, the tie went to
+the larger value, and the row was still waiting when the stream dropped a
+minute later. Where the column's strongest reading still disagrees,
+`segment_for` waits its patience out and files the arithmetic's value,
+marked derived.
 
 **After a restart.** A rollout mid-run (three of them on 2026-09-18) hands
 the new tracker a board where the games already finished are baselines,
