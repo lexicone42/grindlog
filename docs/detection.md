@@ -621,7 +621,11 @@ proves it happened. The final act's split is never taken from the column,
 where it could only be a misread of the comparison row; it is the finish
 time, written when a run that already has splits finishes. The attempt
 counter is read every 2 s until the run has a number, and only while the
-timer was accepted within 3 s: LiveSplit bumps it the instant the runner
+timer was accepted within 3 s, into the tracker of the game the run is
+filed under — one per (game, category), seeded with that game's highest
+recorded number, since every splits file counts on its own; a foreign run
+(a practice game under `track`) reads its own board's counter into its own
+tracker, and keeps the number only if it closes under that game: LiveSplit bumps it the instant the runner
 restarts, before the old run's reset is seen, so a dying run must not take
 its successor's number. `counter.rs` decides which reading to believe: a
 value far ahead of the last one for the time elapsed is refused, the first

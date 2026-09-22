@@ -143,6 +143,7 @@ fn other_events(
                 "final_time_ms": r.final_time_ms,
                 "outcome": r.outcome,
                 "attempt_number": r.attempt_number,
+                "ls_attempt": r.ls_attempt,
                 "last_timer_ms": r.last_timer_ms,
             })).collect::<Vec<_>>(),
         }));
@@ -746,6 +747,7 @@ mod tests {
             outcome: "finished".into(),
             attempt_number: 1,
             last_timer_ms: Some(ms),
+            ls_attempt: None,
             session,
             tag: Some("Arcathlon".into()),
             day: "2026-08-28".into(),

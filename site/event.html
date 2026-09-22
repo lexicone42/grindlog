@@ -208,6 +208,12 @@ if (D.kind === 'game') {
     const days = [...new Set(byTime.map(r => r.day))];
     const rate = played ? Math.round(100 * fins.length / played) : 0;
     const R = D.race;
+    // His own counter, where the bot read it: how many attempts it saw
+    // against how many the counter says there were.
+    const nums = byTime.map(r => r.ls_attempt).filter(n => n != null);
+    const counterSpan = nums.length
+      ? ` · his counter ran ${Math.min(...nums)}–${Math.max(...nums)}`
+      : '';
     document.getElementById('sub').textContent =
       (R ? `Big 20 ${R.name} · game ${R.n} of ${R.of || 20}${R.goal ? ' · ' + R.goal : ''} · ` : '') +
       `${played} attempt${played === 1 ? '' : 's'}, ${fins.length} finished` +
@@ -224,7 +230,7 @@ if (D.kind === 'game') {
     const tiles = document.getElementById('tiles');
     tiles.hidden = false;
     tiles.innerHTML =
-      tile(played, played === 1 ? 'attempt' : 'attempts', `over ${days.length} day${days.length === 1 ? '' : 's'}`) +
+      tile(played, played === 1 ? 'attempt' : 'attempts', `over ${days.length} day${days.length === 1 ? '' : 's'}` + counterSpan) +
       tile(fins.length, 'finished', played ? `${rate}% of attempts` : '') +
       tile(bestRun ? fmt(bestRun.final_time_ms) : '—', 'best',
            bestRun ? `#${bestRun.attempt_number} · ${dshort(bestRun.started_at_ms)}` : 'no finish yet', 'gold') +
@@ -293,7 +299,9 @@ if (D.kind === 'game') {
     // reads as what it was.
     const top = Math.max(...byTime.map(r => r.depth || 0), 1);
     const rows = [...byTime].reverse();
-    let html = `<tr><th class="n">#</th><th class="num">Result</th><th class="bar">How far</th><th>Against the best</th></tr>`;
+    // The number is LiveSplit's own where the bot read it off his counter,
+    // and the bot's ordinal (#n) where it did not.
+    let html = `<tr><th class="n">run</th><th class="num">Result</th><th class="bar">How far</th><th>Against the best</th></tr>`;
     let day = null;
     for (const r of rows) {
       if (r.day !== day) {
@@ -312,7 +320,7 @@ if (D.kind === 'game') {
            ? `<span class="delta">reset at ${Math.round(100 * r.depth / bestRun.final_time_ms)}% of the best</span>`
            : r.depth != null ? '<span class="delta">reset</span>' : '');
       html += `<tr>
-        <td class="n tnum">${r.attempt_number ?? ''}</td>
+        <td class="n tnum">${r.ls_attempt != null ? r.ls_attempt : r.attempt_number != null ? '#' + r.attempt_number : ''}</td>
         <td class="num tnum${r === bestRun ? ' best' : ''}">${
           r.fin ? fmt(r.final_time_ms) + (r.pb && r !== bestRun ? '<span class="tag">new best</span>' : '')
           : r.depth != null ? `<span class="none">reset at ${fmt(r.depth)}</span>`

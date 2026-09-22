@@ -155,7 +155,12 @@ what it came down from).
 A game's own page (`/game/<slug>/`, `site/event.html`) shows the same figures
 for that game as tiles, a chart of every attempt against his Arcathlon time
 where he has one, and the attempts by day with a bar for how far each got on
-one scale for the page. His marathon completions of the game are listed
+one scale for the page. Each attempt carries LiveSplit's own number where
+the bot read it off that game's counter (the bot's ordinal, "#n", where it
+did not), and the attempts tile says the range his counter ran over: the
+gap between that range and the attempts recorded is what the capture
+missed. The counter is per splits file, so each game is its own sequence
+(`docs/detection.md`, *Splits, run numbers and golds*). His marathon completions of the game are listed
 apart at the end and are in none of the figures.
 Those last are kept apart deliberately: six of the twenty are also Arcathlon
 games, and a completion from a marathon in July says something real about

@@ -253,16 +253,38 @@ pub async fn marathon_totals(pool: &SqlitePool, category: &str, since_ms: i64) -
     Ok(v)
 }
 
+/// The highest LiveSplit number recorded for a game: the seed of its
+/// counter tracker. Each splits file counts on its own.
+pub async fn max_ls_attempt(pool: &SqlitePool, game: &str, category: &str) -> Result<Option<i64>> {
+    Ok(sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(ls_attempt) FROM runs WHERE game = ? AND category = ?",
+    )
+    .bind(game)
+    .bind(category)
+    .fetch_one(pool)
+    .await?)
+}
+
 /// Forget an attempt number that turned out to be a misread, wherever it was
-/// recorded in this session (fill-run-numbers infers it again from its
-/// neighbours). Returns how many rows were cleared.
-pub async fn clear_ls_attempt(pool: &SqlitePool, session_id: i64, value: i64) -> Result<u64> {
-    let res =
-        sqlx::query("UPDATE runs SET ls_attempt = NULL WHERE ls_attempt = ? AND session_id = ?")
-            .bind(value)
-            .bind(session_id)
-            .execute(pool)
-            .await?;
+/// recorded for this game in this session (fill-run-numbers infers it again
+/// from its neighbours). Returns how many rows were cleared.
+pub async fn clear_ls_attempt(
+    pool: &SqlitePool,
+    session_id: i64,
+    game: &str,
+    category: &str,
+    value: i64,
+) -> Result<u64> {
+    let res = sqlx::query(
+        "UPDATE runs SET ls_attempt = NULL \
+         WHERE ls_attempt = ? AND session_id = ? AND game = ? AND category = ?",
+    )
+    .bind(value)
+    .bind(session_id)
+    .bind(game)
+    .bind(category)
+    .execute(pool)
+    .await?;
     Ok(res.rows_affected())
 }
 
@@ -1057,6 +1079,9 @@ pub struct OtherRun {
     /// final time and these add nothing to it.
     pub attempt_number: i64,
     pub last_timer_ms: Option<i64>,
+    /// LiveSplit's own number for the attempt, read off that game's
+    /// counter; None when it was not read.
+    pub ls_attempt: Option<i64>,
     /// The session, so runs can be grouped by broadcast without exposing
     /// anything else about it.
     pub session: i64,
@@ -1075,7 +1100,7 @@ pub struct OtherRun {
 pub async fn other_runs(pool: &SqlitePool, game: &str, category: &str) -> Result<Vec<OtherRun>> {
     let rows = sqlx::query(
         "SELECT r.game, r.category, r.started_at_ms, r.final_time_ms, r.outcome, \
-         r.attempt_number, r.last_timer_ms, \
+         r.attempt_number, r.last_timer_ms, r.ls_attempt, \
          r.session_id, s.tag, \
          date(r.started_at_ms/1000,'unixepoch','localtime') AS day \
          FROM runs r LEFT JOIN sessions s ON r.session_id = s.id \
@@ -1096,6 +1121,7 @@ pub async fn other_runs(pool: &SqlitePool, game: &str, category: &str) -> Result
             outcome: r.get("outcome"),
             attempt_number: r.get("attempt_number"),
             last_timer_ms: r.get("last_timer_ms"),
+            ls_attempt: r.get("ls_attempt"),
             session: r.get::<Option<i64>, _>("session_id").unwrap_or(0),
             tag: r.get("tag"),
             day: r.get("day"),
@@ -1608,6 +1634,43 @@ mod tests {
         assert_eq!(
             now_playing(&pool2).await.unwrap().game.as_deref(),
             Some("Some Homebrew")
+        );
+    }
+
+    /// A misread number is cleared for the game it was read for, not for
+    /// another game whose counter happens to stand at the same value; the
+    /// seed of a game's tracker is that game's own highest number.
+    #[tokio::test]
+    async fn a_run_number_is_cleared_and_seeded_per_game() {
+        let (_dir, pool) = test_pool().await;
+        let sid = open_session(&pool, 1000, "hls", "somechannel", None, None)
+            .await
+            .unwrap();
+        for (game, no) in [("Moon Crystal", 51), ("Jaws", 51), ("Moon Crystal", 50)] {
+            let mut r = run(game, 1, 2000, None);
+            r.session_id = Some(sid);
+            r.ls_attempt = Some(no);
+            insert_run(&pool, r).await.unwrap();
+        }
+        assert_eq!(
+            max_ls_attempt(&pool, "Moon Crystal", "Any%").await.unwrap(),
+            Some(51)
+        );
+        assert_eq!(
+            max_ls_attempt(&pool, "Excitebike", "Any%").await.unwrap(),
+            None
+        );
+        let n = clear_ls_attempt(&pool, sid, "Moon Crystal", "Any%", 51)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            max_ls_attempt(&pool, "Moon Crystal", "Any%").await.unwrap(),
+            Some(50)
+        );
+        assert_eq!(
+            max_ls_attempt(&pool, "Jaws", "Any%").await.unwrap(),
+            Some(51)
         );
     }
 }
