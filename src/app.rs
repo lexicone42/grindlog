@@ -98,6 +98,9 @@ struct CurrentRun {
     started_unix_ms: i64,
     session_id: Option<i64>,
     ls_attempt: Option<i64>,
+    /// The (game, category) whose counter `ls_attempt` was read off: a run
+    /// keeps its number only when it closes under that game.
+    ls_attempt_for: Option<(String, String)>,
     splits: Vec<crate::splits::RecordedSplit>,
     /// The target this run has had: set when it starts under one, refreshed on
     /// every frame the pane names a board while it is under way.
@@ -2358,16 +2361,16 @@ pub async fn run(cfg: Config) -> Result<()> {
         invert: cfg.attempts_counter.invert,
         auto_threshold: false,
     };
-    // Which attempt-counter reading to believe (see counter.rs), seeded with
-    // the highest number already recorded.
-    // The run loop's latest adopted counter and when: what the identity gate
-    // falls back to when the pane pass cannot see the counter (`with_counter`).
+    // The run loop's latest adopted counter for the TRACKED game and when:
+    // what the identity gate falls back to when the pane pass cannot see the
+    // counter (`with_counter`).
     let mut last_counter_seen: Option<(i64, i64)> = None;
-    let mut counter = crate::counter::CounterTracker::new(
-        sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(ls_attempt) FROM runs")
-            .fetch_one(&pool)
-            .await?,
-    );
+    // Which attempt-counter reading to believe (see counter.rs), one tracker
+    // per (game, category): every splits file has its own counter, and a
+    // practice game's numbers are a sequence of their own. Seeded on first
+    // use with the highest number already recorded for that game.
+    let mut counters: std::collections::HashMap<(String, String), crate::counter::CounterTracker> =
+        std::collections::HashMap::new();
     let mut last_counter_read_t: i64 = i64::MIN / 2;
     // Reference times the layout advertises (Sum of Best, season best, PB,
     // WR), seeded with what a previous run already persisted so a restart
@@ -3778,16 +3781,22 @@ pub async fn run(cfg: Config) -> Result<()> {
 
         // LiveSplit attempt-counter pass: only while a run needs one, on the
         // slow cadence; requires two matching reads before it's trusted.
-        // Tracked game only, like the reference rows above. Under `track` a
-        // foreign run is in progress here, and the number beside it belongs
-        // to ANOTHER game's counter — a different sequence entirely. Feeding
-        // it to `counter` would leave the tracker holding Die Hard's number
-        // when Ninja Gaiden comes back, and every foreign run is filed with
-        // `ls_attempt = None` regardless, so there is nothing to gain by
-        // reading it.
-        if let (Some((cx, cy, cw2, ch2)), Some(cr)) =
-            (reg.counter, current.as_mut().filter(|_| pane_identity.ok()))
-        {
+        // Read into the tracker of the game the run is filed under: the
+        // tracked game when the pane is its own, the target when the run is
+        // foreign. A foreign board's counter is that game's sequence and
+        // never reaches the tracked game's tracker. A run the gate could not
+        // name is not read (it is dropped at close).
+        if let (Some((cx, cy, cw2, ch2)), Some(cr)) = (
+            reg.counter,
+            current
+                .as_mut()
+                .filter(|c| !c.orphaned && (pane_identity.ok() || c.foreign.is_some())),
+        ) {
+            let key = match cr.foreign.as_ref() {
+                Some(f) => (f.game.clone(), f.category.clone()),
+                None => (cr.game.clone(), cr.category.clone()),
+            };
+            let tracked = cr.foreign.is_none();
             // Read fast (every 2s) until the run's number is captured — short
             // runs are the ones that used to slip through without one.
             // LiveSplit bumps the counter the instant the runner restarts,
@@ -3805,52 +3814,20 @@ pub async fn run(cfg: Config) -> Result<()> {
                 if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&cp)?).await {
                     debug!("counter ocr: {:?} (crop {cx},{cy} {cw2}x{ch2})", txt.trim());
                     if let Some(v) = crate::timeparse::parse_counter(txt.trim()) {
-                        use crate::counter::CounterEvent;
-                        match counter.observe(v, t) {
-                            CounterEvent::Ignore => {}
-                            CounterEvent::Adopt(v) => {
-                                last_counter_seen = Some((v, t));
-                                info!("livesplit attempt counter: {v}");
-                                health.counter_reads += 1;
-                                cr.ls_attempt = Some(v);
-                            }
-                            CounterEvent::Rebase(v) => {
-                                last_counter_seen = Some((v, t));
-                                warn!(
-                                    "attempt counter restarted at {v} (a new splits file?); numbering follows it"
-                                );
-                                health.event(
-                                    time_base.map(|b| b + t).unwrap_or_else(util::unix_ms),
-                                    "counter",
-                                    format!("restarted at {v}"),
-                                );
-                                health.counter_reads += 1;
-                                cr.ls_attempt = Some(v);
-                            }
-                            CounterEvent::Revert { bogus, to } => {
-                                warn!(
-                                    "attempt counter {bogus} was a misread (two runs in a row read lower, ending at {to}); reverting"
-                                );
-                                if let Some(sid) = session_id {
-                                    match db::clear_ls_attempt(&pool, sid, bogus).await {
-                                        Ok(n) if n > 0 => {
-                                            info!("cleared run number {bogus} from {n} run(s)")
-                                        }
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            warn!("failed to clear run number {bogus}: {e:#}")
-                                        }
-                                    }
-                                }
-                                health.event(
-                                    time_base.map(|b| b + t).unwrap_or_else(util::unix_ms),
-                                    "counter",
-                                    format!("{bogus} was a misread; now {to}"),
-                                );
-                                health.counter_reads += 1;
-                                cr.ls_attempt = Some(to);
-                            }
-                        }
+                        observe_counter(
+                            &mut counters,
+                            &pool,
+                            &key,
+                            tracked,
+                            v,
+                            t,
+                            cr,
+                            &mut health,
+                            &mut last_counter_seen,
+                            session_id,
+                            time_base,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -3943,6 +3920,40 @@ pub async fn run(cfg: Config) -> Result<()> {
                         }
                     }
                     let at_ms = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
+                    // The header's own counter, read with the pane's words:
+                    // a second source for the run's number, at the pane
+                    // cadence, for a board whose counter crop reads nothing.
+                    if let (Some(v), Some(cr)) = (
+                        board
+                            .counter
+                            .as_deref()
+                            .and_then(crate::timeparse::parse_counter),
+                        current.as_mut().filter(|c| {
+                            c.ls_attempt.is_none()
+                                && !c.orphaned
+                                && (pane_identity.ok() || c.foreign.is_some())
+                        }),
+                    ) {
+                        let key = match cr.foreign.as_ref() {
+                            Some(f) => (f.game.clone(), f.category.clone()),
+                            None => (cr.game.clone(), cr.category.clone()),
+                        };
+                        let tracked = cr.foreign.is_none();
+                        observe_counter(
+                            &mut counters,
+                            &pool,
+                            &key,
+                            tracked,
+                            v,
+                            t,
+                            cr,
+                            &mut health,
+                            &mut last_counter_seen,
+                            session_id,
+                            time_base,
+                        )
+                        .await?;
+                    }
                     let board = with_counter(board, last_counter_seen, t);
                     apply_identity(
                         &readings,
@@ -4266,7 +4277,9 @@ pub async fn run(cfg: Config) -> Result<()> {
             // run, dropped when the run ends.
             match &ev {
                 Event::Started { .. } => {
-                    counter.reset_run();
+                    for c in counters.values_mut() {
+                        c.reset_run();
+                    }
                     if cfg.splits.enabled {
                         splits_tracker = Some(crate::splits::SplitsTracker::new(
                             shared.acts.len(),
@@ -4389,6 +4402,89 @@ struct ForeignRun {
     /// The floor that decides finish from death for THIS run, since the
     /// configured `min_final_ms` belongs to the tracked game.
     min_final_ms: i64,
+}
+
+/// One parsed reading of a game's attempt counter, off the counter crop or
+/// off the pane's header, into that game's tracker; what it decides goes on
+/// the run. `tracked` says the reading is the tracked game's, whose latest
+/// number the identity gate also remembers (`with_counter`).
+#[allow(clippy::too_many_arguments)]
+async fn observe_counter(
+    counters: &mut std::collections::HashMap<(String, String), crate::counter::CounterTracker>,
+    pool: &sqlx::SqlitePool,
+    key: &(String, String),
+    tracked: bool,
+    v: i64,
+    t: i64,
+    cr: &mut CurrentRun,
+    health: &mut db::SessionHealth,
+    last_counter_seen: &mut Option<(i64, i64)>,
+    session_id: Option<i64>,
+    time_base: Option<i64>,
+) -> Result<()> {
+    use crate::counter::CounterEvent;
+    if !counters.contains_key(key) {
+        let seed = db::max_ls_attempt(pool, &key.0, &key.1).await?;
+        counters.insert(key.clone(), crate::counter::CounterTracker::new(seed));
+    }
+    let counter = counters.get_mut(key).expect("inserted above");
+    let whose = if tracked {
+        String::new()
+    } else {
+        format!(" ({})", key.0)
+    };
+    let at = time_base.map(|b| b + t).unwrap_or_else(util::unix_ms);
+    match counter.observe(v, t) {
+        CounterEvent::Ignore => {}
+        CounterEvent::Adopt(v) => {
+            if tracked {
+                *last_counter_seen = Some((v, t));
+            }
+            info!("livesplit attempt counter: {v}{whose}");
+            health.counter_reads += 1;
+            cr.ls_attempt = Some(v);
+            cr.ls_attempt_for = Some(key.clone());
+        }
+        CounterEvent::Rebase(v) => {
+            if tracked {
+                *last_counter_seen = Some((v, t));
+            }
+            warn!("attempt counter{whose} restarted at {v} (a new splits file?); numbering follows it");
+            health.event(at, "counter", format!("restarted at {v}"));
+            health.counter_reads += 1;
+            cr.ls_attempt = Some(v);
+            cr.ls_attempt_for = Some(key.clone());
+        }
+        CounterEvent::Revert { bogus, to } => {
+            warn!(
+                "attempt counter{whose} {bogus} was a misread (two runs in a row read lower, ending at {to}); reverting"
+            );
+            if let Some(sid) = session_id {
+                match db::clear_ls_attempt(pool, sid, &key.0, &key.1, bogus).await {
+                    Ok(n) if n > 0 => info!("cleared run number {bogus} from {n} run(s)"),
+                    Ok(_) => {}
+                    Err(e) => warn!("failed to clear run number {bogus}: {e:#}"),
+                }
+            }
+            health.event(at, "counter", format!("{bogus} was a misread; now {to}"));
+            health.counter_reads += 1;
+            cr.ls_attempt = Some(to);
+            cr.ls_attempt_for = Some(key.clone());
+        }
+    }
+    Ok(())
+}
+
+/// The LiveSplit number a run keeps when it closes under `game`/`category`:
+/// only one read off that game's own counter. A run whose target changed
+/// after its number was adopted drops it, whatever the sequence.
+fn numbered_as(
+    ls_attempt: Option<i64>,
+    adopted_for: Option<&(String, String)>,
+    game: &str,
+    category: &str,
+) -> Option<i64> {
+    ls_attempt.filter(|_| adopted_for.is_some_and(|(g, c)| g == game && c == category))
 }
 
 /// How far a recorded time may exceed the run's own wall-clock lifetime
@@ -4604,6 +4700,7 @@ async fn handle_event(
                 started_unix_ms: now - timer_ms,
                 session_id: None, // patched in by the frame loop
                 ls_attempt: None,
+                ls_attempt_for: None,
                 splits: Vec::new(),
                 foreign: foreign.cloned(),
                 orphaned: false,
@@ -4655,11 +4752,17 @@ async fn handle_event(
                 return Ok(());
             }
             // Same retarget as the Reset arm: game, category and attempt
-            // number resolved NOW, no LiveSplit number, no splits.
+            // number resolved NOW, the LiveSplit number only if it was read
+            // off this game's counter, no splits.
             if let Some(f) = target {
                 run.game = f.game.clone();
                 run.category = f.category.clone();
-                run.ls_attempt = None;
+                run.ls_attempt = numbered_as(
+                    run.ls_attempt,
+                    run.ls_attempt_for.as_ref(),
+                    &run.game,
+                    &run.category,
+                );
                 run.splits.clear();
                 run.attempt_number =
                     db::next_attempt_number(pool, &run.game, &run.category).await?;
@@ -4849,11 +4952,14 @@ async fn handle_event(
             if let Some(f) = target {
                 run.game = f.game.clone();
                 run.category = f.category.clone();
-                // The runner's LiveSplit counter belongs to the tracked
-                // game; this board has its own and they are different
-                // sequences. Numbering here would let fill-run-numbers.sh
-                // invent lifetime ordinals across unrelated games.
-                run.ls_attempt = None;
+                // The LiveSplit number stays only if it was read off THIS
+                // game's counter: each splits file is its own sequence.
+                run.ls_attempt = numbered_as(
+                    run.ls_attempt,
+                    run.ls_attempt_for.as_ref(),
+                    &run.game,
+                    &run.category,
+                );
                 // The acts are the tracked game's six. Whatever was
                 // collected off another board is not this game's splits.
                 run.splits.clear();
@@ -4880,7 +4986,7 @@ async fn handle_event(
                             final_time_ms: Some(last_ms),
                             last_timer_ms: Some(last_ms),
                             session_id: run.session_id,
-                            ls_attempt: None,
+                            ls_attempt: run.ls_attempt,
                         },
                     )
                     .await?;
@@ -5353,6 +5459,7 @@ mod tests {
                 foreign: None,
                 orphaned: false,
                 ls_attempt: None,
+                ls_attempt_for: None,
                 splits: Vec::new(),
             });
             let (pool, shared, tx, foreign) = (&pool, &shared, &tx, &foreign);
@@ -5501,6 +5608,7 @@ mod tests {
             started_unix_ms: 1_000_000,
             session_id: None,
             ls_attempt: None,
+            ls_attempt_for: None,
             splits: Vec::new(),
             foreign: carried,
             orphaned: false,
@@ -5693,6 +5801,7 @@ mod tests {
             foreign: None,
             orphaned: false,
             ls_attempt: Some(94_200),
+            ls_attempt_for: Some(("Ninja Gaiden (NES)".into(), "Any%".into())),
             splits: vec![crate::splits::RecordedSplit {
                 act_index: 0,
                 act_name: "Act 6".into(),
@@ -6398,5 +6507,28 @@ mod tests {
             Frozen::Unreadable
         );
         assert_eq!(freeze_confirmed(&[], crop, 78_440), Frozen::Unreadable);
+    }
+
+    /// A LiveSplit number belongs to the counter it was read off: a run that
+    /// closes under another game drops it.
+    #[test]
+    fn a_number_is_kept_only_under_the_game_whose_counter_it_came_from() {
+        let moon = ("Moon Crystal".to_string(), "Big 20 #23".to_string());
+        assert_eq!(
+            numbered_as(Some(51), Some(&moon), "Moon Crystal", "Big 20 #23"),
+            Some(51)
+        );
+        assert_eq!(
+            numbered_as(Some(51), Some(&moon), "Jaws", "Big 20 #23"),
+            None
+        );
+        assert_eq!(
+            numbered_as(Some(51), None, "Moon Crystal", "Big 20 #23"),
+            None
+        );
+        assert_eq!(
+            numbered_as(None, Some(&moon), "Moon Crystal", "Big 20 #23"),
+            None
+        );
     }
 }
