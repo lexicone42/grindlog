@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Supervised live bot: restarts on crash/exit, survives terminal and Claude
-# sessions. Start it detached in tmux:
+# sessions. Start it with scripts/start-supervisor.sh, which puts it in tmux
+# on a server of its own (socket "grindlog"), out of the way of `tmux attach`.
 #
-#   tmux new-session -d -s ngtimer ./scripts/run-live.sh
-#
-# Attach to watch: tmux attach -t ngtimer   (detach with Ctrl-b d)
-# Stop for good:   tmux kill-session -t ngtimer
+# Attach to watch: tmux -L grindlog attach -t ngtimer   (detach with Ctrl-b d)
+# Stop for good:   tmux -L grindlog kill-session -t ngtimer
 set -u
 cd "$(dirname "$0")/.." || exit 1
 # One OpenMP thread: tesseract's threads only spin-wait on crops this small.

@@ -11,8 +11,9 @@
 #               on five passes (the timer being misread)
 #   site-stale    while a session is open, the public page is under 30 min old
 #
-#   supervisor  the tmux session "ngtimer" exists and scripts/run-live.sh is
-#               alive in it (the server outlives a closed window)
+#   supervisor  the tmux session "ngtimer" exists on the bot's own tmux server
+#               (socket "grindlog") and scripts/run-live.sh is alive in it (the
+#               server outlives a closed window)
 #   clock       the box is within a minute of the public site's HTTP Date
 #               (a reboot without a time daemon; deploys fail to sign)
 #   bot         exactly one `ngtwitchtimer --config live.toml run` is alive
@@ -93,16 +94,22 @@ check() {
   fi
 }
 
-# --- supervisor: the tmux session run-live.sh lives in (=name: exact match),
-# AND the wrapper alive inside it. The server outlives its windows: a session
-# whose bot window was closed by hand still answers has-session while nothing
-# restarts the bot.
-if ! tmux has-session -t =ngtimer 2>/dev/null; then
-  check supervisor 1 "no tmux session ngtimer (tmux new-session -d -s ngtimer scripts/run-live.sh)"
-elif ! pgrep -f 'scripts/run-live\.s[h]' >/dev/null; then
-  check supervisor 1 "tmux session ngtimer has no run-live.sh in it (tmux kill-session -t ngtimer; tmux new-session -d -s ngtimer scripts/run-live.sh)"
+# --- supervisor: the tmux session run-live.sh lives in, on the bot's own
+# tmux server (socket "grindlog", scripts/start-supervisor.sh), AND the
+# wrapper alive inside it. The server outlives its windows: a session whose
+# bot window was closed by hand still answers has-session while nothing
+# restarts the bot. A session on the DEFAULT server is an older crontab's:
+# still supervised, so not a failure, but it is where `tmux attach` lands.
+if tmux -L grindlog has-session -t =ngtimer 2>/dev/null; then
+  if pgrep -f 'scripts/run-live\.s[h]' >/dev/null; then
+    check supervisor 0 "tmux -L grindlog session ngtimer present, run-live.sh alive"
+  else
+    check supervisor 1 "tmux -L grindlog session ngtimer has no run-live.sh in it (tmux -L grindlog kill-session -t ngtimer; scripts/start-supervisor.sh)"
+  fi
+elif tmux has-session -t =ngtimer 2>/dev/null && pgrep -f 'scripts/run-live\.s[h]' >/dev/null; then
+  check supervisor 0 "session ngtimer on the DEFAULT tmux server; move it between runs: scripts/start-supervisor.sh"
 else
-  check supervisor 0 "tmux session ngtimer present, run-live.sh alive"
+  check supervisor 1 "no supervisor session (scripts/start-supervisor.sh)"
 fi
 
 # --- bot: the process itself, not `... live.toml report --json` from the site

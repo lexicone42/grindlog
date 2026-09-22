@@ -96,7 +96,7 @@ stores everything as millisecond integers in SQLite (`sessions`, `runs`,
 `splits`, `transitions`, `settings`).
 
 For a deployment that outlives the terminal, `scripts/run-live.sh`
-supervises it under tmux and `scripts/rollout.sh` ships a new build. See
+supervises it under tmux on a server of its own (`scripts/start-supervisor.sh`) and `scripts/rollout.sh` ships a new build. See
 [docs/operations.md](docs/operations.md).
 
 ## Chat commands
