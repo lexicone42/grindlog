@@ -1446,13 +1446,25 @@ impl Marathon {
         // A segment longer than the cumulative it is part of is not a
         // reading of this row at all — a real board came back with 46:44
         // beside a cumulative of 12:45.
-        let voted = self.slots[i]
-            .segment_votes
-            .iter()
-            .filter(|((c, s), _)| *c == cum && *s <= cum)
-            .max_by_key(|((_, s), v)| (v.count, *s))
-            .map(|((_, s), v)| (*s, *v));
         let expected = self.expected_segment(i, cum);
+        let exp = match expected {
+            Expect::Segment(e) => Some(e),
+            _ => None,
+        };
+        let votes = || {
+            self.slots[i]
+                .segment_votes
+                .iter()
+                .filter(|((c, s), _)| *c == cum && *s <= cum)
+        };
+        // The reading the arithmetic agrees with, before the most voted: at
+        // 480p a "13:14" reads "13:24" and "13:34" as often as itself, and
+        // between readings tied on votes the row above says which is right.
+        let voted = votes()
+            .filter(|((_, s), _)| exp.is_some_and(|e| (*s - e).abs() <= SEGMENT_SLACK_MS))
+            .max_by_key(|(_, v)| v.count)
+            .or_else(|| votes().max_by_key(|((_, s), v)| (v.count, *s)))
+            .map(|((_, s), v)| (*s, *v));
         match (voted, expected) {
             // The board's arithmetic ruled the candidate out. Never take the
             // segment column for it: "no previous game to check against" and
@@ -5172,5 +5184,72 @@ mod tests {
             "counted from the pass the votes settled"
         );
         assert!(m.describe().contains("unvouched: Jaws"), "{}", m.describe());
+    }
+
+    /// A segment column tied between a right reading and a wrong one files
+    /// with the reading the arithmetic agrees with, on the pass the guards
+    /// pass. Measured: the last game's 13:14 read 13:14, 13:24, 13:14, 13:24,
+    /// 13:34 beside a cumulative read the same five times, the tie went to
+    /// the larger value, and the row was left waiting when the stream ended.
+    #[test]
+    fn a_tied_segment_column_goes_the_way_of_the_arithmetic() {
+        let mut m = race_tracker();
+        let pass = |jaws: &[&str], cat: &[&str], moon: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Celeste Mario", &["14:50", "4:00:12"]),
+                    row("(Any%)", &["0:31", "4:00:43"]),
+                    row("Jaws", jaws),
+                    row("(Any% No Manip)", cat),
+                    row("Moon Crystal", moon),
+                ],
+            )
+        };
+        let h = 3_600_000;
+        let cmp = ["7:20", "4:08:03"];
+        let moon_cmp = ["19:11", "4:38:17"];
+        for i in 0..3 {
+            let total = Some(4 * h + 2 * 60_000 + i * 60_000);
+            assert!(m
+                .observe(&pass(&cmp, &[], &moon_cmp), 1_000 + i * 60_000, total)
+                .is_empty());
+        }
+        // Jaws finishes at 4:07:14, then its category row at 4:07:45.
+        let jaws = ["6:31", "4:07:14"];
+        let total = Some(4 * h + 7 * 60_000 + 30_000);
+        assert!(m
+            .observe(&pass(&jaws, &[], &moon_cmp), 181_000, total)
+            .is_empty());
+        let seen = m.observe(&pass(&jaws, &[], &moon_cmp), 241_000, total);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Jaws");
+        let cat = ["0:31", "4:07:45"];
+        for t in [301_000, 361_000] {
+            assert!(m
+                .observe(&pass(&jaws, &cat, &moon_cmp), t, total)
+                .is_empty());
+        }
+        // Moon Crystal finishes at 4:20:59; its segment reads 13:14 and 13:24
+        // by turns, the total agreeing on the last pass only.
+        let reads = [
+            ("13:14", None),
+            ("13:24", None),
+            ("13:14", None),
+            ("13:24", None),
+            ("13:34", Some(4 * h + 20 * 60_000 + 59_000)),
+        ];
+        let mut seen = Vec::new();
+        for (i, (seg, total)) in reads.iter().enumerate() {
+            seen.extend(m.observe(
+                &pass(&jaws, &cat, &[seg, "4:20:59"]),
+                421_000 + i as i64 * 60_000,
+                *total,
+            ));
+        }
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Moon Crystal");
+        assert_eq!(seen[0].segment_ms, 13 * 60_000 + 14_000);
+        assert!(!seen[0].segment_derived);
     }
 }
