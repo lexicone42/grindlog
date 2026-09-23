@@ -99,7 +99,16 @@ zero offset. `big20-tall` came last (2026-09-18): his Moon Crystal board,
 eight segments with the big timer under them, is taller than the three were
 measured for, and none of their pane crops reached its "Moon Crystal / Any%"
 header, so no layout could name the board and an evening of attempts was
-dropped at close. One
+dropped at close. Its timer crop is the digits and their room to grow:
+the timer is right-aligned and gains a digit on the LEFT at ten minutes
+and at the hour, so the crop starts at the pane's left edge (`crop_x =
+292`); a crop 40 px short of it read "10:04" as "0:04", a zeroed reset at
+9:59 on every attempt that got that far (five on the site, four more on
+the 18th). And it is the digits' height only (`crop_y = 812`, 100 px): the
+195 px crop before it took in two split rows, whose times were read as
+the timer ("0:59.6" three seconds into an attempt, a desync every twenty
+seconds), and it fit the older, shorter practice panes well enough to win
+the lock there and read nothing. One
 crop for the whole 560–736 span was tried first and was worse: with the
 four-row panes at its bottom edge, Uninvited and Faria stopped recording.
 Validated by replaying every unrecorded stretch of that VOD: Crisis Force
