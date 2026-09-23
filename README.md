@@ -99,6 +99,11 @@ For a deployment that outlives the terminal, `scripts/run-live.sh`
 supervises it under tmux on a server of its own (`scripts/start-supervisor.sh`) and `scripts/rollout.sh` ships a new build. See
 [docs/operations.md](docs/operations.md).
 
+To develop in a sandboxed session with the same toolchain as every other
+contributor, `minimal.toml` is a [Minimal](https://minimal.dev) blueprint;
+see [docs/minimal.md](docs/minimal.md) for how to bring one up here and
+what stays on the host.
+
 ## Chat commands
 
 Optional, under `[chat]`, with a bot account and an IRC OAuth token. Point
