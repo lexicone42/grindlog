@@ -373,9 +373,12 @@ Three details it must get right, each of which was a bug first:
   finish. The pane can also correct the timer: the glyph reader's crop can
   drift off the digits and read "3:14.54" for a timer at 13:14.54 (Uninvited,
   2026-09-15, after a stretch the reader could not follow), while the pane
-  pass reads the same digits whole as the tallest time-shaped word; when that
-  reading and a row agree with each other and not with the frozen value, the
-  run ended at theirs. (A step rule — "the row is the frozen value plus ten
+  pass reads the same digits whole as the words inside the timer's own
+  rectangle (told from the rows by that rectangle, not by height: a larger
+  pane's rows are taller than a quarter of the timer crop, and its final row
+  carrying the frozen value was counted as the timer, a finish filed as a
+  pause); when that reading and a row agree with each other and not with
+  the frozen value, the run ended at theirs. (A step rule — "the row is the frozen value plus ten
   minutes" — was tried and is wrong: a paused Crisis Force board had its PB
   row, 11:18.4, exactly ten minutes over the paused timer at 1:18.44.)
   Rows that read but do not match are a reset with reason `paused`;

@@ -4176,7 +4176,11 @@ pub async fn run(cfg: Config) -> Result<()> {
                 _ => 0,
             };
             let verdict = match (&passed_pane, t - since > FREEZE_HOLD_MS) {
-                (Some(w), _) => Some(freeze_confirmed(w, active_regs.timer.3 * PANE_UP, last_ms)),
+                (Some(w), _) => {
+                    let t = active_regs.timer;
+                    let scaled = (t.0 * PANE_UP, t.1 * PANE_UP, t.2 * PANE_UP, t.3 * PANE_UP);
+                    Some(freeze_confirmed(w, scaled, last_ms))
+                }
                 (None, true) => Some(Frozen::Unreadable),
                 (None, false) => None,
             };
@@ -4628,12 +4632,20 @@ const FREEZE_HOLD_MS: i64 = 5_000;
 ///
 /// `Unreadable` when no row-sized time is on the pane at all — a pane that
 /// could not be read, not one that disagrees.
-fn freeze_confirmed(words: &[ocr::Word], timer_h: u32, last_ms: i64) -> Frozen {
-    let row_h = timer_h / 4;
-    let times = |tall: bool| {
+fn freeze_confirmed(words: &[ocr::Word], timer: R, last_ms: i64) -> Frozen {
+    // `timer` is the timer's rectangle in the words' frame: the words in it
+    // are the timer's own reading, every other time-shaped word a row. Told
+    // apart by height before, a quarter of the timer crop, which a larger
+    // pane's rows exceed: its final row carrying the frozen value was then
+    // counted as the timer and a finish went down as a pause.
+    let inside = |w: &ocr::Word| {
+        let (cx, cy) = (w.x + w.w / 2, w.y + w.h / 2);
+        cx >= timer.0 && cx < timer.0 + timer.2 && cy >= timer.1 && cy < timer.1 + timer.3
+    };
+    let times = |own: bool| {
         words
             .iter()
-            .filter(move |w| (w.h >= row_h) == tall)
+            .filter(move |w| inside(w) == own)
             .filter_map(|w| crate::timeparse::parse_time(&w.text))
     };
     let rows: Vec<i64> = times(false).collect();
@@ -6459,9 +6471,8 @@ mod tests {
             conf: 80.0,
             text: text.into(),
         };
-        // A 162 px timer crop at the pane pass's scale; rows read ~40 px
-        // tall there, the timer's own digits ~110.
-        let crop = 162 * PANE_UP;
+        // The timer's rectangle in the words' frame: the rows sit above it.
+        let crop = (0, 100, 1000, 200);
         // Crisis Force, finished: the final row carries the run, over the
         // timer reading the same value.
         let done = [
