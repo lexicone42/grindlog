@@ -40,23 +40,25 @@ patches = [{ source = "~/.gitconfig", dest = "~/.gitconfig" }]
 CARGO_TERM_COLOR = "always"
 
 # What CI runs, in a sandbox: fmt, clippy with warnings denied, the tests,
-# and a syntax pass over the scripts.
+# and a syntax pass over the scripts. A task holds only what it lists plus
+# the stack's packages: `base` (bash, coreutils, sed, grep, gawk, find) is
+# named, not assumed.
 [tasks.check]
-packages = ["cmake"]
+packages = ["base", "cmake"]
 bash = "cargo fmt --all -- --check && cargo clippy --release --all-targets -- -D warnings && cargo test --release && for f in scripts/*.sh; do bash -n \"$f\" || exit 1; done"
 
 [tasks.test]
-packages = ["cmake"]
+packages = ["base", "cmake"]
 exec = "cargo test --release"
 
 [tasks.build]
-packages = ["cmake"]
+packages = ["base", "cmake"]
 exec = "cargo build --release"
 
 # The marathon audit over every replayed Arcathlon capture (needs arcathlon-db/
 # beside the repo, which the sandbox sees as part of the tree).
 [tasks.audit]
-packages = ["cmake", "sqlite", "jq"]
+packages = ["base", "cmake", "sqlite", "jq"]
 bash = "cargo build --release && scripts/audit-arcathlon.sh"
 
 # The site: fill the run numbers, build the pages and the feed from the live
@@ -65,6 +67,6 @@ bash = "cargo build --release && scripts/audit-arcathlon.sh"
 # the host's ~/.aws, mapped read-only and gated by the user policy the first
 # time; in a session, the `aws` loadout brings the same files in.
 [tasks.deploy]
-packages = ["awscli", "sqlite", "jq", "curl", "util-linux"]
+packages = ["base", "awscli", "sqlite", "jq", "curl", "util-linux"]
 bash = "cargo build --release && ./scripts/deploy-site.sh"
 patches.dir."~/.aws" = "read-only"

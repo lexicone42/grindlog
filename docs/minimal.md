@@ -98,6 +98,9 @@ uploads them and invalidates CloudFront, in a sandbox that holds exactly
 what that needs: the Rust toolchain for the report binary, sqlite3, jq,
 curl, flock, and the AWS CLI.
 
+`base` is named in every task's packages: a task holds only what it lists
+plus the stack's, and bash, coreutils, sed, grep and gawk come from `base`.
+
 The AWS CLI is not in the public registry, so it is this repository's own
 package: `packages/awscli/build.ncl` and `build.sh`, built the way the
 registry builds httpie, with pip installing the sdist and its dependency
