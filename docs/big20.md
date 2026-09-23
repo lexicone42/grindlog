@@ -170,9 +170,12 @@ the bests set that day (a first finish named as such, an improvement with
 what it came down from).
 
 A game's own page (`/game/<slug>/`, `site/event.html`) shows the same figures
-for that game as tiles, a chart of every attempt against his Arcathlon time
-where he has one, and the attempts by day with a bar for how far each got on
-one scale for the page. Each attempt carries LiveSplit's own number where
+for that game as tiles, one chart of every running of the game in time
+order — practice attempts (finishes as points, resets as bars), the game's
+segment in each full practice run (squares) and each Arcathlon completion
+(rings), on one time scale with his best Arcathlon time as a dashed rule —
+and the attempts by day with a bar for how far each got on one scale for
+the page. Each attempt carries LiveSplit's own number where
 the bot read it off that game's counter (the bot's ordinal, "#n", where it
 did not), and the attempts tile says the range his counter ran over: the
 gap between that range and the attempts recorded is what the capture
