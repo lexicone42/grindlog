@@ -387,7 +387,11 @@ Three details it must get right, each of which was a bug first:
   row, 11:18.4, exactly ten minutes over the paused timer at 1:18.44.)
   Rows that read but do not match are a reset with reason `paused`;
   a pane with no row-sized time on it decides nothing, and the freeze goes
-  through as a finish with a warning, as does one no pass
+  through as a finish with a warning — unless the value is a fifth or more
+  under his best for the game, which no finish is and a pause before a
+  reset often is (Excitebike frozen at 5:49 against a best of 8:50, reset
+  four seconds later, was filed as his best); that is a reset with reason
+  `paused`. The same for one no pass
   reached within five seconds (a layout that lost its lock in the same
   moment). Only foreign runs are held; the tracked game's floor is its own.
 
