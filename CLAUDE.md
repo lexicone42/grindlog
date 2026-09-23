@@ -11,7 +11,8 @@ becomes runs, and why each step is shaped that way),
 [marathons](docs/marathons.md) (the ten-game days and their own tooling),
 [big20](docs/big20.md) (the race he is preparing for, and the practice days
 that go with it), [install](docs/install.md) (ffmpeg and tesseract,
-including without root).
+including without root), [minimal](docs/minimal.md) (developing in a
+sandboxed `min` session from `minimal.toml`, and what stays on the host).
 
 ## What this is
 

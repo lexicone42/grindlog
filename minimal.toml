@@ -1,0 +1,70 @@
+# Minimal blueprint: `min session activate --attach` gives a sandboxed
+# development session with the toolchain below, and `min task run <name>`
+# runs the checks CI runs in a sandbox of their own. See docs/minimal.md.
+#
+# What stays on the host: the live bot (scripts/run-live.sh under tmux), the
+# rollout, the site deploy (the AWS CLI is not in the registry) and anything
+# that reads a pane with tesseract (`locate`, `pane`, the splits and counter
+# reads of a replay): tesseract is not in the registry either. The unit
+# tests, the audits and the timer paths need neither.
+
+[upstream] # Source of software & tooling
+repo = "https://github.com/gominimal/pkgs"
+branch = "main"
+locked_commit = "79d15b4a2659d7826ee9e53e9e0bdd3d0cecf643"
+
+[stack]
+use = "rust"
+# aws-lc, behind rustls, compiles from source once per state dir.
+build_packages = ["cmake"]
+
+[defaults]
+state_key = "dev"
+
+[session] # min session activate --attach
+packages = [
+  "base", "git", "gh", "ripgrep", "vim",
+  # The scripts' tools: sqlite3, jq, curl and flock (util-linux).
+  "sqlite", "jq", "curl", "util-linux",
+  # Video decoding for replays; the aws-lc build.
+  "ffmpeg", "cmake",
+  "claude-code",
+]
+# Name and email for commits made inside. `gh` is in the session, but its
+# login (~/.config/gh, which holds a GitHub token) is not patched in: add
+# `{ source = "~/.config/gh", dest = "~/.config/gh" }` here and allow it in
+# ~/.config/minimal/user_policy.toml to push and open PRs from inside.
+patches = [{ source = "~/.gitconfig", dest = "~/.gitconfig" }]
+
+[session.vars]
+CARGO_TERM_COLOR = "always"
+
+# What CI runs, in a sandbox: fmt, clippy with warnings denied, the tests,
+# and a syntax pass over the scripts.
+[tasks.check]
+packages = ["cmake"]
+bash = "cargo fmt --all -- --check && cargo clippy --release --all-targets -- -D warnings && cargo test --release && for f in scripts/*.sh; do bash -n \"$f\" || exit 1; done"
+
+[tasks.test]
+packages = ["cmake"]
+exec = "cargo test --release"
+
+[tasks.build]
+packages = ["cmake"]
+exec = "cargo build --release"
+
+# The marathon audit over every replayed Arcathlon capture (needs arcathlon-db/
+# beside the repo, which the sandbox sees as part of the tree).
+[tasks.audit]
+packages = ["cmake", "sqlite", "jq"]
+bash = "cargo build --release && scripts/audit-arcathlon.sh"
+
+# The site: fill the run numbers, build the pages and the feed from the live
+# database beside the repo, upload them and invalidate CloudFront. The AWS
+# CLI is this repo's own package (packages/awscli). Credentials come from
+# the host's ~/.aws, mapped read-only and gated by the user policy the first
+# time; in a session, the `aws` loadout brings the same files in.
+[tasks.deploy]
+packages = ["awscli", "sqlite", "jq", "curl", "util-linux"]
+bash = "cargo build --release && ./scripts/deploy-site.sh"
+patches.dir."~/.aws" = "read-only"
