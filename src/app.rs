@@ -1116,6 +1116,12 @@ fn pane_geometry(
 /// pixels, `PANE_UP` times the crop's.
 pub(crate) const PANE_UP: u32 = 2;
 
+/// How far, on either axis, a layout may sit from where its crops were
+/// drawn and still compete for a lock. Re-anchors of a pane that moved run
+/// to about 30 px; a layout explaining a timer beyond this is one whose
+/// shifted crop landed on another layout's timer.
+const DISPLACED_PX: i32 = 40;
+
 /// The board probe: one OCR of the pane, read as a board against every
 /// layout's timer rectangle, and the layout whose reading has the most rows
 /// and classifies as a board-mode board. None where no layout's does, or
@@ -2939,6 +2945,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
             }
             let mut winner: Option<(usize, String)> = None;
+            // The centre line of the winner's digits, in the union's pixels:
+            // what a competing layout's crop has to hold.
+            let mut winner_cy: Option<i32> = None;
             // Lock by board. A marathon board is tracked by its rows, not its
             // timer, and on the race board the timer's digits sit where no
             // crop holds them without cutting a digit or taking the logo
@@ -3047,6 +3056,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                 let need = lock.need(c.layout, active_layout);
                 if c.observe(v, t) && c.streak >= need && winner.is_none() {
                     winner = Some((ci, rd.clone()));
+                    winner_cy = ink_extent(&proc, bbox.map(|b| b.0), pre.upscale)
+                        .map(|e| crop.1 as i32 + e.cy());
                 }
                 if c.layout == active_layout && c.off == active_off {
                     text = rd;
@@ -3100,6 +3111,37 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 (off, sr)
                             }
                         };
+                        // A layout far from where its crops were drawn is not
+                        // this pane's layout, whatever its shifted crops happen
+                        // to read: the practice layout's timer crop, 47 px up,
+                        // sits on Ninja Gaiden's timer, explains it, names the
+                        // board through its pane and holds the lock for the
+                        // two seconds it takes to go dark, at every lock.
+                        if off.0.abs() > DISPLACED_PX || off.1.abs() > DISPLACED_PX {
+                            debug!(
+                                "layout {:?} at {:+},{:+}: displaced; not a candidate",
+                                layout_names[li], off.0, off.1
+                            );
+                            continue;
+                        }
+                        // And its timer crop has to be drawn around the digits:
+                        // the winner's ink line in the crop's middle half. A
+                        // crop that merely overlaps the digits is another
+                        // pane's layout (the race board's crop over the
+                        // practice pane, a split row's time in it), and the
+                        // pane read that names the board is no tie-break
+                        // when the drawn-for layout reads the title as
+                        // "Moon C stal" and the other as "C rystal".
+                        if let Some(cy) = winner_cy {
+                            let (ty, th) = (sr.timer.1 as i32, sr.timer.3 as i32);
+                            if cy < ty + th / 4 || cy > ty + th - th / 4 {
+                                debug!(
+                                    "layout {:?} at {:+},{:+}: the digits sit outside its crop's middle half; not a candidate",
+                                    layout_names[li], off.0, off.1
+                                );
+                                continue;
+                            }
+                        }
                         let Some(splits_rect) = sr.splits else {
                             continue;
                         };
@@ -3114,7 +3156,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         .iter()
                         .filter(|v| v.is_some())
                         .count();
-                        let named = {
+                        let (named, reading_named, reading_for, reading_against) = {
                             let (_, _, board, _) = measure_pane(
                                 &mut ocr_engine,
                                 &union_img,
@@ -3129,11 +3171,20 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 board.subtitle.as_deref(),
                                 &board,
                             );
-                            reading.named.is_some() || !reading.for_it.is_empty()
+                            // Naming the TRACKED game counts only with rows read:
+                            // a wide pane over its header names it from any
+                            // layout, and the one that also reads its column
+                            // is the one drawn for it.
+                            (
+                                reading.named.is_some() || (!reading.for_it.is_empty() && n > 0),
+                                reading.named.clone(),
+                                reading.for_it.len(),
+                                reading.against.len(),
+                            )
                         };
                         debug!(
-                            "layout {:?} at {:+},{:+}: {n}/{rows} split rows read, names the board: {named}",
-                            layout_names[li], off.0, off.1
+                            "layout {:?} at {:+},{:+}: {n}/{rows} split rows read, names the board: {named} (named {:?}, {} for, {} against)",
+                            layout_names[li], off.0, off.1, reading_named, reading_for, reading_against
                         );
                         // Among layouts that name the board and read the same
                         // rows, the tightest pane: crops drawn for THIS pane

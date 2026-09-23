@@ -147,7 +147,11 @@ where the pane is drawn larger and cropped, and the geometry from that
 frame lost a whole day's run numbers and splits; now it holds for ten
 seconds. Layouts whose timer rectangles overlap are told apart by their panes: each
 is placed where its own probe candidate read the timer (a layout with no
-reading of its own is shifted to the winner's timer), and the one whose
+reading of its own is shifted to the winner's timer) — a layout more than
+40 px from where its crops were drawn, on either axis, does not compete,
+since a crop shifted that far is reading another layout's timer (the
+practice layout's, 47 px up, sat on Ninja Gaiden's and took every lock
+for the two seconds it took to go dark) — and the one whose
 pane NAMES the board — the tracked game's header, or a game the rosters
 know — wins before the one whose splits column reads the most rows, and
 among those that name it with the same rows, the tightest pane rectangle
