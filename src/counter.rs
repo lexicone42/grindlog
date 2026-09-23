@@ -55,6 +55,8 @@ pub struct CounterTracker {
     lower_runs: Vec<i64>,
     /// This run has already contributed its settled lower value.
     lower_settled: bool,
+    /// The last few readings, whatever became of them.
+    recent: Vec<i64>,
 }
 
 impl CounterTracker {
@@ -67,6 +69,7 @@ impl CounterTracker {
             lower: None,
             lower_runs: Vec::new(),
             lower_settled: false,
+            recent: Vec::new(),
         }
     }
 
@@ -95,6 +98,10 @@ impl CounterTracker {
 
     /// One parsed reading of the counter at time `t_ms`.
     pub fn observe(&mut self, v: i64, t_ms: i64) -> CounterEvent {
+        self.recent.push(v);
+        if self.recent.len() > 8 {
+            self.recent.remove(0);
+        }
         match self.last {
             Some(p) if v <= p => {
                 if v == p {
@@ -151,7 +158,13 @@ impl CounterTracker {
                     }
                 }
                 // Nothing vouches for the first value of a session (the seed
-                // may be days old): it needs three identical reads.
+                // may be days old): it needs three identical reads, and not
+                // a reading that is another recent one with a digit lost
+                // ("1" beside "11" on a pane whose edge clips the counter).
+                if self.last.is_none() && self.recent.iter().any(|&w| w != v && digit_dropped(v, w))
+                {
+                    return CounterEvent::Ignore;
+                }
                 let need = if self.last_at.is_some() { 2 } else { 3 };
                 self.stable = match self.stable {
                     Some((pv, n)) if pv == v => Some((v, n + 1)),
@@ -359,5 +372,18 @@ mod tests {
         // Ten quick resets we never saw, over two minutes: 5 + 120/10 = 17 allowed.
         assert_eq!(c.observe(95_011, 120_000), CounterEvent::Ignore);
         assert_eq!(c.observe(95_011, 122_000), CounterEvent::Adopt(95_011));
+    }
+
+    #[test]
+    fn a_first_value_that_is_a_recent_read_with_a_digit_lost_is_refused() {
+        let mut c = CounterTracker::new(None);
+        // The pane reads 11 and, with its first digit clipped, 1.
+        assert_eq!(c.observe(11, 0), CounterEvent::Ignore);
+        assert_eq!(c.observe(1, 2_000), CounterEvent::Ignore);
+        assert_eq!(c.observe(1, 4_000), CounterEvent::Ignore);
+        assert_eq!(c.observe(1, 6_000), CounterEvent::Ignore);
+        assert_eq!(c.last(), None);
+        assert_eq!(c.observe(11, 8_000), CounterEvent::Ignore);
+        assert_eq!(c.observe(11, 10_000), CounterEvent::Adopt(11));
     }
 }

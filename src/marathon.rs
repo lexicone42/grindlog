@@ -483,7 +483,18 @@ pub fn classify<'a>(board: &Board, cfg: &'a Config, current: Option<&Marathon>) 
             if titled_elsewhere() {
                 return somebody_else();
             }
+            // A pane titled with one of the event's own games is that game's
+            // practice pane — its own split rows, marathon-shaped — and not
+            // the event's board: locked on as the board, its timer crop
+            // read nothing for an hour of attempts.
+            let names_a_game = |a: &GameAlias| {
+                board
+                    .title
+                    .as_deref()
+                    .is_some_and(|t| a.rosters.identify(&[t]).is_some())
+            };
             match boards.as_slice() {
+                [only] if names_a_game(only) => somebody_else(),
                 [only] => Verdict::Board(only),
                 _ => Verdict::Silent,
             }
@@ -5251,5 +5262,49 @@ mod tests {
         assert_eq!(seen[0].game, "Moon Crystal");
         assert_eq!(seen[0].segment_ms, 13 * 60_000 + 14_000);
         assert!(!seen[0].segment_derived);
+    }
+
+    /// A pane titled with one of the event's own games, six split rows with
+    /// times under it, is that game's practice pane and not the event's
+    /// board, whatever its shape says.
+    #[test]
+    fn a_practice_pane_of_a_roster_game_is_not_the_events_board() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/big20-roster.toml");
+        cfg.games = vec![GameAlias {
+            name: "Big 20 #23 run".into(),
+            category: Some("Big 20 #23 run".into()),
+            r#match: vec!["big 20".into(), "practice run".into()],
+            mode: GameMode::Board,
+            roster: Some(path.display().to_string()),
+            rosters: Arc::new(crate::roster::Rosters::load(&path).expect("the shipped roster")),
+        }];
+        let pane = board(
+            Some("Celeste Mario's Zap Dash!"),
+            vec![
+                row("Evil Forest", &["1:07.0", "1:07.0"]),
+                row("Waylaid Street", &["1:25.6", "2:32.7"]),
+                row("Count's Castle", &["1:53.1", "4:26.3"]),
+                row("Pirate Ship", &["1:36.9", "6:03.2"]),
+                row("Madonna Mine", &["2:09.4", "8:12.7"]),
+                row("Laboratory 1", &["1:49.7", "10:02.5"]),
+            ],
+        );
+        assert!(!matches!(classify(&pane, &cfg, None), Verdict::Board(_)));
+        // The board itself, untitled, is still the board.
+        let untitled = board(
+            None,
+            vec![
+                row("Die Hard", &["2:17", "2:17"]),
+                row("(Any% Beginner)", &["0:31", "2:48"]),
+                row("Pac-Mania", &["7:24", "10:12"]),
+                row("(Sandbox)", &["0:30", "10:42"]),
+                row("Double Dragon II", &["23:06", "33:48"]),
+                row("(Game Normal)", &["0:33", "34:21"]),
+            ],
+        );
+        assert!(matches!(classify(&untitled, &cfg, None), Verdict::Board(_)));
     }
 }

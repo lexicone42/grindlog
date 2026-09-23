@@ -129,6 +129,14 @@ starts as the tracked game, and with no target to carry would close as a
 Ninja Gaiden reset carrying Mini Putt's attempt counter. It is dropped
 instead. That path was unreachable until these layouts made the pane lock.
 
+The other way round is caught too: a pane titled with one of the event's
+own games, six split rows with times under it, is marathon-shaped, and with
+one board entry configured the classifier's fallback took it for the
+event's board — a lock the timer never judges, held while the tracker it
+started found no roster and was started again on every pass, and an hour of
+Celeste attempts unrecorded. A title that names a roster game is a practice
+pane, never the board (`marathon::classify`).
+
 The robust version of all this is not more crops: it is finding the pane
 when no layout fits — what `locate` does in one frame — and locking there.
 The decoded frame is the union of the configured rectangles, which the
