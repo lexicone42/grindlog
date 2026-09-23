@@ -635,7 +635,9 @@ tracker, and keeps the number only if it closes under that game: LiveSplit bumps
 restarts, before the old run's reset is seen, so a dying run must not take
 its successor's number. `counter.rs` decides which reading to believe: a
 value far ahead of the last one for the time elapsed is refused, the first
-value of a session needs three identical reads (two afterwards), a value
+value of a session needs three identical reads (two afterwards) and must
+not be another recent reading with a digit lost ("1" beside "11" where the
+pane's edge clips the counter), a value
 below half the last one means the streamer's counter restarted and numbering
 follows it, and an adopted number is reverted (and cleared from the runs
 that carry it) only when two runs in a row settle on lower values that
