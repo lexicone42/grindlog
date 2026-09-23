@@ -4267,11 +4267,43 @@ pub async fn run(cfg: Config) -> Result<()> {
                         }
                     }
                     Frozen::Unreadable => {
-                        warn!(
-                            "timer frozen at {} and the pane could not be read; taking it as a finish",
-                            format_ms(last_ms)
-                        );
-                        Event::Finished { final_ms: last_ms }
+                        // Nothing on the pane to judge by: a finish, unless the
+                        // value is a fifth or more under his best for the game,
+                        // which no finish is and a pause before a reset often
+                        // is (Excitebike frozen at 5:49 against a best of 8:50,
+                        // reset four seconds later, filed as his best).
+                        let target = current
+                            .as_ref()
+                            .and_then(|c| c.foreign.as_ref())
+                            .or(foreign_target.as_ref());
+                        let best = match target {
+                            Some(f) => db::personal_best(&pool, &f.game, &f.category)
+                                .await
+                                .ok()
+                                .flatten()
+                                .and_then(|r| r.final_time_ms),
+                            None => None,
+                        };
+                        match best {
+                            Some(b) if last_ms * 5 < b * 4 => {
+                                warn!(
+                                    "timer frozen at {} and the pane could not be read; a fifth under his best of {} — a pause, not a finish",
+                                    format_ms(last_ms),
+                                    format_ms(b)
+                                );
+                                Event::Reset {
+                                    last_ms,
+                                    reason: crate::state::ResetReason::Paused,
+                                }
+                            }
+                            _ => {
+                                warn!(
+                                    "timer frozen at {} and the pane could not be read; taking it as a finish",
+                                    format_ms(last_ms)
+                                );
+                                Event::Finished { final_ms: last_ms }
+                            }
+                        }
                     }
                 };
                 events.insert(0, decided);
