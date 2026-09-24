@@ -1471,6 +1471,20 @@ fn sane_reference(kind: RefKind, ms: i64, refs: &RefTracker, cfg: &Config) -> bo
 /// measured board read "Die Hard (NES)" on every pass while the configured
 /// rectangle — anchored above where that pane's rows actually start — read
 /// no header at all, and a signal that cannot see the header cannot use it.
+/// Whether this frame's timer reading reaches the state machine: the pane is
+/// the tracked game's, or a named target is standing, or the open run was
+/// filed under one already — and never while a marathon board holds the
+/// timer as its running total.
+fn timer_feeds(
+    identity_ok: bool,
+    target: bool,
+    run_named: bool,
+    marathon: bool,
+    board_lock: bool,
+) -> bool {
+    (identity_ok || target || run_named) && !marathon && !board_lock
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_identity(
     readings: &PaneReadings,
@@ -3674,10 +3688,23 @@ pub async fn run(cfg: Config) -> Result<()> {
         // records nothing, exactly as it does under "log". So `track` never
         // widens what gets recorded beyond boards we can identify, and the
         // wrong-game fabrication it replaces is impossible either way.
-        let obs = if (pane_identity.ok() || foreign_target.is_some())
-            && !marathon_active
-            && !lock.is_board()
-        {
+        //
+        // A run that already knows its game is timed to its close whether or
+        // not the pass in between could name the board: the tall pane's
+        // header reads as "Moon Ur etal" one minute in sixty, and a target
+        // dropped for that minute turned every reset in it into a desync a
+        // minute late, with the run's death filed at the last reading before
+        // the pass. Nothing starts on that account: a new run still needs the
+        // pane's standing verdict or a named target.
+        let obs = if timer_feeds(
+            pane_identity.ok(),
+            foreign_target.is_some(),
+            current
+                .as_ref()
+                .is_some_and(|c| c.foreign.is_some() && !c.orphaned),
+            marathon_active,
+            lock.is_board(),
+        ) {
             parsed.map(Obs::Time).unwrap_or(Obs::Illegible)
         } else {
             Obs::Illegible
@@ -5414,6 +5441,22 @@ mod tests {
             0,
         );
         foreign.as_ref().map(|f| f.game.clone())
+    }
+
+    /// The timer keeps feeding a run filed under a named game through a pass
+    /// that cannot name the board, and nothing else opens on that account.
+    #[test]
+    fn a_named_run_is_timed_through_a_pass_that_names_nothing() {
+        // The tracked game's own pane, and a standing target, each feed.
+        assert!(timer_feeds(true, false, false, false, false));
+        assert!(timer_feeds(false, true, false, false, false));
+        // The target dropped by an unreadable pass: the open run goes on.
+        assert!(timer_feeds(false, false, true, false, false));
+        // No run open and nothing named: nothing may start.
+        assert!(!timer_feeds(false, false, false, false, false));
+        // A marathon board or a board-held lock owns the timer regardless.
+        assert!(!timer_feeds(true, true, true, true, false));
+        assert!(!timer_feeds(true, true, true, false, true));
     }
 
     /// `follow_title = "track"` files a run under the game the BOARD names,
