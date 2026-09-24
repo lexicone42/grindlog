@@ -573,8 +573,12 @@ fn rank(read: &Key, name: &Key) -> Option<(u8, u8, usize)> {
     if 3 * la.abs_diff(lb) > la.max(lb) {
         return None;
     }
+    // A reading whose word came apart lost a letter or two at the break,
+    // and that break is visible in the reading: "Moon C stal" is two edits
+    // from Moon Crystal where nine letters forgive one. One break forgives
+    // one more; a reading of several is not a name.
     let d = infix_distance(a, b).min(infix_distance(b, a));
-    (d * 5 <= la.min(lb)).then_some((3, agree, d))
+    (d * 5 <= la.min(lb) + 5 * read.breaks.min(1)).then_some((3, agree, d))
 }
 
 /// Do two names abbreviate to the same thing?
@@ -646,6 +650,10 @@ struct Key {
     initials: String,
     /// The name is one word, so it may BE an initialism ("LOTW", "SMB2").
     acronym: bool,
+    /// A word came apart: a lone letter with the rest of its word after it
+    /// ("Moon C stal"), where the tall pane's header loses a letter or two
+    /// to the break. Each is a place the edit rule forgives one more edit.
+    breaks: usize,
 }
 
 impl Key {
@@ -676,12 +684,17 @@ impl Key {
                 }
             })
             .collect();
+        let breaks = parts
+            .windows(2)
+            .filter(|w| w[0].chars().count() == 1 && w[0].chars().all(char::is_alphabetic))
+            .count();
         let sequel = split_sequel(&mut parts);
         Key {
             stem: parts.concat(),
             sequel,
             initials,
             acronym,
+            breaks,
         }
     }
 }
@@ -1177,6 +1190,26 @@ mod tests {
         assert_eq!(infix_distance("joumeytosilius", "journeytosilius"), 2);
         assert_eq!(infix_distance("", "astyanax"), 0);
         assert_eq!(infix_distance("zzzz", "astyanax"), 4);
+    }
+
+    /// The tall practice pane's header reads "Moon C stal": the word came
+    /// apart and lost its letters at the break, one edit more than a name
+    /// of nine letters forgives. The visible break buys that edit.
+    #[test]
+    fn a_word_that_came_apart_at_a_lost_letter_still_folds() {
+        assert_eq!(
+            canonical_any("Moon C stal").as_deref(),
+            Some("Moon Crystal")
+        );
+        assert_eq!(
+            canonical_any("Moon Crystal").as_deref(),
+            Some("Moon Crystal")
+        );
+        // Without the break the same letters are just a damaged reading
+        // that lost too much.
+        assert_eq!(Key::of("Moon Cstal").breaks, 0);
+        assert_eq!(rank(&Key::of("Moon Cstal"), &Key::of("Moon Crystal")), None);
+        assert_eq!(Key::of("A Boy and His Blob").breaks, 1);
     }
 
     /// The shipped Big 20 list, as the prep page reads it: twenty games in
