@@ -114,8 +114,15 @@ const segOf = (run, game) => (run.segments || []).find(s => key(s.game) === key(
 const sumBests = games.reduce((n, g) => n + (g.best_ms || 0), 0);
 const allBests = games.every(g => g.best_ms != null);
 
+// A run's page is /big20/runs/<day>/, "-2" for a second run that day: the
+// rule build-site.sh names the directories by.
+const runSlug = r => {
+  const same = runs.filter(x => x.day === r.day).sort((a, b) => a.started_at_ms - b.started_at_ms);
+  const i = same.indexOf(r);
+  return r.day + (i > 0 ? `-${i + 1}` : '');
+};
 let head = `<tr><th class="n">#</th><th>Game</th>` +
-  runs.map(r => `<th class="run">${esc(dshort(r.started_at_ms))}<small>${r.games} of ${games.length}</small></th>`).join('') +
+  runs.map(r => `<th class="run"><a href="/big20/runs/${runSlug(r)}/index.html">${esc(dshort(r.started_at_ms))}</a><small>${r.games} of ${games.length}</small></th>`).join('') +
   `<th class="num">Practice best</th></tr>`;
 let body = games.map(g => {
   const cells = runs.map(r => segOf(r, g.game));

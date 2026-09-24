@@ -1,0 +1,239 @@
+<!-- One full run of the Big 20 race. Rendered by scripts/build-site.sh from
+     the report's `big20` block, one page per run at /big20/runs/<day>/:
+     the twenty games in race order with the game's time in this run, how
+     that sits against his practice best and against his best for the game
+     in any full run, the clock at each finish, and the transition before
+     each game; above them a chart of the clock through the run against the
+     staircase of his practice bests and of his best run. Do not write the
+     data placeholder's name in prose anywhere in this file: the splice
+     takes the whole line.
+
+     The page names games, never the streamer. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen&family=Martian+Mono:wght@400;600&display=swap">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
+    --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
+    --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
+  }
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #f2f2ec; --card: #ffffff; --ink: #171425; --ink2: #4e5170;
+    --muted: #83879f; --hairline: rgba(20,15,60,.11); --series: #2a78d6;
+    --gold: #a9791a; --gold-soft: rgba(169,121,26,.12); --ahead: #1f8f63;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
+      --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
+      --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d0b20; --card: #161230; --ink: #eceefc; --ink2: #a2a6c8;
+    --muted: #6d7194; --hairline: rgba(130,140,255,.13); --series: #3987e5;
+    --gold: #e8b23a; --gold-soft: rgba(232,178,58,.13); --ahead: #58d8a0;
+  }
+  body { background: var(--bg); color: var(--ink); margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 60px; }
+  a { color: var(--series); }
+  .back { font-family: "Silkscreen", monospace; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; text-decoration: none; color: var(--muted); }
+  .back:hover { color: var(--ink); }
+  h1 { font-size: clamp(22px, 4vw, 32px); margin: 14px 0 4px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
+  .card { background: var(--card); border: 1px solid var(--hairline); border-radius: 8px; padding: 18px 20px; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; padding: 0 10px 8px 0; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
+  td { padding: 7px 10px 7px 0; border-top: 1px solid var(--hairline); vertical-align: middle; }
+  th.num, td.num { text-align: right; padding-right: 18px; }
+  .tnum { font-family: "Martian Mono", monospace; font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .n { color: var(--muted); width: 2em; }
+  .game a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--hairline); }
+  .game a:hover { color: var(--series); border-color: var(--series); }
+  .goal { display: block; color: var(--ink2); font-size: 11.5px; }
+  .best { color: var(--gold); font-weight: 600; }
+  .none { color: var(--muted); }
+  .delta { display: block; color: var(--muted); font-size: 10.5px; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .delta.ahead { color: var(--ahead); }
+  th.run { text-align: right; padding-right: 18px; }
+  th.run small { display: block; font-size: 10px; letter-spacing: 0; text-transform: none; color: var(--muted); font-weight: 400; }
+  tfoot td { border-top: 2px solid var(--hairline); color: var(--ink2); font-weight: 600; }
+  tfoot td.lbl { color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+  .note { color: var(--muted); font-size: 12.5px; margin: 18px 0 0; }
+  footer { margin-top: 34px; color: var(--muted); font-size: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 0 0 16px; }
+  .tile { background: var(--card); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px; }
+  .tile b { display: block; font-family: "Martian Mono", monospace; font-size: 20px; font-weight: 600; }
+  .tile b.gold { color: var(--gold); }
+  .tile b.ahead { color: var(--ahead); }
+  .tile span { display: block; color: var(--muted); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; margin-top: 4px; }
+  .tile small { display: block; color: var(--ink2); font-size: 11.5px; margin-top: 2px; }
+  .chart { margin: 0 0 16px; padding: 14px 16px 10px; }
+  .chart svg { display: block; width: 100%; height: auto; }
+  .chart .grid { stroke: var(--hairline); stroke-width: 1; }
+  .chart .lbl { fill: var(--muted); font-size: 10px; font-family: "Martian Mono", monospace; }
+  .chart .run { fill: none; stroke: var(--gold); stroke-width: 2; }
+  .chart .bests { fill: none; stroke: var(--ahead); stroke-width: 1.4; stroke-dasharray: 4 3; }
+  .chart .other { fill: none; stroke: var(--series); stroke-width: 1.4; opacity: .8; }
+  .chart .pt { fill: var(--gold); }
+  .legend { color: var(--muted); font-size: 11.5px; margin: 8px 0 0; display: flex; gap: 16px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: 3px; }
+  .legend i.run { background: var(--gold); height: 3px; }
+  .legend i.bests { background: var(--ahead); }
+  .legend i.other { background: var(--series); }
+  .tag { display: inline-block; margin-left: 8px; padding: 1px 6px; border-radius: 3px; background: var(--gold-soft); color: var(--gold); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
+  .nav { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12.5px; margin: 0 0 18px; }
+</style>
+
+<div class="wrap">
+  <a class="back" href="/big20/index.html">&larr; the race</a>
+  <h1 id="title"></h1>
+  <p class="sub" id="sub"></p>
+  <p class="nav" id="nav"></p>
+  <div class="tiles" id="tiles"></div>
+  <section class="card chart" id="chart" hidden></section>
+  <section class="card scroll"><table id="grid"></table></section>
+  <p class="note" id="note"></p>
+  <footer>Times read off the on-screen LiveSplit board, frame by frame · <a href="/api/v1/README.md">data</a></footer>
+</div>
+
+<script id="data" type="application/json">
+__DATA__
+</script>
+
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = ms => {
+  if (ms == null) return '—';
+  const t = Math.floor(ms / 100) / 10;
+  const m = Math.floor(t / 60), s = (t - m * 60).toFixed(1).padStart(4, '0');
+  return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${s}` : `${m}:${s}`;
+};
+const sd = ms => ms == null ? '—' : (ms < 0 ? '−' : '+') + fmt(Math.abs(ms));
+const TZ = (D.day_offset_minutes || 0) * 60000;
+const dshort = ms => ms == null ? '—' : new Date(ms + TZ).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+const slugOf = g => String(g).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const key = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '');
+// A run's page is /big20/runs/<day>/, "-2" for a second run on the same
+// day: the same rule build-site.sh names the directories by.
+const runSlug = (r, all) => {
+  const same = all.filter(x => x.day === r.day).sort((a, b) => a.started_at_ms - b.started_at_ms);
+  const i = same.indexOf(r);
+  return r.day + (i > 0 ? `-${i + 1}` : '');
+};
+
+const games = D.games || [];
+const all = (D.run_throughs || []).slice().sort((a, b) => a.started_at_ms - b.started_at_ms);
+const run = all.find(r => r.started_at_ms === D.run_started_at_ms) || all[all.length - 1];
+const segOf = (r, game) => (r.segments || []).find(s => key(s.game) === key(game));
+const complete = r => r.games >= games.length && r.reached_ms != null;
+const done = all.filter(complete);
+const bestRun = done.length ? done.reduce((m, r) => r.reached_ms < m.reached_ms ? r : m) : null;
+const idx = all.indexOf(run);
+const prev = idx > 0 ? all.slice(0, idx).reverse().find(complete) : null;
+const sob = games.every(g => g.best_ms != null) ? games.reduce((n, g) => n + g.best_ms, 0) : null;
+// His best for each game across every full run, this one included.
+const bestInRuns = new Map(games.map(g => [g.game, Math.min(...all.map(r => segOf(r, g.game)).filter(s => s && s.ms != null).map(s => s.ms).concat([Infinity]))]));
+
+document.title = D.title;
+document.getElementById('title').textContent = `Full run · ${dshort(run.started_at_ms)}`;
+const isBest = bestRun === run;
+document.getElementById('sub').textContent =
+  `Big 20 ${D.race || ''} · ${run.games} of ${games.length} games` +
+  (run.reached_ms != null ? ` · ${fmt(run.reached_ms)} on the clock at the last one` : '') +
+  (isBest && done.length > 1 ? ' · his best run' : '') +
+  (D.date ? ` · race on ${D.date}` : '');
+const nav = [];
+if (prev) nav.push(`<a href="/big20/runs/${runSlug(prev, all)}/index.html">&larr; previous run, ${esc(dshort(prev.started_at_ms))}</a>`);
+const next = all.slice(idx + 1).find(complete);
+if (next) nav.push(`<a href="/big20/runs/${runSlug(next, all)}/index.html">next run, ${esc(dshort(next.started_at_ms))} &rarr;</a>`);
+nav.push(`<a href="/big20/runs/index.html">every run, game by game</a>`);
+document.getElementById('nav').innerHTML = nav.join(' · ');
+
+// Segments in race order, with what each is measured against.
+const rows = games.map(g => {
+  const s = segOf(run, g.game);
+  return { g, s, vsPractice: s && g.best_ms != null ? s.ms - g.best_ms : null,
+           vsRuns: s && bestInRuns.get(g.game) < Infinity ? s.ms - bestInRuns.get(g.game) : null };
+});
+const played = rows.filter(r => r.s && r.s.ms != null);
+const inGame = played.reduce((n, r) => n + r.s.ms, 0);
+const between = run.reached_ms != null && run.reached_ms >= inGame ? run.reached_ms - inGame : null;
+const vsBests = played.filter(r => r.vsPractice != null).reduce((n, r) => n + r.vsPractice, 0);
+const tile = (v, label, sub, cls) => `<div class="tile"><b class="${cls || ''}">${v}</b><span>${label}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
+document.getElementById('tiles').innerHTML =
+  tile(fmt(run.reached_ms), 'clock at the last game', prev ? `${sd(run.reached_ms - prev.reached_ms)} vs the run before` : '', isBest ? 'gold' : '') +
+  tile(`${run.games}<span style="display:inline;font-size:13px;color:var(--muted);text-transform:none;letter-spacing:0"> / ${games.length}</span>`, 'games') +
+  tile(fmt(inGame), 'in the games', between != null ? `${fmt(between)} between them` : '') +
+  (sob != null && run.reached_ms != null ? tile(sd(run.reached_ms - sob), 'over the sum of bests', `his practice bests add to ${fmt(sob)}`, run.reached_ms - sob < 0 ? 'ahead' : '') : '') +
+  (played.some(r => r.vsPractice != null) ? tile(sd(vsBests), 'against practice bests', `over ${played.filter(r => r.vsPractice != null).length} games`, vsBests < 0 ? 'ahead' : '') : '') +
+  (bestRun && bestRun !== run ? tile(sd(run.reached_ms - bestRun.reached_ms), 'vs his best run', `${fmt(bestRun.reached_ms)} on ${dshort(bestRun.started_at_ms)}`) : '');
+
+// The clock through the run, as a staircase over the games, against the
+// staircase his practice bests would make and the one his best run made.
+if (played.length) {
+  const W = 860, H = 240, L = 62, Rm = 14, T = 12, B = 30;
+  const stairs = (segs) => { let c = 0; return segs.map(ms => (c += ms)); };
+  const runCum = rows.map(r => r.s ? r.s.cum : null);
+  const bestCum = sob != null ? stairs(games.map(g => g.best_ms)) : null;
+  const otherCum = bestRun && bestRun !== run ? rows.map(r => { const s = segOf(bestRun, r.g.game); return s ? s.cum : null; }) : null;
+  const top0 = Math.max(...[runCum, bestCum || [], otherCum || []].flat().filter(v => v != null), 1);
+  const step = [600e3, 900e3, 1800e3, 3600e3].find(s => top0 / s <= 6) || 3600e3;
+  const top = Math.ceil(top0 * 1.04 / step) * step;
+  const n = games.length;
+  const x = i => L + (i + 0.5) * (W - L - Rm) / n;
+  const y = v => T + (1 - v / top) * (H - T - B);
+  const hm = v => `${Math.floor(v / 3600e3)}:${String(Math.floor(v / 60e3) % 60).padStart(2, '0')}`;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="the clock through the run">`;
+  for (let v = 0; v <= top; v += step) {
+    svg += `<line class="grid" x1="${L}" x2="${W - Rm}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>` +
+           `<text class="lbl" x="${L - 8}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end">${hm(v)}</text>`;
+  }
+  games.forEach((g, i) => { if (i % 2 === 0) svg += `<text class="lbl" x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="middle">${g.n}</text>`; });
+  const line = (cum, cls) => {
+    const pts = cum.map((v, i) => v == null ? null : `${x(i).toFixed(1)},${y(v).toFixed(1)}`).filter(Boolean);
+    return pts.length > 1 ? `<polyline class="${cls}" points="${pts.join(' ')}"/>` : '';
+  };
+  if (bestCum) svg += line(bestCum, 'bests');
+  if (otherCum) svg += line(otherCum, 'other');
+  svg += line(runCum, 'run');
+  rows.forEach((r, i) => { if (r.s) svg += `<circle class="pt" cx="${x(i).toFixed(1)}" cy="${y(r.s.cum).toFixed(1)}" r="3.5"><title>${esc(r.g.game + ' · ' + fmt(r.s.ms) + ' · ' + fmt(r.s.cum) + ' on the clock')}</title></circle>`; });
+  svg += '</svg>';
+  const chart = document.getElementById('chart');
+  chart.hidden = false;
+  chart.innerHTML = svg + `<div class="legend"><span><i class="run"></i>this run, the clock at each game</span>` +
+    (bestCum ? `<span><i class="bests"></i>his practice bests, back to back</span>` : '') +
+    (otherCum ? `<span><i class="other"></i>his best run, ${esc(dshort(bestRun.started_at_ms))}</span>` : '') + `</div>`;
+}
+
+// The table: every game in race order.
+let prevCum = 0;
+const head = `<tr><th class="n">#</th><th>Game</th><th class="num">This run</th><th class="num">vs practice best</th><th class="num">vs best in a run</th><th class="num">Between</th><th class="num">Clock</th></tr>`;
+const body = rows.map(r => {
+  const g = r.g, s = r.s;
+  const gameCell = `<td class="n tnum">${g.n}</td><td class="game"><a href="/game/${slugOf(g.game)}/index.html">${esc(g.game)}</a><span class="goal">${esc(g.goal ?? '')}</span></td>`;
+  if (!s || s.ms == null) return `<tr>${gameCell}<td class="num tnum none">—</td><td class="num tnum none">—</td><td class="num tnum none">—</td><td class="num tnum none">—</td><td class="num tnum none">not reached</td></tr>`;
+  const gap = s.cum != null && s.cum >= prevCum + s.ms ? s.cum - s.ms - prevCum : null;
+  if (s.cum != null) prevCum = s.cum;
+  const d = (v, title) => v == null ? `<td class="num tnum none">—</td>` : `<td class="num tnum ${v < 0 ? 'best' : ''}" title="${esc(title)}">${sd(v)}</td>`;
+  const fastest = r.vsRuns === 0 && all.length > 1;
+  return `<tr>${gameCell}` +
+    `<td class="num tnum${fastest ? ' best' : ''}" title="${fastest ? 'his fastest for this game in any full run' : ''}">${fmt(s.ms)}</td>` +
+    d(r.vsPractice, g.best_ms != null ? `practice best ${fmt(g.best_ms)}` : '') +
+    d(r.vsRuns, bestInRuns.get(g.game) < Infinity ? `best in a run ${fmt(bestInRuns.get(g.game))}` : '') +
+    `<td class="num tnum${gap == null ? ' none' : ''}" title="the transition before this game: the clock less the games before it">${gap == null ? '—' : fmt(gap)}</td>` +
+    `<td class="num tnum">${fmt(s.cum)}</td></tr>`;
+}).join('');
+document.getElementById('grid').innerHTML = head + body;
+document.getElementById('note').textContent =
+  'Each game\'s time is what its row on the board recorded when he finished it. "vs practice best" is against his fastest finish of that game outside a full run; "vs best in a run" against his fastest for it inside any full run, including this one (a game at 0:00.0 there is his fastest). "Between" is the transition before the game: the clock at the game less the games before it. The clock is the marathon timer at each finish.';
+</script>

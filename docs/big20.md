@@ -200,6 +200,14 @@ by itself and the page reads as before.
 
 ## Full practice runs on the race board
 
+Each run has a page of its own at `/big20/runs/<day>/` (`site/big20-run.html`,
+"-2" for a second run on the same day): the twenty games in race order with
+the game's time in that run, how it sits against his practice best and his
+best for the game in any full run, the transition before it and the clock at
+its finish, under a chart of the clock through the run against the staircase
+of his practice bests and of his best run. The prep page's practice-runs
+table and the runs page's column headers link to them.
+
 From 2026-09-17 he also runs the whole race on its own splits ("Big 20 #23
 / Practice Run"). That is a marathon board, tracked by its rows, and it has
 its own section in [marathons](marathons.md#the-race-board-big-20): the
