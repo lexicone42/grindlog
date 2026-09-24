@@ -305,6 +305,6 @@ roster = "assets/big20-roster.toml"
 # their pane crops reaches this board's header, so none can name it, and a
 # run on a board nothing names is dropped at close.
 name = "big20-tall"
-timer = { crop_x = 292, crop_y = 812, crop_w = 326, crop_h = 100 }
+timer = { crop_x = 262, crop_y = 812, crop_w = 356, crop_h = 100 }
 splits = { crop_x = 290, crop_y = 448, crop_w = 380, crop_h = 330 }
 attempts_counter = { crop_x = 556, crop_y = 462, crop_w = 54, crop_h = 30 }
