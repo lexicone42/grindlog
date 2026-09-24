@@ -409,8 +409,13 @@ function practiceRuns() {
       return (lose.length ? `<div class="lose">lost most: ${lose.map(item).join(' · ')}</div>` : '') +
         (gain.length ? `<div class="gain">beat practice: ${gain.map(item).join(' · ')}</div>` : '');
     };
+    const runSlug = r => {
+      const same = rs.filter(x => x.day === r.day).sort((a, b) => a.started_at_ms - b.started_at_ms);
+      const i = same.indexOf(r);
+      return r.day + (i > 0 ? `-${i + 1}` : '');
+    };
     const row = r => `<tr>` +
-      `<td class="tnum">${esc(dshort(r.started_at_ms))}${r.live ? '<span class="tag">in progress</span>' : r === best ? '<span class="tag">best</span>' : ''}</td>` +
+      `<td class="tnum"><a href="/big20/runs/${runSlug(r)}/index.html">${esc(dshort(r.started_at_ms))}</a>${r.live ? '<span class="tag">in progress</span>' : r === best ? '<span class="tag">best</span>' : ''}</td>` +
       `<td class="num tnum">${r.games}<span class="delta">of ${games.length}</span></td>` +
       `<td class="num tnum${r === best ? ' best' : ''}">${fmt(r.reached_ms)}${r.vsPrev != null ? `<span class="delta${r.vsPrev < 0 ? ' ahead' : ''}">${sd(r.vsPrev)} vs previous</span>` : ''}</td>` +
       `<td class="num tnum">${fmt(r.inGame)}</td>` +

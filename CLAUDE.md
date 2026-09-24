@@ -168,8 +168,8 @@ client (aws-lc, through rustls) compiles from source once per target dir.
   fragments. `scripts/list-vods.sh <channel> --game "ninja gaiden"` gives
   the ids with dates.
 - The site (`site/template.html` + `report --json`) is one self-contained
-  page, plus a page per event, per game and the Big 20 pages under
-  `site/big20/`, all rendered by `scripts/build-site.sh`; `scripts/deploy-site.sh`
+  page, plus a page per event, per game, and the Big 20 pages under
+  `site/big20/` (the prep page, the runs grid and a page per full run), all rendered by `scripts/build-site.sh`; `scripts/deploy-site.sh`
   uploads them from an explicit page list — a new kind of page has to be
   added there or it silently never ships. A single uncaught JavaScript error blanks the whole page, so
   check it in a browser after touching the template.

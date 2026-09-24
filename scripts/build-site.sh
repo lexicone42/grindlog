@@ -263,4 +263,22 @@ if [ "$(jq -r '.big20 // "null"' site/api/v1/report.json)" != "null" ]; then
   render_event "big20/runs" "Big 20 full runs" "$slice" site/big20-runs.html
   rm -f "$slice"
   echo "wrote site/big20/runs/index.html"
+  # One page per full run (site/big20-run.html) at /big20/runs/<day>/, with
+  # "-2" for a second run on the same day: the same rule the pages' links
+  # use (runSlug in site/big20.html, big20-runs.html and big20-run.html).
+  run_pages=0
+  while IFS='|' read -r slug started; do
+    [ -n "$slug" ] || continue
+    slice=$(mktemp)
+    jq -c --argjson at "$started" '{title: ("Big 20 " + .big20.race + " · full run"),
+            day_offset_minutes: .day_offset_minutes, race: .big20.race,
+            date: .big20.date, games: .big20.games, run_throughs: (.big20.run_throughs // []),
+            run_started_at_ms: $at}' site/api/v1/report.json > "$slice"
+    render_event "big20/runs/$slug" "Big 20 full run" "$slice" site/big20-run.html
+    rm -f "$slice"
+    run_pages=$((run_pages + 1))
+  done < <(jq -r '[(.big20.run_throughs // [])[] | {day, started_at_ms}] | sort_by(.started_at_ms)
+                 | group_by(.day)[] | to_entries[]
+                 | (.value.day + (if .key > 0 then "-" + ((.key + 1) | tostring) else "" end)) + "|" + (.value.started_at_ms | tostring)' site/api/v1/report.json)
+  echo "wrote $run_pages full-run page(s) under site/big20/runs/"
 fi

@@ -54,7 +54,7 @@ aws s3 cp site/index.html "s3://${DOMAIN}/index.html" \
 # added here or it silently never ships.
 event_pages=0
 for page in site/arcathlon/*/index.html site/rando/*/index.html site/game/*/index.html \
-            site/big20/index.html site/big20/runs/index.html; do
+            site/big20/index.html site/big20/runs/index.html site/big20/runs/*/index.html; do
   [ -e "$page" ] || continue
   key=${page#site/}
   aws s3 cp "$page" "s3://${DOMAIN}/${key}" --region "$REGION" --only-show-errors \
