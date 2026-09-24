@@ -101,10 +101,13 @@ measured for, and none of their pane crops reached its "Moon Crystal / Any%"
 header, so no layout could name the board and an evening of attempts was
 dropped at close. Its timer crop is the digits and their room to grow:
 the timer is right-aligned and gains a digit on the LEFT at ten minutes
-and at the hour, so the crop starts at the pane's left edge (`crop_x =
-292`); a crop 40 px short of it read "10:04" as "0:04", a zeroed reset at
-9:59 on every attempt that got that far (five on the site, four more on
-the 18th). And it is the digits' height only (`crop_y = 812`, 100 px): the
+and at the hour, so the crop starts 30 px left of the pane's edge (`crop_x = 262`): the
+older, wider practice pane of the first week puts "10:42" from x 285, and
+the ink measurement ignores a pane border inside a crop. A crop 40 px
+short of it read "10:04" as "0:04", a zeroed reset at 9:59 on every attempt
+that got that far (five on the site, four more on the 18th); one 7 px
+short clipped the leading digit, released the lock as poorly read, and a
+candidate 36 px right read "0:11" for "10:11", a desync. And it is the digits' height only (`crop_y = 812`, 100 px): the
 195 px crop before it took in two split rows, whose times were read as
 the timer ("0:59.6" three seconds into an attempt, a desync every twenty
 seconds), and it fit the older, shorter practice panes well enough to win
