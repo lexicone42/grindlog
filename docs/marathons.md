@@ -176,6 +176,27 @@ misread, not a run: that candidate is refused and the next most voted one
 is tried on the same pass, so a misreading read once more than the real
 completion cannot hold the row.
 
+**The runner's row.** A finished row and the row being run print a delta
+beside their times; a comparison has nothing to differ from, so on an
+ordered board the lowest row with a delta is the runner's row or a finished
+row above it, and a row recorded puts him on the next game. The rows under
+that row are unrun whatever their columns show: what they read feeds their
+baseline (the latest settled reading, so a comparison read wrong on its
+first passes is put right by the passes after) and never a completion, and
+the harvest files nothing under the runner's row that carries a comparison.
+Behind the previous run's pace the marathon total sweeps past the
+comparisons of rows not yet reached, the arithmetic among comparisons
+agrees with itself, and a comparison read wrong on its first passes looks
+like a change when it reads right — on 2026-09-24, forty minutes behind,
+seven rows were filed with the day before's times to the second and the
+three real finishes among them refused as out of order. A row the board has
+shown without a time before is exempt: on a board without comparisons a
+time appearing there is a finish, and the only word on where the runner is
+when no delta reads. A baseline anchors the row below only from above every
+recorded cumulative, since the board's cumulatives only grow. The row moves
+down the board and never up; the log says `runner on row N` and why as it
+does, and the close line carries it.
+
 **The segment column's word.** The column refuses a candidate only when no
 settled reading of it agrees with the arithmetic (the comparison case:
 "20:34 throughout" where 16:16 was wanted). Any settled disagreement used

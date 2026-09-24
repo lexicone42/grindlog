@@ -251,6 +251,8 @@ struct Slot {
     /// Passes on which a settled, coherent cumulative had nothing to vouch
     /// for it.
     unvouched: u32,
+    /// Passes this slot's row has been on the board, legible or not.
+    seen: u32,
 }
 
 impl Slot {
@@ -562,6 +564,12 @@ pub struct Marathon {
     board_max_ms: Option<i64>,
     /// Passes whose total was refused as beyond the board.
     total_refused: u32,
+    /// On an ordered board, the runner's row or one above it: the lowest
+    /// row seen with a delta beside its times (a finished row and the row
+    /// being run print one; a comparison has nothing to differ from), or
+    /// the game after the last row recorded, whichever is lower. Every row
+    /// under it is unrun, whatever its columns show.
+    runner: Option<usize>,
 }
 
 impl Marathon {
@@ -582,6 +590,7 @@ impl Marathon {
             implausible: 0,
             board_max_ms: None,
             total_refused: 0,
+            runner: None,
         }
     }
 
@@ -646,10 +655,14 @@ impl Marathon {
             })
             .collect();
         format!(
-            "{} of {} rows recorded over {} passes{}{}{}{}: {}",
+            "{} of {} rows recorded over {} passes{}{}{}{}{}: {}",
             self.slots.iter().filter(|s| s.recorded.is_some()).count(),
             self.slots.len(),
             self.passes,
+            match self.runner {
+                Some(r) => format!(", runner on row {}", r + 1),
+                None => String::new(),
+            },
             match self.roster {
                 Some(i) => format!(", roster {}", self.rosters.event_name(i)),
                 None if self.rosters.is_empty() => String::new(),
@@ -867,6 +880,23 @@ impl Marathon {
             })
             .count()
             <= 1;
+        // Where the runner is, before this pass's rows are judged by it.
+        if self.ordered() {
+            let lowest = board
+                .rows
+                .iter()
+                .zip(alignment.iter())
+                .filter_map(|(row, slot)| slot.map(|s| (s, row)).filter(|(_, r)| has_delta(r)))
+                .max_by_key(|(s, _)| *s);
+            if let Some((s, row)) = lowest {
+                let why = format!(
+                    "a delta beside its times ({:?} {:?})",
+                    row.name.as_deref().unwrap_or(""),
+                    row.cells
+                );
+                self.advance_runner(Some(s), &why);
+            }
+        }
         for (row, slot_idx) in board.rows.iter().zip(alignment.iter()) {
             let Some(i) = *slot_idx else { continue };
             while self.slots.len() <= i {
@@ -877,12 +907,34 @@ impl Marathon {
             }
             let mut cells = read_cells(row);
             self.carry_hour(i, &mut cells);
-            self.vote(i, cells, arriving, total_ms, at_ms);
+            self.slots[i].seen += 1;
+            // Under the runner's row, and not a row the board has shown
+            // without a time before: on a board without comparisons a time
+            // appearing on such a row is a finish, and the only word on
+            // where the runner is when no delta reads.
+            let s = &self.slots[i];
+            let first_time = cells.cumulative_ms.is_some()
+                && s.seen > 2
+                && !matches!(s.baseline, Baseline::Was(_))
+                && !s.baseline_votes.keys().any(|k| k.is_some());
+            let under = self.runner.is_some_and(|r| i > r) && !first_time;
+            self.vote(i, cells, arriving, total_ms, at_ms, under);
         }
         // Which of the configured events this board is, before anything is
         // filed under one of its games.
         self.identify();
         let out = self.harvest(at_ms, total_ms);
+        // A row recorded puts the runner on the next game: past the category
+        // row under it, whose cumulative often never reads and must not be
+        // the row everything below waits on.
+        if self.ordered() {
+            let past = self
+                .slots
+                .iter()
+                .rposition(|s| s.recorded.is_some())
+                .map(|i| if i % 2 == 0 { i + 2 } else { i + 1 });
+            self.advance_runner(past, "the row above it recorded");
+        }
         // A row said to be unvouched, now filed: said too, so the two lines
         // pair up in the log and a watcher can tell a row in limbo from one
         // that stayed lost.
@@ -917,6 +969,25 @@ impl Marathon {
     /// the hour that puts the reading nearest the row's own comparison or
     /// the row above's. A repaired value is a vote like any other and faces
     /// the same guards.
+    /// The runner's row moves down the board and never up: a delta read
+    /// on a row, or a row recorded, puts him there or below.
+    fn advance_runner(&mut self, to: Option<usize>, why: &str) {
+        let Some(to) = to else { return };
+        if self.runner.is_some_and(|r| r >= to) {
+            return;
+        }
+        self.runner = Some(to);
+        if to < self.slots.len() {
+            info!(
+                "marathon: runner on row {} ({}): {why}",
+                to + 1,
+                self.canonical(to)
+                    .or_else(|| self.slots[to].name())
+                    .unwrap_or("?")
+            );
+        }
+    }
+
     fn carry_hour(&self, i: usize, cells: &mut Cells) {
         let Some(c) = cells.cumulative_ms else { return };
         if c >= HOUR_MS {
@@ -965,7 +1036,15 @@ impl Marathon {
     /// `alone` says this pass brought at most one row the board did not have,
     /// which is what tells a game just finished from a board that arrived
     /// with its times already on it.
-    fn vote(&mut self, i: usize, cells: Cells, alone: bool, total_ms: Option<i64>, at_ms: i64) {
+    fn vote(
+        &mut self,
+        i: usize,
+        cells: Cells,
+        alone: bool,
+        total_ms: Option<i64>,
+        at_ms: i64,
+        under: bool,
+    ) {
         if self.slots[i].recorded.is_some() {
             return;
         }
@@ -1001,8 +1080,22 @@ impl Marathon {
         // 51:59 comparison on its second pass).
         let ordered = self.roster.is_some_and(|e| self.rosters.ordered(e));
         let slot = &mut self.slots[i];
+        // A row under the runner's shows its comparison, however it reads
+        // this pass: the reading feeds the baseline and nothing else, and
+        // whatever votes the row gathered go. The comparison read wrong on
+        // its first passes ("92:16" for 1:52:16) settled as the baseline
+        // and made the right reading look like a change; read on under the
+        // runner, the right reading outvotes it, and when he reaches the
+        // row the comparison is what the baseline says it is. A row coming
+        // into view down there with a time in it — the window scrolled —
+        // brought its comparison, wherever the total stands.
+        if under {
+            slot.cumulative_votes.clear();
+            slot.segment_votes.clear();
+            slot.segment_waits = 0;
+        }
         let fresh = !ordered || slot.baseline_votes.keys().all(|k| k.is_none());
-        if slot.baseline == Baseline::Unknown {
+        if under || slot.baseline == Baseline::Unknown {
             // A randomized event's row does not exist until it has a time:
             // the board reader finds rows from their times, so the first game
             // of the day appears out of nothing with its result already in
@@ -1022,7 +1115,9 @@ impl Marathon {
             // settle as the baseline and held the game up for eighteen
             // minutes — the misreading is minutes ahead of the total, and this
             // is exactly the test that tells them apart.
-            if (alone && fresh && observed.is_some_and(|c| just_now(c, total_ms))) || chained {
+            if !under
+                && ((alone && fresh && observed.is_some_and(|c| just_now(c, total_ms))) || chained)
+            {
                 slot.baseline = Baseline::Empty;
             } else {
                 // The same time read with and without its hour digit is one
@@ -1116,6 +1211,22 @@ impl Marathon {
                 continue;
             }
             self.trace(i, at_ms, total_ms);
+            // A row under the runner's that carries a comparison is not
+            // finished, whatever its columns read and wherever the total
+            // stands. Behind the previous run's pace the total sweeps past
+            // the comparisons of rows not yet reached, the arithmetic among
+            // comparisons agrees with itself, and a comparison read wrong
+            // on its first passes looks like a change when it reads right;
+            // nothing below can tell those from completions, and this can.
+            // Its votes keep: once the runner is past the row, a stale
+            // comparison is out of order with the rows recorded above it
+            // and the guards below refuse it, and the row's real time is
+            // what remains.
+            if self.runner.is_some_and(|r| i > r)
+                && matches!(self.slots[i].baseline, Baseline::Was(_))
+            {
+                continue;
+            }
             // The best of the readings this row could be finished at — not
             // simply the most-voted one, which the guards would then throw
             // away, taking the row's real completion down with it: a row
@@ -1310,8 +1421,9 @@ impl Marathon {
             .collect();
         basis.sort();
         eprintln!(
-            "trace slot {i} {name:?} at {} baseline {:?} baseline_votes {:?}",
+            "trace slot {i} {name:?} at {} runner {:?} baseline {:?} baseline_votes {:?}",
             at_ms / 1000,
+            self.runner,
             self.slots[i].baseline,
             basis
         );
@@ -1714,6 +1826,16 @@ impl Marathon {
                         self.total_ms
                             .is_some_and(|total| *b <= total + AHEAD_OF_TOTAL_MS)
                     })
+                    // And past every row recorded above it: the board's
+                    // cumulatives only grow, so a baseline under a recorded
+                    // cumulative is a misreading that settled, not a time.
+                    .filter(|b| {
+                        self.slots[..i - 1]
+                            .iter()
+                            .rev()
+                            .find_map(|s| s.recorded)
+                            .is_none_or(|r| *b > r)
+                    })
             }) {
                 Some(p) => p,
                 None => return Expect::Unanchored,
@@ -2038,6 +2160,13 @@ impl Cells {
 /// first, and whether the delta clears the threshold varies from pass to
 /// pass, so counting from the left is not stable. "-" is LiveSplit's
 /// placeholder for a time it has not got and parses as nothing.
+/// A row printing a delta beside its times: three cells, or a signed first
+/// one. A finished row and the row being run have one; a comparison has
+/// nothing to differ from.
+fn has_delta(row: &BoardRow) -> bool {
+    row.cells.len() >= 3 || row.cells.first().is_some_and(|c| is_signed(c))
+}
+
 fn read_cells(row: &BoardRow) -> Cells {
     // A row printing "???" for a game not yet drawn has no time and is not
     // hiding one, whether or not its columns came back. OCR returns the
@@ -4968,6 +5097,108 @@ mod tests {
         assert_eq!(seen[0].game, "Moon Crystal");
         assert_eq!(seen[0].segment_ms, 19 * 60_000 + 11_000);
         assert_eq!(seen[0].cumulative_ms, 4 * h + 38 * 60_000 + 17_000);
+    }
+
+    /// The runner's row and the rows he has finished print a delta beside
+    /// their times; the rows under his show the previous run's times as
+    /// comparisons, and behind that pace the marathon total sweeps past
+    /// them. A comparison read wrong on its first passes then looks like a
+    /// change when it reads right: Faria's 1:52:16 read "92:16" until the
+    /// clock stood past 1:52 with Steel Legion still going, the arithmetic
+    /// among comparisons agrees with itself, and the day before's Faria was
+    /// filed as this day's — with the real Steel Legion refused behind it.
+    /// A row under the runner's is a comparison, whatever the total says.
+    #[test]
+    fn a_row_under_the_runners_row_is_a_comparison_whatever_the_total_says() {
+        let mut m = race_tracker();
+        let pass = |steel: &[&str], bosses: &[&str], faria: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Uninvited", &["12:56", "1:40:33"]),
+                    row("(Any%)", &["0:42", "1:41:15"]),
+                    row("Steel Legion", steel),
+                    row("(Any% All Bosses)", bosses),
+                    row("Faria", faria),
+                    row("(Any%)", &["0:31", "1:52:47"]),
+                    row("Monster Party", &["12:36", "2:05:24"]),
+                    row("Moon Crystal", &["14:15", "4:14:48"]),
+                ],
+            )
+        };
+        let (h, min) = (3_600_000, 60_000);
+        let mut t = 1_000;
+        let mut total = h + 46 * min;
+        // Steel Legion under way, behind, and Faria's comparison read
+        // without its hour ("92:16" is 92 minutes to the parser).
+        for _ in 0..4 {
+            let b = pass(
+                &["+2:28", "15:39", "1:44:22"],
+                &["0:38", "1:44:53"],
+                &["7:23", "92:16"],
+            );
+            assert!(m.observe(&b, t, Some(total)).is_empty());
+            t += min;
+            total += min;
+        }
+        // Fourteen more minutes on Steel Legion, the timer running: the
+        // clock passes 1:52:16, and the comparison now reads right.
+        for i in 0..14 {
+            let b = pass(
+                &["+8:28", "15:39", "1:44:22"],
+                &["0:38", "1:44:53"],
+                &["7:23", "1:52:16"],
+            );
+            let seen = m.observe(&b, t, Some(total));
+            assert!(seen.is_empty(), "at {i} (total {}): {seen:?}", total / 1000);
+            t += min;
+            total += min;
+        }
+        // Steel Legion done in 18:20 at 1:59:35; the transition row is live.
+        let done = || {
+            pass(
+                &["+14:31", "18:20", "1:59:35"],
+                &["+14:31", "0:38", "1:44:53"],
+                &["7:23", "1:52:16"],
+            )
+        };
+        total = h + 59 * min + 40_000;
+        assert!(m.observe(&done(), t, Some(total)).is_empty());
+        t += min;
+        let seen = m.observe(&done(), t, Some(total + min));
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Steel Legion");
+        assert_eq!(seen[0].cumulative_ms, h + 59 * min + 35_000);
+        // Faria live now, still showing its comparison; the clock is past
+        // it and nothing is filed.
+        t += min;
+        total = 2 * h + min;
+        for i in 0..6 {
+            let b = pass(
+                &["+14:31", "18:20", "1:59:35"],
+                &["+14:31", "0:38", "2:00:13"],
+                &["+14:40", "7:23", "1:52:16"],
+            );
+            let seen = m.observe(&b, t, Some(total));
+            assert!(seen.iter().all(|c| c.game != "Faria"), "at {i}: {seen:?}");
+            t += min;
+            total += min;
+        }
+        // And Faria's own finish is taken.
+        let fin = || {
+            pass(
+                &["+14:31", "18:20", "1:59:35"],
+                &["+14:31", "0:38", "2:00:13"],
+                &["+14:45", "7:28", "2:07:41"],
+            )
+        };
+        total = 2 * h + 7 * min + 50_000;
+        let mut seen = m.observe(&fin(), t, Some(total));
+        seen.extend(m.observe(&fin(), t + min, Some(total + min)));
+        let faria: Vec<_> = seen.iter().filter(|c| c.game == "Faria").collect();
+        assert_eq!(faria.len(), 1, "{seen:?}");
+        assert_eq!(faria[0].cumulative_ms, 2 * h + 7 * min + 41_000);
+        assert_eq!(faria[0].segment_ms, 7 * min + 28_000);
     }
 
     /// After a restart nothing above the runner is recorded, and a
