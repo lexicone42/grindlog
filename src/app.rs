@@ -4585,6 +4585,18 @@ pub async fn run(cfg: Config) -> Result<()> {
     let capture_failed = capture_error.lock().unwrap().clone();
     if let Some(id) = session_id.take() {
         let wall_now = time_base.map(|b| b + last_t).unwrap_or_else(util::unix_ms);
+        // The recording ran out with a marathon in force — a VOD replay,
+        // a backfill — and it gets the close the stream-offline path gives
+        // one, so a finish on the board's last pass is filed here too.
+        if let Some(mut m) = marathon.take() {
+            let late = m.close(wall_now);
+            let unmatched = m.unmatched();
+            file_completions(&pool, Some(id), &mut health, wall_now, unmatched, late).await;
+            info!(
+                "marathon set aside with the recording's end: {}",
+                m.describe()
+            );
+        }
         // The tally goes in here too, not only on the stream-offline path.
         // A live broadcast ends by going offline; a VOD replay and every
         // backfill end by running out of input and came through here, so
