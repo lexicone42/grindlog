@@ -1912,6 +1912,21 @@ async fn track_marathon(
             }
         }
     }
+    file_completions(pool, session_id, health, at_ms, unmatched, completions).await;
+    true
+}
+
+/// File what a pass, or the broadcast's end, returned: a run each, said in the
+/// log, counted in the session's health events, and checked against the
+/// previous run's time for the game.
+async fn file_completions(
+    pool: &SqlitePool,
+    session_id: Option<i64>,
+    health: &mut db::SessionHealth,
+    at_ms: i64,
+    unmatched: u32,
+    completions: Vec<marathon::Completion>,
+) {
     for c in completions {
         let number = db::next_attempt_number(pool, &c.game, &c.category)
             .await
@@ -2005,7 +2020,6 @@ async fn track_marathon(
             );
         }
     }
-    true
 }
 
 /// Persist a confirmed reference time and, for the season best, adopt it as
@@ -2678,7 +2692,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // event from `db::marathon_totals` when the board comes back,
                 // which is what that reconcile is for, and the new session
                 // gets its own tag.
-                if let Some(m) = marathon.take() {
+                if let Some(mut m) = marathon.take() {
+                    // A finish in the broadcast's last minute had one pass on
+                    // the board and no second one coming.
+                    let late = m.close(wall_now);
+                    let unmatched = m.unmatched();
+                    file_completions(&pool, session_id, &mut health, wall_now, unmatched, late)
+                        .await;
                     info!("marathon set aside with the broadcast: {}", m.describe());
                 }
                 marathon_tag = None;

@@ -130,6 +130,11 @@ const JUST_NOW_MS: i64 = 180_000;
 /// before the log says so.
 const UNVOUCHED_PASSES: u32 = 5;
 
+/// How far past the total as last read a finish filed at the broadcast's
+/// end may land: the pass that read the finished row read the total a few
+/// seconds before or after it.
+const CLOSE_AHEAD_MS: i64 = 10_000;
+
 /// A game the board says is finished, ready to be recorded as a run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Completion {
@@ -530,6 +535,10 @@ pub struct Marathon {
     /// says whether a row's baseline is behind the clock (a finished row)
     /// or ahead of it (a comparison not yet reached).
     total_ms: Option<i64>,
+    /// The total as last READ, over passes where the timer went unread: what
+    /// a finish on the broadcast's last pass is checked against when the
+    /// timer was gone by then.
+    last_total_ms: Option<i64>,
     /// Pane passes seen, for the log.
     passes: u32,
     /// The events this board may be, and the ten games of each. Empty where
@@ -580,6 +589,7 @@ impl Marathon {
             numbers: HashMap::new(),
             known: Vec::new(),
             total_ms: None,
+            last_total_ms: None,
             passes: 0,
             rosters,
             roster: None,
@@ -837,6 +847,9 @@ impl Marathon {
             (t, _) => t,
         };
         self.total_ms = total_ms;
+        if total_ms.is_some() {
+            self.last_total_ms = total_ms;
+        }
         if let Some(t) = board.title.as_deref() {
             if let Some(n) = event_number(t) {
                 *self.numbers.entry(n).or_insert(0) += 1;
@@ -1390,6 +1403,97 @@ impl Marathon {
             }
         }
         out.append(&mut self.backfill(at_ms));
+        out
+    }
+
+    /// The broadcast ended. A finish in its last minute has had one pass on
+    /// the board and no second one is coming, so the row the runner was on
+    /// is filed from that pass alone when its segment column, the row
+    /// recorded above it and the total as last read say the same thing:
+    /// the row above's cumulative plus the segment is where the total
+    /// stands, a few seconds either way. A row still being run shows its
+    /// comparison, and that sum lands well ahead of the total or on it
+    /// only in the last seconds of a game run to the second. Ordered
+    /// boards only: the runner's row is what says which row it could be.
+    pub fn close(&mut self, at_ms: i64) -> Vec<Completion> {
+        let mut out = Vec::new();
+        let Some(total) = self.total_ms.or(self.last_total_ms) else {
+            return out;
+        };
+        if !self.ordered() {
+            return out;
+        }
+        for i in 0..self.slots.len() {
+            if self.slots[i].recorded.is_some() || i % 2 == 1 || self.runner.is_some_and(|r| i > r)
+            {
+                continue;
+            }
+            let Some(prev) = self.slots[..i].iter().rev().find_map(|s| s.recorded) else {
+                continue;
+            };
+            // The row's latest segment reading that is not beside its
+            // comparison.
+            let baseline = self.slots[i].baseline_value();
+            let Some(seg) = self.slots[i]
+                .segment_votes
+                .iter()
+                .filter(|((c, _), _)| !baseline.is_some_and(|b| same_time(b, *c)))
+                .max_by_key(|(_, v)| v.last_ms)
+                .map(|((_, s), _)| *s)
+            else {
+                continue;
+            };
+            let sum = prev + seg;
+            if sum > total + CLOSE_AHEAD_MS || sum + AHEAD_OF_TOTAL_MS < total {
+                continue;
+            }
+            // The board's last row ends the event and the total stops on it,
+            // so the total is that row's cumulative when it stands past the
+            // sum (the transition row above may have gone unrecorded); any
+            // other row's total goes on running and the sum is the better
+            // word.
+            let cum = if i + 1 == self.slots.len() {
+                total.max(sum)
+            } else {
+                sum
+            };
+            let Some(read) = self.slots[i].name().map(str::to_string) else {
+                continue;
+            };
+            let canonical = self.canonical(i).map(str::to_string);
+            let unmatched = canonical.is_none();
+            let game = canonical.unwrap_or_else(|| read.clone());
+            if self.floors.get(&game).is_some_and(|floor| seg < *floor) {
+                continue;
+            }
+            if unmatched {
+                self.unmatched += 1;
+            }
+            let as_read = (game != read).then_some(read);
+            self.slots[i].recorded = Some(cum);
+            self.slots[i].recorded_at_ms = Some(at_ms);
+            self.known.push(cum);
+            info!(
+                "marathon row {}: {} finished in {} on the board's last pass; filed at the broadcast's end (total {})",
+                i + 1,
+                game,
+                crate::timeparse::format_ms_seconds(seg),
+                crate::timeparse::format_ms_seconds(total)
+            );
+            out.push(Completion {
+                slot: i,
+                game,
+                as_read,
+                unmatched,
+                category: self.category.clone(),
+                segment_ms: seg,
+                cumulative_ms: cum,
+                started_at_ms: at_ms - seg,
+                ended_at_ms: at_ms,
+                segment_derived: false,
+                backfilled: false,
+            });
+        }
         out
     }
 
@@ -2396,6 +2500,13 @@ pub fn replay(
         }
         let Some(m) = state.as_mut() else { continue };
         for c in m.observe(&p.board, p.at_ms, p.total_ms) {
+            recorded.push(c.cumulative_ms);
+            out.push(c);
+        }
+    }
+    // The broadcast ended: a finish on its last pass is filed at the close.
+    if let (Some(m), Some(p)) = (state.as_mut(), passes.last()) {
+        for c in m.close(p.at_ms) {
             recorded.push(c.cumulative_ms);
             out.push(c);
         }
@@ -5097,6 +5208,95 @@ mod tests {
         assert_eq!(seen[0].game, "Moon Crystal");
         assert_eq!(seen[0].segment_ms, 19 * 60_000 + 11_000);
         assert_eq!(seen[0].cumulative_ms, 4 * h + 38 * 60_000 + 17_000);
+    }
+
+    /// The broadcast ends within a minute of the last game's finish: the
+    /// finished row had one pass, which is one short of settling, and no
+    /// second one is coming. At the close the row is filed from that pass
+    /// when the row above plus its segment is where the total stands; while
+    /// the game is still going its comparison is all the row shows, and
+    /// that sum is nowhere near the total.
+    #[test]
+    fn a_finish_the_broadcast_ends_on_is_filed_at_the_close() {
+        let mut m = race_tracker();
+        let pass = |jaws: &[&str], cat: &[&str], moon: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Celeste Mario", &["12:48", "4:33:19"]),
+                    row("(Any%)", &["0:31", "4:33:50"]),
+                    row("Jaws", jaws),
+                    row("(Any%)", cat),
+                    row("Moon Crystal", moon),
+                ],
+            )
+        };
+        let (h, min) = (3_600_000, 60_000);
+        let mut t = 1_000;
+        let mut total = 4 * h + 36 * min;
+        // Jaws under way, then done in 7:11 at 4:41:01, its transition after it.
+        for _ in 0..3 {
+            let b = pass(
+                &["+27:00", "6:46", "4:00:02"],
+                &["0:30", "4:20:30"],
+                &["14:15", "4:14:48"],
+            );
+            assert!(m.observe(&b, t, Some(total)).is_empty());
+            t += min;
+            total += min;
+        }
+        total = 4 * h + 41 * min + 5_000;
+        for _ in 0..2 {
+            let b = pass(
+                &["7:11", "4:41:01"],
+                &["+40:59", "0:30", "4:20:30"],
+                &["14:15", "4:14:48"],
+            );
+            let seen = m.observe(&b, t, Some(total));
+            t += min;
+            total += min;
+            if !seen.is_empty() {
+                assert_eq!(seen[0].game, "Jaws", "{seen:?}");
+            }
+        }
+        // Moon Crystal under way, the transition row done at 4:41:31.
+        for _ in 0..8 {
+            let b = pass(
+                &["7:11", "4:41:01"],
+                &["0:30", "4:41:31"],
+                &["+28:43", "14:15", "4:14:48"],
+            );
+            let seen = m.observe(&b, t, Some(total));
+            assert!(seen.iter().all(|c| c.game != "Moon Crystal"), "{seen:?}");
+            t += min;
+            total += min;
+        }
+        // A close while the game is still going files nothing.
+        assert!(m.close(t).is_empty());
+        // The total read 4:54:25 on the pass before the last, and on the
+        // last pass of the broadcast the timer went unread: Moon Crystal
+        // done in 12:58 at 4:54:30.
+        total = 4 * h + 54 * min + 25_000;
+        let b = pass(
+            &["7:11", "4:41:01"],
+            &["0:30", "4:41:31"],
+            &["+39:37", "14:15", "4:14:48"],
+        );
+        assert!(m.observe(&b, t, Some(total)).is_empty());
+        t += min;
+        let b = pass(
+            &["7:11", "4:41:01"],
+            &["0:30", "4:41:31"],
+            &["12:58", "4:54:30"],
+        );
+        assert!(m.observe(&b, t, None).is_empty());
+        let late = m.close(t + 30_000);
+        assert_eq!(late.len(), 1, "{late:?}");
+        assert_eq!(late[0].game, "Moon Crystal");
+        assert_eq!(late[0].segment_ms, 12 * min + 58_000);
+        assert_eq!(late[0].cumulative_ms, 4 * h + 54 * min + 29_000);
+        // And not twice.
+        assert!(m.close(t + 60_000).is_empty());
     }
 
     /// The runner's row and the rows he has finished print a delta beside
