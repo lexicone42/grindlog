@@ -197,6 +197,20 @@ recorded cumulative, since the board's cumulatives only grow. The row moves
 down the board and never up; the log says `runner on row N` and why as it
 does, and the close line carries it.
 
+**The row being run.** A finished row keeps its delta beside its times, and
+the row being run has one too, so the lowest row with a delta is the row
+being run only while its delta moves from pass to pass. That row gives no
+vote on such a pass: what its other two cells show is not a finish (the
+comparison while he is behind it; the comparison less his lead while he is
+ahead — Crisis Force 10:42 / 43:45 on the row being run, filed as done with
+fourteen minutes to go). The pass a game finishes on reads its final delta,
+which moved, so a finish takes one pass more than it used to; the segment
+from that pass is held for the close. A finish that lands on the
+comparison's own cumulative to the second (Pac-Mania 5:50 at 8:22 against
+5:28 at 8:22) shows as a change in the segment column alone, so the
+baseline keeps its segment beside it. Between candidates tied on votes the
+one the board's arithmetic vouches for is tried first.
+
 **The broadcast's last pass.** A finish in the last minute of a broadcast has
 one pass on the board and no second one coming — on 2026-09-24 Moon Crystal
 finished at 4:54:30 and the stream ended within the minute — so when the
