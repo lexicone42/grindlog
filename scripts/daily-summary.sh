@@ -108,6 +108,16 @@ while IFS='|' read -r bname broster; do
   if [ "${size:-0}" -gt 0 ] && [ "$n" -lt "$size" ]; then
     line+=" -- SHORT: $((size - n)) game(s) not filed; replay the day (docs/big20.md)"
   fi
+  # Rows carrying the previous run's time to the second: the board prints
+  # the previous run's times on the rows not yet reached, and a comparison
+  # filed as a finish is exactly that.
+  echoes=$(q "SELECT COUNT(*) FROM runs r WHERE r.category = '$(esc "$bname")' AND r.started_at_ms >= $s_ms AND r.started_at_ms < $e_ms
+              AND r.outcome = 'finished' AND r.final_time_ms IS NOT NULL
+              AND EXISTS (SELECT 1 FROM runs p WHERE p.game = r.game AND p.category = r.category AND p.outcome = 'finished'
+                          AND p.final_time_ms = r.final_time_ms AND p.started_at_ms < r.started_at_ms - 3600000)")
+  if [ "${echoes:-0}" -gt 0 ]; then
+    line+=" -- ECHO: $echoes game(s) carry the previous run's time to the second (a comparison filed as a finish? docs/big20.md)"
+  fi
   say "$line"
 done < <(awk '/^\[\[/{if(m&&n)print n"|"r; n="";r="";m=0} /^name = /{n=$0} /^roster = /{r=$0} /^mode = "board"/{m=1} END{if(m&&n)print n"|"r}' live.toml \
          | sed 's/^name = "\([^"]*\)"|roster = "\([^"]*\)"$/\1|\2/')

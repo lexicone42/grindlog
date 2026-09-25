@@ -382,3 +382,6 @@ match = ["arcath", "randomized"]
                                   # a minute, so the file stays small; it is what
                                   # explains afterwards what the board reader saw
                                   # on a pane that went unreadable for a while
+# Log lines go to stderr as text. With NG_LOG_FORMAT=json in the environment
+# each line is one JSON object instead (timestamp, level, target, message and
+# fields), for jq; the scripts under scripts/ read the text form.
