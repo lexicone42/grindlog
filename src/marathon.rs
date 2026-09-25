@@ -77,7 +77,7 @@ use crate::config::{Config, GameAlias, GameMode};
 use crate::roster::Rosters;
 use crate::signature::{BoardSignature, Labels, Shape};
 use crate::timeparse::{parse_time, time_shaped};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Passes that must agree before a cumulative time is believed. The board is
 /// static text re-read once a minute, so a real value repeats and a digit
@@ -258,6 +258,20 @@ struct Slot {
     unvouched: u32,
     /// Passes this slot's row has been on the board, legible or not.
     seen: u32,
+    /// The delta cell as it last read, when the row had one: the row being
+    /// run has a delta that moves from pass to pass, a finished row one that
+    /// stands.
+    last_delta: Option<String>,
+    /// The segment column beside the baseline when it settled. A finish at
+    /// the comparison's own cumulative to the second (Pac-Mania 5:50 at 8:22
+    /// against 5:28 at 8:22, twenty-two seconds gained and lost) shows as a
+    /// change in this column alone.
+    baseline_segment_ms: Option<i64>,
+    /// The segment column on the last pass this row gave no vote for being
+    /// the row being run. The pass a game finishes on reads its final delta
+    /// beside its times, which is a delta that moved; when the broadcast
+    /// ends on that pass, this is the finish the close has to go on.
+    held_segment_ms: Option<i64>,
 }
 
 impl Slot {
@@ -894,6 +908,15 @@ impl Marathon {
             .count()
             <= 1;
         // Where the runner is, before this pass's rows are judged by it.
+        // The lowest row with a delta is the row being run whenever its
+        // delta reads, and what its other two cells show is not a finish:
+        // the comparison while he is behind it, the comparison less his
+        // lead while he is ahead (Crisis Force 10:42 / 43:45 on the row
+        // being run, filed as done with fourteen minutes to go). A finished
+        // row keeps its delta too, so the row being run is told by its
+        // delta MOVING from pass to pass: the lowest delta row gives no
+        // vote on a pass its delta differs from the last one read on it.
+        let mut live: Option<usize> = None;
         if self.ordered() {
             let lowest = board
                 .rows
@@ -901,6 +924,7 @@ impl Marathon {
                 .zip(alignment.iter())
                 .filter_map(|(row, slot)| slot.map(|s| (s, row)).filter(|(_, r)| has_delta(r)))
                 .max_by_key(|(s, _)| *s);
+            live = lowest.map(|(s, _)| s);
             if let Some((s, row)) = lowest {
                 let why = format!(
                     "a delta beside its times ({:?} {:?})",
@@ -931,6 +955,23 @@ impl Marathon {
                 && !matches!(s.baseline, Baseline::Was(_))
                 && !s.baseline_votes.keys().any(|k| k.is_some());
             let under = self.runner.is_some_and(|r| i > r) && !first_time;
+            let delta = has_delta(row)
+                .then(|| row.cells.first().map(|c| c.trim().to_string()))
+                .flatten();
+            let moved = delta.is_some() && delta != self.slots[i].last_delta;
+            self.slots[i].last_delta = delta;
+            if live == Some(i) && moved {
+                debug!(
+                    "marathon row {}: the row being run (delta {:?}); no vote this pass",
+                    i + 1,
+                    self.slots[i].last_delta.as_deref().unwrap_or("")
+                );
+                self.slots[i].held_segment_ms = cells.segment_ms;
+                continue;
+            }
+            if cells.cumulative_ms.is_some() {
+                self.slots[i].held_segment_ms = None;
+            }
             self.vote(i, cells, arriving, total_ms, at_ms, under);
         }
         // Which of the configured events this board is, before anything is
@@ -1170,6 +1211,7 @@ impl Marathon {
                         Some(ms) => Baseline::Was(ms),
                         None => Baseline::Empty,
                     };
+                    slot.baseline_segment_ms = observed.and(cells.segment_ms);
                     // A baseline that is a cumulative already in the
                     // database is a row this bot finished watching before it
                     // restarted. Marking it recorded here is the only chance
@@ -1192,7 +1234,14 @@ impl Marathon {
         // permanent — a completed row keeps its time for the rest of the
         // event — so whatever else this row read in between was the number
         // being misread, and none of it counts towards a change.
-        if matches!(slot.baseline, Baseline::Was(b) if same_time(b, cum)) {
+        // The same cumulative with a different segment beside it is a
+        // finish that landed on the comparison's time: what changed is the
+        // other column.
+        let same_segment = match (slot.baseline_segment_ms, cells.segment_ms) {
+            (Some(b), Some(s)) => b == s,
+            _ => true,
+        };
+        if matches!(slot.baseline, Baseline::Was(b) if same_time(b, cum)) && same_segment {
             slot.cumulative_votes.clear();
             slot.segment_votes.clear();
             slot.segment_waits = 0;
@@ -1275,10 +1324,13 @@ impl Marathon {
                             || !self.slots[i].one_digit_from_baseline(*c))
                 })
                 .collect();
-            // Most voted first. A candidate the floor refuses gives way to the
-            // next: a misreading read once more than the real completion
+            // Most voted first, and between candidates tied on votes the one
+            // the board's own arithmetic vouches for (a transition row read
+            // 14:12 and 14:30 twice each; 14:12 is the row above plus its
+            // thirty seconds). A candidate the floor refuses gives way to
+            // the next: a misreading read once more than the real completion
             // must not hold the row.
-            cands.sort_by_key(|(c, v)| std::cmp::Reverse((v.count, *c)));
+            cands.sort_by_key(|(c, v)| std::cmp::Reverse((v.count, self.board_vouches(i, *c), *c)));
             if cands.is_empty() {
                 // A settled, coherent cumulative the segment column does not
                 // deny, with nothing to vouch for it: the board says he is
@@ -1431,16 +1483,18 @@ impl Marathon {
             let Some(prev) = self.slots[..i].iter().rev().find_map(|s| s.recorded) else {
                 continue;
             };
-            // The row's latest segment reading that is not beside its
-            // comparison.
+            // The segment held from the last pass, where the row gave no vote
+            // for being the row being run (the pass a game finishes on reads
+            // its final delta, which moved), or else the row's latest segment
+            // reading that is not beside its comparison.
             let baseline = self.slots[i].baseline_value();
-            let Some(seg) = self.slots[i]
+            let latest = self.slots[i]
                 .segment_votes
                 .iter()
                 .filter(|((c, _), _)| !baseline.is_some_and(|b| same_time(b, *c)))
                 .max_by_key(|(_, v)| v.last_ms)
-                .map(|((_, s), _)| *s)
-            else {
+                .map(|((_, s), _)| *s);
+            let Some(seg) = self.slots[i].held_segment_ms.or(latest) else {
                 continue;
             };
             let sum = prev + seg;
@@ -5210,6 +5264,78 @@ mod tests {
         assert_eq!(seen[0].cumulative_ms, 4 * h + 38 * 60_000 + 17_000);
     }
 
+    /// A finish at the comparison's own cumulative: Die Hard twenty-two
+    /// seconds under his best and Pac-Mania twenty-two over it put Pac-Mania
+    /// at 8:22, the very time the row had shown all along. The cumulative
+    /// says nothing; the segment column beside it does.
+    #[test]
+    fn a_finish_at_the_comparisons_cumulative_is_told_by_its_segment() {
+        let mut m = race_tracker();
+        let pass = |die: &[&str], cat: &[&str], pac: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Die Hard", die),
+                    row("(Any% Beginner)", cat),
+                    row("Pac-Mania", pac),
+                    row("(Sandbox)", &["0:30", "8:52"]),
+                    row("Double Dragon II", &["25:34", "34:26"]),
+                    row("Moon Crystal", &["14:15", "4:14:48"]),
+                ],
+            )
+        };
+        let min = 60_000;
+        let mut t = 1_000;
+        // Die Hard under way against 2:23; Pac-Mania's comparison 5:28 at 8:22.
+        for i in 0..3 {
+            let delta = ["+0.3", "+0.5", "+0.2"][i];
+            let b = pass(
+                &[delta, "2:23", "2:23"],
+                &["0:30", "2:53"],
+                &["5:28", "8:22"],
+            );
+            assert!(m.observe(&b, t, Some(30_000 + i as i64 * min)).is_empty());
+            t += min;
+        }
+        // Die Hard done in 2:01, then its transition; the delta stands still.
+        for i in 0..3 {
+            let b = pass(
+                &["-22.0", "2:01", "2:01"],
+                &["-22.0", "0:30", "2:32"],
+                &["5:28", "8:22"],
+            );
+            m.observe(&b, t, Some(2 * min + 40_000 + i as i64 * min));
+            t += min;
+        }
+        // Pac-Mania under way, its delta moving.
+        for i in 0..4 {
+            let delta = ["-21.0", "-15.0", "-8.0", "-2.0"][i];
+            let b = pass(
+                &["-22.0", "2:01", "2:01"],
+                &["-22.0", "0:30", "2:32"],
+                &[delta, "5:28", "8:22"],
+            );
+            let seen = m.observe(&b, t, Some(4 * min + i as i64 * min));
+            assert!(seen.iter().all(|c| c.game != "Pac-Mania"), "{seen:?}");
+            t += min;
+        }
+        // Done in 5:50, at 8:22 to the second.
+        let mut seen = Vec::new();
+        for i in 0..3 {
+            let b = pass(
+                &["-22.0", "2:01", "2:01"],
+                &["-22.0", "0:30", "2:32"],
+                &["5:50", "8:22"],
+            );
+            seen.extend(m.observe(&b, t, Some(8 * min + 25_000 + i as i64 * min)));
+            t += min;
+        }
+        let pac: Vec<_> = seen.iter().filter(|c| c.game == "Pac-Mania").collect();
+        assert_eq!(pac.len(), 1, "{seen:?}");
+        assert_eq!(pac[0].segment_ms, 5 * min + 50_000);
+        assert_eq!(pac[0].cumulative_ms, 8 * min + 22_000);
+    }
+
     /// The broadcast ends within a minute of the last game's finish: the
     /// finished row had one pass, which is one short of settling, and no
     /// second one is coming. At the close the row is filed from that pass
@@ -5393,8 +5519,11 @@ mod tests {
             )
         };
         total = 2 * h + 7 * min + 50_000;
+        // The finished row keeps its delta, which the pass after finds
+        // standing still: the pass it first appears on gives no vote.
         let mut seen = m.observe(&fin(), t, Some(total));
         seen.extend(m.observe(&fin(), t + min, Some(total + min)));
+        seen.extend(m.observe(&fin(), t + 2 * min, Some(total + 2 * min)));
         let faria: Vec<_> = seen.iter().filter(|c| c.game == "Faria").collect();
         assert_eq!(faria.len(), 1, "{seen:?}");
         assert_eq!(faria[0].cumulative_ms, 2 * h + 7 * min + 41_000);
