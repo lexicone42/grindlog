@@ -197,6 +197,16 @@ recorded cumulative, since the board's cumulatives only grow. The row moves
 down the board and never up; the log says `runner on row N` and why as it
 does, and the close line carries it.
 
+**The broadcast's last pass.** A finish in the last minute of a broadcast has
+one pass on the board and no second one coming — on 2026-09-24 Moon Crystal
+finished at 4:54:30 and the stream ended within the minute — so when the
+broadcast ends the tracker files the runner's row from that pass alone,
+provided the row recorded above it plus the pass's segment is where the
+total stood as last read (a few seconds either way). A row still being run
+shows its comparison, and that sum is nowhere near the total. The log says
+`filed at the broadcast's end`; the audit's replay does the same at the end
+of a board log.
+
 **The segment column's word.** The column refuses a candidate only when no
 settled reading of it agrees with the arithmetic (the comparison case:
 "20:34 throughout" where 16:16 was wanted). Any settled disagreement used
