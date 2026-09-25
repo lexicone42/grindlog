@@ -1963,6 +1963,29 @@ async fn track_marathon(
             "marathon",
             format!("{} {}", c.game, format_ms(c.segment_ms)),
         );
+        // The previous run-through's time for this game, to the millisecond.
+        // A comparison filed as a finish looks exactly like this — the board
+        // prints the previous run's times on the rows not yet reached — and
+        // seven rows of one day did before anything said so. A real repeat
+        // to the second happens too, and is worth a look either way.
+        match db::previous_time(pool, &c.game, &c.category, c.started_at_ms - 3_600_000).await {
+            Ok(Some((prev, when))) if prev == c.segment_ms => {
+                warn!(
+                    "marathon row {}: {} {} is the previous run's time to the second ({}): a comparison filed as a finish?",
+                    c.slot + 1,
+                    c.game,
+                    format_ms(c.segment_ms),
+                    util::date_of_ms(when)
+                );
+                health.event(
+                    at_ms,
+                    "echo",
+                    format!("{} {}", c.game, format_ms(c.segment_ms)),
+                );
+            }
+            Ok(_) => {}
+            Err(e) => debug!("could not look up the previous run of {:?}: {e:#}", c.game),
+        }
         // A row no roster name fits is recorded under the reading, which
         // starts a history of its own on the site. Said in the log and
         // counted in the session's health events, with the running total, so
@@ -2790,11 +2813,24 @@ pub async fn run(cfg: Config) -> Result<()> {
                     }
                     if glyph_win_hits + glyph_win_declines >= 600 {
                         if glyph_win_declines > glyph_win_hits {
-                            warn!(
-                                "glyph reader declined {} of the last {} timer frames (tesseract read them): a theme or font the templates do not cover? see README on retraining",
-                                glyph_win_declines,
-                                glyph_win_hits + glyph_win_declines
-                            );
+                            // Under a lock the board holds the timer is the
+                            // marathon total, H:MM:SS in a font the templates
+                            // were never cut for, and the tracker does not
+                            // read it: a fact for the debug log, not a
+                            // warning every five minutes for five hours.
+                            if lock.is_board() {
+                                debug!(
+                                    "glyph reader declined {} of the last {} timer frames under the board's lock",
+                                    glyph_win_declines,
+                                    glyph_win_hits + glyph_win_declines
+                                );
+                            } else {
+                                warn!(
+                                    "glyph reader declined {} of the last {} timer frames (tesseract read them): a theme or font the templates do not cover? see README on retraining",
+                                    glyph_win_declines,
+                                    glyph_win_hits + glyph_win_declines
+                                );
+                            }
                         }
                         glyph_win_hits = 0;
                         glyph_win_declines = 0;

@@ -493,6 +493,28 @@ pub async fn last_run(pool: &SqlitePool, game: &str, category: &str) -> Result<O
     Ok(row)
 }
 
+/// The previous run-through's time for a game: the finished run of the
+/// game and category that started last before `before_ms`, with when it
+/// started.
+pub async fn previous_time(
+    pool: &SqlitePool,
+    game: &str,
+    category: &str,
+    before_ms: i64,
+) -> Result<Option<(i64, i64)>> {
+    let row = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT final_time_ms, started_at_ms FROM runs WHERE game = ? AND category = ? \
+         AND outcome = 'finished' AND final_time_ms IS NOT NULL AND started_at_ms < ? \
+         ORDER BY started_at_ms DESC, id DESC LIMIT 1",
+    )
+    .bind(game)
+    .bind(category)
+    .bind(before_ms)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 async fn run_by_id(pool: &SqlitePool, id: i64) -> Result<Option<RunRow>> {
     let row = sqlx::query_as::<_, RunRow>("SELECT * FROM runs WHERE id = ?")
         .bind(id)
@@ -1374,6 +1396,38 @@ mod tests {
     /// The last run is the one that started last within the tracked
     /// game/category, not the highest id: a backfill import writes older
     /// days after newer ones, and another game's run is not ours.
+    /// The previous run-through's time is the latest finished run of the
+    /// game that started before the one in hand.
+    #[tokio::test]
+    async fn the_previous_time_is_the_last_finished_before() {
+        let (_dir, pool) = test_pool().await;
+        insert_run(&pool, run("smb", 3, 1_000_000, Some(300_000)))
+            .await
+            .unwrap();
+        insert_run(&pool, run("smb", 5, 2_000_000, None))
+            .await
+            .unwrap();
+        insert_run(&pool, run("smb", 7, 5_000_000, Some(290_000)))
+            .await
+            .unwrap();
+        assert_eq!(
+            previous_time(&pool, "smb", "Any%", 4_000_000)
+                .await
+                .unwrap(),
+            Some((300_000, 1_000_000))
+        );
+        assert_eq!(
+            previous_time(&pool, "smb", "Any%", 6_000_000)
+                .await
+                .unwrap(),
+            Some((290_000, 5_000_000))
+        );
+        assert_eq!(
+            previous_time(&pool, "smb", "Any%", 500_000).await.unwrap(),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn last_run_is_the_latest_started_of_the_game() {
         let (_dir, pool) = test_pool().await;

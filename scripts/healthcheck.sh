@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Dead-man check for the live deployment, for a ten-minute cron (see
-# crontab.example). Each pass reads fourteen signals:
+# crontab.example). Each pass reads sixteen signals:
 #
 #   database      ninja-gaiden.db opens and answers a query
 #   tracker-churn at most two board-tracker rebuilds in the last hour
@@ -9,6 +9,9 @@
 #               over ten minutes without being filed (a lost anchor, a wrong total)
 #   tracker-total the marathon total has not been refused as beyond the board
 #               on five passes (the timer being misread)
+#   tracker-runner a marathon in force has moved the runner's row within 45 min
+#   tracker-echo  under two of today's board rows carry the previous run's time
+#               to the second (a comparison filed as a finish)
 #   site-stale    while a session is open, the public page is under 30 min old
 #
 #   supervisor  the tmux session "ngtimer" exists on the bot's own tmux server
@@ -265,9 +268,44 @@ if [ "$open" -gt 0 ] && command -v jq >/dev/null; then
         check tracker-stall 1 "a marathon is in force (${state% started}) and the last completion was $((since_row / 60)) min ago"
       else
         check tracker-stall 0 "marathon in force, last completion $((since_row / 60)) min ago"
+      fi
+      # The runner's row: the tracker says "runner on row N (game)" as it
+      # moves down an ordered board, and nothing under that row is filed.
+      # A row that has not moved in 45 minutes while the run is in force —
+      # his longest game is under that — is a cursor stuck behind a refused
+      # row, and every game after it is being held back.
+      runner=$(plain | awk '/marathon: runner on row/ {t=$1; l=$0} END {if (l) {sub(/.*runner on row /, "", l); sub(/\): .*/, ")", l); print t " " l}}')
+      if [ -n "$runner" ]; then
+        rt=$(date -d "${runner%% *}" +%s 2>/dev/null || echo 0)
+        since_runner=$((now - rt))
+        if [ "$since_runner" -gt 2700 ]; then
+          check tracker-runner 1 "the runner's row has not moved in $((since_runner / 60)) min: row ${runner#* } (logs/live.log 'runner on row')"
+        else
+          check tracker-runner 0 "runner on row ${runner#* }, $((since_runner / 60)) min ago"
+        fi
+      else
+        check tracker-runner 0 "no runner's row logged yet"
       fi;;
-    *) check tracker-stall 0 "no marathon in force";;
+    *) check tracker-stall 0 "no marathon in force"; check tracker-runner 0 "no marathon in force";;
   esac
+fi
+
+# --- board tracker: a row filed with the previous run's time to the second.
+# The board prints the previous run's times on the rows not yet reached, and
+# a comparison filed as a finish is exactly that; the tracker warns as it
+# files one ("is the previous run's time to the second"), and this counts
+# today's rows under every board [[games]] name against the run before. One
+# is a repeat that happens; two is a day to replay (docs/big20.md).
+boards=$(awk '/^\[\[/{if(m&&n)print n; n="";m=0} /^name = /{n=$0} /^mode = "board"/{m=1} END{if(m&&n)print n}' live.toml 2>/dev/null \
+         | sed 's/^name = "\([^"]*\)"$/\1/' | sed "s/'/''/g; s/.*/'&'/" | paste -sd, -)
+if [ -n "$boards" ]; then
+  day_ms=$(($(date -d 'today 00:00' +%s) * 1000))
+  echoes=$(sqlite3 -readonly -cmd '.timeout 5000' "$DB" "select count(*) from runs r where r.category in ($boards) and r.started_at_ms >= $day_ms and r.outcome = 'finished' and r.final_time_ms is not null and exists (select 1 from runs p where p.game = r.game and p.category = r.category and p.outcome = 'finished' and p.final_time_ms = r.final_time_ms and p.started_at_ms < r.started_at_ms - 3600000)" 2>/dev/null || echo 0)
+  if [ "${echoes:-0}" -ge 2 ]; then
+    check tracker-echo 1 "$echoes of today's board rows carry the previous run's time to the second: comparisons filed as finishes? replay the day (docs/big20.md)"
+  else
+    check tracker-echo 0 "${echoes:-0} row(s) today with the previous run's exact time"
+  fi
 fi
 
 # --- board tracker: a row the board shows finished that nothing confirms.

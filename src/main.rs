@@ -213,12 +213,18 @@ async fn main() -> Result<()> {
     // Logs go to stderr, every subcommand: `report --json` prints the site's
     // JSON on stdout, and a config-time INFO line (the [[games]] roster load)
     // in front of it would break the site build.
-    tracing_subscriber::fmt()
+    // NG_LOG_FORMAT=json: one JSON object per line, for jq. The text form is
+    // what the scripts under scripts/ read.
+    let logs = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+        );
+    if std::env::var("NG_LOG_FORMAT").is_ok_and(|v| v == "json") {
+        logs.json().init();
+    } else {
+        logs.init();
+    }
     let cli = Cli::parse();
     let cfg = config::Config::load(&cli.config)?;
     match cli.command.unwrap_or(Command::Run) {
