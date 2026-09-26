@@ -270,6 +270,23 @@ for (const g of games) {
   g.fin = fins.length || g.finished || 0;
   g.bestMs = g.bestRun ? g.bestRun.ms : g.best_ms;
   g.lastAt = runs.length ? runs[runs.length - 1].t : g.last_at_ms;
+  // His best for the game to the race's goal, wherever he set it: a
+  // practice attempt or a game inside a full run. Thirteen of the twenty
+  // were quicker inside a run than in any attempt on their own, and a sum
+  // of practice bests alone stood 65 minutes above what he had done.
+  const cands = [g.bestMs, g.run_ms].filter(v => v != null);
+  g.ceilMs = cands.length ? Math.min(...cands) : null;
+  g.ceilInRun = g.ceilMs != null && g.run_ms != null && g.run_ms <= (g.bestMs ?? Infinity);
+}
+// The latest finish of each game, in practice or inside the most recent
+// full run that reached it, whichever came later.
+for (const g of games) {
+  const inRun = (D.run_throughs || [])
+    .filter(r => (r.segments || []).some(s => s.game === g.game && s.ms != null))
+    .sort((a, b) => b.started_at_ms - a.started_at_ms)[0];
+  const seg = inRun ? inRun.segments.find(s => s.game === g.game && s.ms != null) : null;
+  const fromRun = seg ? { ms: seg.ms, t: inRun.started_at_ms } : null;
+  g.latestAny = [g.latest, fromRun].filter(Boolean).sort((a, b) => b.t - a.t)[0] || null;
 }
 
 // Practised / finished / untouched, and the strip that shows which.
@@ -296,10 +313,11 @@ document.getElementById('tiles').innerHTML =
 // sum is the figure — but only a sum over all twenty is a race time, so
 // each is shown over the games it covers, with the rest named.
 if (finished > 0) {
-  const withBest = games.filter(g => g.bestMs != null);
-  const sob = withBest.reduce((n, g) => n + g.bestMs, 0);
-  const latest = games.filter(g => g.latest).reduce((n, g) => n + g.latest.ms, 0);
-  const missing = games.filter(g => g.bestMs == null).map(g => g.game);
+  const withBest = games.filter(g => g.ceilMs != null);
+  const sob = withBest.reduce((n, g) => n + g.ceilMs, 0);
+  const inRuns = withBest.filter(g => g.ceilInRun).length;
+  const latest = games.filter(g => g.latestAny).reduce((n, g) => n + g.latestAny.ms, 0);
+  const missing = games.filter(g => g.ceilMs == null).map(g => g.game);
   const over = `over ${withBest.length} of ${games.length} games`;
   const miss = missing.length
     ? `<div class="miss">without ${missing.length > 6 ? `${missing.length} games` : esc(missing.join(', '))}</div>`
@@ -307,8 +325,8 @@ if (finished > 0) {
   const p = document.getElementById('project');
   p.hidden = false;
   p.innerHTML =
-    `<div><div class="lbl">Sum of bests</div><div class="sum">${fmt(sob)}</div><div class="over">${over} — the ceiling</div>${miss}</div>` +
-    `<div><div class="lbl">Sum of latest finishes</div><div class="sum plain">${fmt(latest)}</div><div class="over">${over} — nearer what a race day looks like</div>${miss}</div>` +
+    `<div><div class="lbl">Sum of bests</div><div class="sum">${fmt(sob)}</div><div class="over">${over} — the ceiling; ${inRuns} set inside a full run</div>${miss}</div>` +
+    `<div><div class="lbl">Sum of latest finishes</div><div class="sum plain">${fmt(latest)}</div><div class="over">${over}, practice or the last full run — nearer what a race day looks like</div>${miss}</div>` +
     fullRuns();
 }
 practiceRuns();
@@ -330,13 +348,13 @@ function fullRuns() {
 // "Practice Run" in its title, which is the nearest thing to the race he
 // runs before the day. Each run: how far it got, the clock at its end,
 // how much of that was in the games and how much between them, and how it
-// sits against his practice bests — where the run lost time and where it
-// beat them. A run in progress sits on top with the clock still running.
+// sits against his bests, in practice or inside a full run — where the run
+// lost time and where it set one. A run in progress sits on top with the clock still running.
 function practiceRuns() {
   const rs = (D.run_throughs || []).slice().sort((a, b) => a.started_at_ms - b.started_at_ms);
   if (!rs.length) return;
-  const bestOf = new Map(games.map(g => [g.game, g.bestMs]));
-  const sob = games.every(g => g.bestMs != null) ? games.reduce((n, g) => n + g.bestMs, 0) : null;
+  const bestOf = new Map(games.map(g => [g.game, g.ceilMs]));
+  const sob = games.every(g => g.ceilMs != null) ? games.reduce((n, g) => n + g.ceilMs, 0) : null;
   const live = D.live && D.live.category ? rs[rs.length - 1] : null;
   let prevDone = null;
   for (const r of rs) {
@@ -363,7 +381,7 @@ function practiceRuns() {
       (live.reached_ms != null ? `, <b>${fmt(live.reached_ms)}</b> on the clock at the last one` : '') + ` · the page refreshes every few minutes while he is live</div>`
     : '';
   card.innerHTML = head + banner + chart(rs, sob, best) + table(rs, best) +
-    `<p class="pr-note">A run's clock is the marathon timer at the last game recorded. "Between games" is that clock less the games' own times: the transitions, and any pause. "Against practice bests" sums, over the games the run reached, how far each was from his best for it in practice; the games named are where the most went and where he beat his practice best inside the run.</p>`;
+    `<p class="pr-note">A run's clock is the marathon timer at the last game recorded. "Between games" is that clock less the games' own times: the transitions, and any pause. "Against his bests" sums, over the games the run reached, how far each was from his best for it, in practice or inside a full run; the games named are where the most went and where the run set a best.</p>`;
 
   function chart(rs, sob, best) {
     const W = 600, H = 160, L = 58, R = 16, T = 14, B = 26;
@@ -422,7 +440,7 @@ function practiceRuns() {
       `<td class="num tnum">${fmt(r.between)}</td>` +
       `<td class="num tnum">${r.vsBests != null ? `<span class="${r.vsBests < 0 ? 'best' : ''}">${sd(r.vsBests)}</span><span class="delta">over ${r.deltas.length} game${r.deltas.length === 1 ? '' : 's'}</span>` : '—'}</td>` +
       `<td class="where">${where(r)}</td></tr>`;
-    return `<div class="scroll"><table class="pr-table"><tr><th>Run</th><th class="num">Games</th><th class="num">Clock</th><th class="num">In the games</th><th class="num">Between games</th><th class="num">Against practice bests</th><th>Where it went</th></tr>` +
+    return `<div class="scroll"><table class="pr-table"><tr><th>Run</th><th class="num">Games</th><th class="num">Clock</th><th class="num">In the games</th><th class="num">Between games</th><th class="num">Against his bests</th><th>Where it went</th></tr>` +
       newest.map(row).join('') + `</table></div>`;
   }
 }
