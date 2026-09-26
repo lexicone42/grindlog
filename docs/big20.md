@@ -219,7 +219,12 @@ From 2026-09-17 he also runs the whole race on its own splits ("Big 20 #23
 its own section in [marathons](marathons.md#the-race-board-big-20): the
 replay script, the bracketed transition rows, the rows placed by the
 roster's order, and how the live bot locks on it. Its rows are filed under
-`Big 20 #23 run`, apart from the per-game practice attempts.
+`Big 20 #23 run`, apart from the per-game practice attempts in the
+database — and as one pool with them on the page: a game's segment inside a
+full run is the same game to the same goal, so the per-game best, latest,
+trend and day log, and the sum of bests, take practice attempts and full-run
+segments together (the feed keeps the practice-only figures beside the
+`all_*` ones, and marks a run's segment with `run: true`).
 
 On the site those runs are the **practice runs** section of `/big20/`: how
 many, the best and its distance above the sum of bests; a chart of each

@@ -133,7 +133,10 @@ Everything in `summary.json` plus:
   `total_ms` and `games[]` with each row's `final_time_ms`/`last_timer_ms`.
 - `big20` — the race he is preparing for: `race`, `date`, `url`, `games[]`
   in race order (`n`, `goal`, practice `attempts`/`finished`/`best_ms`, the
-  Arcathlon `marathon_ms`, and `run_ms`/`run_count` from his full runs), and
+  Arcathlon `marathon_ms`, `run_ms`/`run_count` from his full runs, and
+  `all_attempts`/`all_finished`/`all_best_ms` over practice and the full
+  runs as one pool; each entry of `runs[]` carries `run: true` when it is
+  the game's segment inside a full run), and
   `run_throughs[]` — `day`, `started_at_ms`, `games`, `reached_ms`,
   `segments_ms`, `segments[{game, ms, cum}]` per full run of the race.
 
