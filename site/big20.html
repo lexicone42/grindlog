@@ -266,27 +266,17 @@ for (const g of games) {
   g.fins = fins;
   g.bestRun = fins.reduce((m, r) => (m == null || r.ms < m.ms) ? r : m, null);
   g.latest = fins.length ? fins[fins.length - 1] : null;
-  g.att = runs.length || g.attempts || 0;
-  g.fin = fins.length || g.finished || 0;
-  g.bestMs = g.bestRun ? g.bestRun.ms : g.best_ms;
-  g.lastAt = runs.length ? runs[runs.length - 1].t : g.last_at_ms;
-  // His best for the game to the race's goal, wherever he set it: a
-  // practice attempt or a game inside a full run. Thirteen of the twenty
-  // were quicker inside a run than in any attempt on their own, and a sum
-  // of practice bests alone stood 65 minutes above what he had done.
-  const cands = [g.bestMs, g.run_ms].filter(v => v != null);
-  g.ceilMs = cands.length ? Math.min(...cands) : null;
-  g.ceilInRun = g.ceilMs != null && g.run_ms != null && g.run_ms <= (g.bestMs ?? Infinity);
-}
-// The latest finish of each game, in practice or inside the most recent
-// full run that reached it, whichever came later.
-for (const g of games) {
-  const inRun = (D.run_throughs || [])
-    .filter(r => (r.segments || []).some(s => s.game === g.game && s.ms != null))
-    .sort((a, b) => b.started_at_ms - a.started_at_ms)[0];
-  const seg = inRun ? inRun.segments.find(s => s.game === g.game && s.ms != null) : null;
-  const fromRun = seg ? { ms: seg.ms, t: inRun.started_at_ms } : null;
-  g.latestAny = [g.latest, fromRun].filter(Boolean).sort((a, b) => b.t - a.t)[0] || null;
+  // The log is every time he has run the game to the race's goal: the
+  // attempts on their own and the game's segment inside each full run
+  // (`run`), one pool. Thirteen of the twenty were quicker inside a run
+  // than in any attempt on their own.
+  g.att = runs.length || g.all_attempts || 0;
+  g.fin = fins.length || g.all_finished || 0;
+  g.bestMs = g.bestRun ? g.bestRun.ms : g.all_best_ms;
+  g.lastAt = runs.length ? runs[runs.length - 1].t : g.all_last_at_ms;
+  g.ceilMs = g.bestMs;
+  g.ceilInRun = !!(g.bestRun && g.bestRun.run);
+  g.latestAny = g.latest;
 }
 
 // Practised / finished / untouched, and the strip that shows which.
@@ -341,7 +331,7 @@ function fullRuns() {
   const best = done.length ? Math.min(...done.map(r => r.reached_ms)) : null;
   return `<div><div class="lbl">Practice runs</div><div class="runs"><b>${rs.length}</b> run${rs.length === 1 ? '' : 's'} of the twenty` +
     (best != null ? `, best <b>${fmt(best)}</b>` : `, none over all twenty yet`) + `</div>` +
-    `<div class="miss"><a href="#runs-card">run by run below</a> · <a href="/big20/runs/index.html">game by game</a> · a run's games count under "Full run", not as attempts</div></div>`;
+    `<div class="miss"><a href="#runs-card">run by run below</a> · <a href="/big20/runs/index.html">game by game</a> · a full run's games are attempts too, drawn as squares</div></div>`;
 }
 
 // The practice runs tracked run by run: the whole twenty on its own board,
@@ -460,7 +450,9 @@ const spark = g => {
   return `<svg class="spark" viewBox="0 0 ${W} ${H}" aria-label="${esc(runs.length + ' attempts')}">` +
     (pts.length > 1 ? `<polyline class="line" points="${pts.join(' ')}"/>` : '') +
     runs.map((r, i) => r.fin
-      ? `<circle class="${r.pb ? 'pb' : 'fin'}" cx="${x(i).toFixed(1)}" cy="${y(r.ms).toFixed(1)}" r="2.4"><title>${esc('#' + r.n + ' · ' + fmt(r.ms) + (r.pb ? ' · new best' : ''))}</title></circle>`
+      ? r.run
+        ? `<rect class="${r.pb ? 'pb' : 'fin'}" x="${(x(i) - 2.4).toFixed(1)}" y="${(y(r.ms) - 2.4).toFixed(1)}" width="4.8" height="4.8"><title>${esc('full run of ' + dshort(r.t) + ' · ' + fmt(r.ms) + (r.pb ? ' · new best' : ''))}</title></rect>`
+        : `<circle class="${r.pb ? 'pb' : 'fin'}" cx="${x(i).toFixed(1)}" cy="${y(r.ms).toFixed(1)}" r="2.4"><title>${esc('#' + r.n + ' · ' + fmt(r.ms) + (r.pb ? ' · new best' : ''))}</title></circle>`
       : r.depth != null
         ? `<line class="rs" x1="${x(i).toFixed(1)}" x2="${x(i).toFixed(1)}" y1="${(H - pad).toFixed(1)}" y2="${y(r.depth).toFixed(1)}"><title>${esc('#' + r.n + ' · reset at ' + fmt(r.depth))}</title></line>`
         : '').join('') +
@@ -480,7 +472,7 @@ document.getElementById('grid').innerHTML =
     <td class="game"><a href="/game/${slugOf(g.game)}/index.html">${esc(g.game)}</a><span class="goal">${esc(g.goal ?? '')}</span></td>
     <td class="num tnum">${g.att || '<span class="none">—</span>'}</td>
     <td class="num tnum">${g.fin ? `${g.fin} <span class="rate">${rate}%</span>` : '<span class="none">—</span>'}</td>
-    <td class="num tnum${g.bestMs != null ? ' best' : ' none'}">${fmt(g.bestMs)}${g.bestRun ? `<span class="when">${esc(dshort(g.bestRun.t))}</span>` : ''}</td>
+    <td class="num tnum${g.bestMs != null ? ' best' : ' none'}">${fmt(g.bestMs)}${g.bestRun ? `<span class="when">${esc(dshort(g.bestRun.t))}${g.bestRun.run ? ' · in a run' : ''}</span>` : ''}</td>
     <td class="num tnum${g.latest ? '' : ' none'}">${g.latest ? fmt(g.latest.ms) : '—'}${g.latest && g.latest !== g.bestRun ? `<span class="when">+${fmt(g.latest.ms - g.bestMs)}</span>` : ''}</td>
     <td class="trend">${spark(g)}</td>
     <td class="num tnum${g.run_ms != null ? '' : ' none'}"

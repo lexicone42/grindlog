@@ -253,9 +253,17 @@ fn big20_prep(
             // projection, trend and day log are computed from. A few
             // hundred rows across the twenty, and the alternative is a
             // summary field per question the page might ask.
+            // Every attempt at it, oldest first — the per-game attempts and
+            // the game's segment inside each full run, which is the same
+            // game to the same goal and is what the page's projection,
+            // trend and day log are computed from. A few hundred rows
+            // across the twenty, and the alternative is a summary field per
+            // question the page might ask.
             let mut log: Vec<&db::OtherRun> = runs
                 .iter()
-                .filter(|r| mine_name(&r.game) && practice_cat(&r.category))
+                .filter(|r| {
+                    mine_name(&r.game) && (practice_cat(&r.category) || run_cat(&r.category))
+                })
                 .collect();
             log.sort_by_key(|r| r.started_at_ms);
             let practice: Vec<&db::GameSummary> = summaries
@@ -271,6 +279,11 @@ fn big20_prep(
                 .filter(|s| mine(s) && !is_practice(s) && !run_cat(&s.category))
                 .collect();
             let best = |v: &[&db::GameSummary]| v.iter().filter_map(|s| s.best_ms).min();
+            // Practice and the full runs as one pool: his times for the
+            // game to the race's goal, wherever he set them. The practice-only
+            // figures stay as they were, so nothing reading them moves.
+            let all: Vec<&db::GameSummary> =
+                practice.iter().chain(full_runs.iter()).copied().collect();
             serde_json::json!({
                 // Its place in the race, which is the order the page lists
                 // them in and the order he will run them on the day.
@@ -282,6 +295,11 @@ fn big20_prep(
                 "best_ms": best(&practice),
                 "first_at_ms": practice.iter().filter_map(|s| s.first_at_ms).min(),
                 "last_at_ms": practice.iter().filter_map(|s| s.last_at_ms).max(),
+                "all_attempts": all.iter().map(|s| s.attempts).sum::<i64>(),
+                "all_finished": all.iter().map(|s| s.finished).sum::<i64>(),
+                "all_best_ms": best(&all),
+                "all_first_at_ms": all.iter().filter_map(|s| s.first_at_ms).min(),
+                "all_last_at_ms": all.iter().filter_map(|s| s.last_at_ms).max(),
                 // His Arcathlon time for it, where there is one.
                 // His best for it inside a full run of the race, and how many
                 // full runs reached it.
@@ -300,6 +318,9 @@ fn big20_prep(
                             "at": r.last_timer_ms,
                             "n": r.attempt_number,
                             "day": r.day,
+                            // The game's segment inside a full run of the
+                            // race, as opposed to an attempt on its own.
+                            "run": run_cat(&r.category),
                         })
                     })
                     .collect::<Vec<_>>(),
@@ -1122,6 +1143,20 @@ mod tests {
         assert_eq!(dh["attempts"], 10);
         assert_eq!(dh["best_ms"], 121_400);
         assert!(dh["marathon_ms"].is_null());
+        // Practice and the full runs as one pool, beside the practice-only
+        // figures.
+        assert_eq!(dh["all_best_ms"], 121_400);
+        assert_eq!(
+            dh["all_attempts"], 11,
+            "ten attempts and the full run's segment"
+        );
+        let log = dh["runs"].as_array().unwrap();
+        assert_eq!(log.iter().filter(|r| r["run"] == true).count(), 2);
+        assert!(
+            log.windows(2)
+                .all(|w| w[0]["t"].as_i64() <= w[1]["t"].as_i64()),
+            "oldest first"
+        );
 
         let dh = by("Die Hard");
         assert_eq!(dh["run_ms"], 142_000, "his best inside a full run");
