@@ -41,6 +41,9 @@ It refuses to run if the config it was handed does not set
 `follow_title = "track"`, and refuses if the database path still points at
 the live database after the substitution.
 
+`scripts/after-broadcast.sh --rollout` does the evening's sequence unattended: it
+waits for the live session to close and for Twitch to finish the VOD, rolls
+`main` out in between, replays the day and prints the import line.
 `scripts/import-big20.sh <vod_id>... [--replace-live] [--deploy]` lands them, and it is
 **not** `import-vod.sh`: that one replaces a broadcast *day*, and he
 practises in the afternoon of days he also runs Ninja Gaiden. This import is
