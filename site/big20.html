@@ -299,6 +299,22 @@ document.getElementById('tiles').innerHTML =
   tile(days.length, days.length === 1 ? 'practice day' : 'practice days', days.length ? `${dshort(new Date(days[0] + 'T00:00:00Z').getTime() - TZ)} – ${dshort(new Date(days[days.length - 1] + 'T00:00:00Z').getTime() - TZ)}` : '') +
   tile(onTimer ? hm(onTimer) : '—', 'on the timer');
 
+// The time between the games — the transitions, the pauses — inside each
+// complete full run: the clock at its end less the games' own times. The
+// race is played on the clock, so a sum of the games alone is not a race
+// time; his quickest transitions on top of it are.
+const betweenOf = r => {
+  const segs = (r.segments || []).filter(s => s.ms != null);
+  const inGame = segs.reduce((n, s) => n + s.ms, 0);
+  return r.reached_ms != null && r.reached_ms >= inGame ? r.reached_ms - inGame : null;
+};
+const completeRuns = (D.run_throughs || []).filter(r => r.games >= games.length && r.reached_ms != null && betweenOf(r) != null)
+  .sort((a, b) => a.started_at_ms - b.started_at_ms);
+const quickest = completeRuns.reduce((m, r) => (m == null || betweenOf(r) < betweenOf(m)) ? r : m, null);
+const latestRun = completeRuns.length ? completeRuns[completeRuns.length - 1] : null;
+const bestBetween = quickest ? betweenOf(quickest) : null;
+const latestBetween = latestRun ? betweenOf(latestRun) : null;
+
 // What the twenty add up to. The race is all of them back to back, so the
 // sum is the figure — but only a sum over all twenty is a race time, so
 // each is shown over the games it covers, with the rest named.
@@ -315,8 +331,12 @@ if (finished > 0) {
   const p = document.getElementById('project');
   p.hidden = false;
   p.innerHTML =
-    `<div><div class="lbl">Sum of bests</div><div class="sum">${fmt(sob)}</div><div class="over">${over} — the ceiling; ${inRuns} set inside a full run</div>${miss}</div>` +
-    `<div><div class="lbl">Sum of latest finishes</div><div class="sum plain">${fmt(latest)}</div><div class="over">${over}, practice or the last full run — nearer what a race day looks like</div>${miss}</div>` +
+    (bestBetween != null
+      ? `<div><div class="lbl">Sum of bests</div><div class="sum">${fmt(sob + bestBetween)}</div><div class="over">${fmt(sob)} in the games (${over}; ${inRuns} set inside a full run) + ${fmt(bestBetween)} between them, his quickest (${esc(dshort(quickest.started_at_ms))}) — the ceiling on the clock</div>${miss}</div>`
+      : `<div><div class="lbl">Sum of bests</div><div class="sum">${fmt(sob)}</div><div class="over">${over} — the ceiling in the games alone; ${inRuns} set inside a full run</div>${miss}</div>`) +
+    (latestBetween != null
+      ? `<div><div class="lbl">Sum of latest finishes</div><div class="sum plain">${fmt(latest + latestBetween)}</div><div class="over">${fmt(latest)} in the games (${over}, practice or the last full run) + ${fmt(latestBetween)} between them, as in his last run — nearer what a race day looks like</div>${miss}</div>`
+      : `<div><div class="lbl">Sum of latest finishes</div><div class="sum plain">${fmt(latest)}</div><div class="over">${over}, practice or the last full run — nearer what a race day looks like</div>${miss}</div>`) +
     fullRuns();
 }
 practiceRuns();
@@ -344,7 +364,10 @@ function practiceRuns() {
   const rs = (D.run_throughs || []).slice().sort((a, b) => a.started_at_ms - b.started_at_ms);
   if (!rs.length) return;
   const bestOf = new Map(games.map(g => [g.game, g.ceilMs]));
-  const sob = games.every(g => g.ceilMs != null) ? games.reduce((n, g) => n + g.ceilMs, 0) : null;
+  // The clocks are compared with the ceiling on the clock: the games' bests
+  // plus his quickest transitions, since every clock includes its own.
+  const sobGames = games.every(g => g.ceilMs != null) ? games.reduce((n, g) => n + g.ceilMs, 0) : null;
+  const sob = sobGames != null && bestBetween != null ? sobGames + bestBetween : sobGames;
   const live = D.live && D.live.category ? rs[rs.length - 1] : null;
   let prevDone = null;
   for (const r of rs) {
@@ -392,7 +415,7 @@ function practiceRuns() {
     }
     if (sob != null) {
       out += `<line class="sob" x1="${L}" x2="${W - R}" y1="${y(sob).toFixed(1)}" y2="${y(sob).toFixed(1)}"/>` +
-        `<text class="sob-l tnum" x="${W - R}" y="${(y(sob) - 4).toFixed(1)}" text-anchor="end">sum of bests ${fmt(sob)}</text>`;
+        `<text class="sob-l tnum" x="${W - R}" y="${(y(sob) - 4).toFixed(1)}" text-anchor="end">sum of bests${bestBetween != null ? ' + quickest transitions' : ''} ${fmt(sob)}</text>`;
     }
     const pts = rs.map((r, i) => ({ r, cx: x(i), cy: r.reached_ms != null ? y(r.reached_ms) : null }));
     const joined = pts.filter(p => p.r.complete);

@@ -227,7 +227,9 @@ segments together (the feed keeps the practice-only figures beside the
 `all_*` ones, and marks a run's segment with `run: true`).
 
 On the site those runs are the **practice runs** section of `/big20/`: how
-many, the best and its distance above the sum of bests; a chart of each
+many, the best and its distance above the sum of bests (the games' bests
+plus his quickest time between games in a complete run, since a race is
+played on the clock and the clock includes the transitions); a chart of each
 run's clock against the sum-of-bests line (a run cut short is a hollow
 point labelled with how far it got); and a table, newest first, with the
 clock at the last game, the time in the games and between them, how the run
