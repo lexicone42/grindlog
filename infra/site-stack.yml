@@ -85,6 +85,32 @@ Resources:
           AccessControlMaxAgeSec: 86400
           OriginOverride: true
 
+  # S3 through OAC serves object keys, not directories: "/big20/" and
+  # "/big20" found no key and answered 404 while "/big20/index.html" was
+  # fine. The pages link to index.html explicitly, so only a shared or typed
+  # URL broke; this rewrites those at the edge. A path ending in "/" gets
+  # index.html appended; a path whose last segment has no dot (no file
+  # extension) gets "/index.html". The browser's URL does not change.
+  IndexRewrite:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "${AWS::StackName}-index-rewrite"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Serve <dir>/index.html for a directory URL, with or without its slash
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          var uri = request.uri;
+          if (uri.endsWith('/')) {
+            request.uri = uri + 'index.html';
+          } else if (!uri.split('/').pop().includes('.')) {
+            request.uri = uri + '/index.html';
+          }
+          return request;
+        }
+
   Distribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -115,6 +141,9 @@ Resources:
           # Managed CachingOptimized policy
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
           ResponseHeadersPolicyId: !Ref CorsHeaders
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt IndexRewrite.FunctionMetadata.FunctionARN
         ViewerCertificate:
           AcmCertificateArn: !Ref Certificate
           SslSupportMethod: sni-only
