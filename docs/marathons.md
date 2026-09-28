@@ -211,6 +211,16 @@ comparison's own cumulative to the second (Pac-Mania 5:50 at 8:22 against
 baseline keeps its segment beside it. Between candidates tied on votes the
 one the board's arithmetic vouches for is tried first.
 
+**A skipped split.** A split he skips keeps its comparison on the board and
+then prints "-" for its times, which the reader returns as no cells at all;
+the next row's segment spans both games (Monster Party skipped on
+2026-09-28, Parallel World's row reading 27:10 at 2:17:45). A row blank
+for three passes beside rows that have their cells anchors no arithmetic:
+the row under it is measured from the first row above it that is not
+blank, and a segment also agrees with the arithmetic when it is the
+difference from the last row recorded. The skipped game is no run; the
+spanning segment is filed as the board shows it.
+
 **The broadcast's last pass.** A finish in the last minute of a broadcast has
 one pass on the board and no second one coming — on 2026-09-24 Moon Crystal
 finished at 4:54:30 and the stream ended within the minute — so when the
