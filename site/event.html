@@ -120,6 +120,9 @@
   .depth i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--muted); opacity: .6; }
   .depth i.fin { background: var(--gold); opacity: 1; }
   .depth i.pb { background: var(--ahead); opacity: 1; }
+  .depth i.seg { background: var(--series); opacity: 1; }
+  .depth i.mara { background: none; border: 1.5px solid var(--series); opacity: 1; box-sizing: border-box; }
+  a.tag { text-decoration: none; }
   .delta { color: var(--muted); font-size: 11.5px; }
   .tag {
     font-family: "Silkscreen", monospace; font-size: 8px; letter-spacing: .1em;
@@ -151,6 +154,13 @@ const fmt = ms => {
   if (ms == null) return '—';
   const t = Math.floor(ms / 100) / 10;
   const m = Math.floor(t / 60), s = (t - m * 60).toFixed(1).padStart(4, '0');
+  return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${s}` : `${m}:${s}`;
+};
+// A board's time, whole seconds: no tenths where the board printed none.
+const fmtS = ms => {
+  if (ms == null) return '—';
+  const t = Math.round(ms / 1000);
+  const m = Math.floor(t / 60), s = String(t - m * 60).padStart(2, '0');
   return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${s}` : `${m}:${s}`;
 };
 const TZ = (D.day_offset_minutes || 0) * 60000;
@@ -190,70 +200,72 @@ if (D.kind === 'game') {
   document.getElementById('sub').textContent =
     race + counts + (best != null ? ` · best ${fmt(best)}` : '') + span;
   if (practice) {
-    // Practice rows only from here on; a marathon completion of the same
-    // game is real but not practice, and it is listed apart at the end.
-    const marathon = D.runs.filter(r => !r.practice).sort((a, b) => a.started_at_ms - b.started_at_ms);
-    const byTime = D.runs.filter(r => r.practice).sort((a, b) => a.started_at_ms - b.started_at_ms);
-    const played = byTime.length;
-    // Every attempt in time order with the running best alongside: a
-    // finish that beat everything before it is a new best, and a reset is
-    // worth exactly how far the timer got.
+    // One log of every time he has run the game to this goal: the
+    // attempts on their own and the game's segment inside each full
+    // practice run, one pool, interleaved by time; his Arcathlon
+    // completions of the same game beside them, real but not practice
+    // and never the best. A board's time is whole seconds; an attempt's
+    // own timer reads tenths, and each is shown at its own resolution.
+    const kindOf = r => r.practice ? 'practice' : /run/i.test(r.event || '') ? 'run' : 'marathon';
+    const all = D.runs.filter(r => r.practice || r.final_time_ms != null)
+      .map(r => Object.assign(r, { kind: kindOf(r) }))
+      .sort((a, b) => a.started_at_ms - b.started_at_ms);
+    const tf = r => r.practice ? fmt : fmtS;
     let running = null;
-    for (const r of byTime) {
+    for (const r of all) {
       r.fin = r.final_time_ms != null;
-      r.pb = r.fin && (running == null || r.final_time_ms < running);
-      if (r.pb) running = r.final_time_ms;
       r.depth = r.fin ? r.final_time_ms : r.last_timer_ms;
+      r.pb = r.kind !== 'marathon' && r.fin && (running == null || r.final_time_ms < running);
+      if (r.pb) running = r.final_time_ms;
     }
-    const fins = byTime.filter(r => r.fin);
+    const pool = all.filter(r => r.kind !== 'marathon');
+    const byTime = pool;
+    const played = pool.length;
+    const inRuns = pool.filter(r => r.kind === 'run').length;
+    const fins = pool.filter(r => r.fin);
     const bestRun = fins.reduce((m, r) => (m == null || r.final_time_ms < m.final_time_ms) ? r : m, null);
     const latest = fins.length ? fins[fins.length - 1] : null;
     const avg = fins.length ? fins.reduce((n, r) => n + r.final_time_ms, 0) / fins.length : null;
-    const days = [...new Set(byTime.map(r => r.day))];
+    const days = [...new Set(pool.map(r => r.day))];
     const rate = played ? Math.round(100 * fins.length / played) : 0;
     const R = D.race;
-    // His own counter, where the bot read it: how many attempts it saw
-    // against how many the counter says there were.
-    const nums = byTime.map(r => r.ls_attempt).filter(n => n != null);
+    const nums = pool.map(r => r.ls_attempt).filter(n => n != null);
     const counterSpan = nums.length
       ? ` · his counter ran ${Math.min(...nums)}–${Math.max(...nums)}`
       : '';
+    // A full run's page: its day, and a suffix for a second run that day.
+    const runHref = r => {
+      const same = all.filter(x => x.kind === 'run' && x.day === r.day);
+      const i = same.indexOf(r);
+      return `/big20/runs/${r.day}${i > 0 ? `-${i + 1}` : ''}/index.html`;
+    };
+    const when = r => r.kind === 'run' ? `in the full run of ${dshort(r.started_at_ms)}`
+      : `#${r.attempt_number} · ${dshort(r.started_at_ms)}`;
     document.getElementById('sub').textContent =
       (R ? `Big 20 ${R.name} · game ${R.n} of ${R.of || 20}${R.goal ? ' · ' + R.goal : ''} · ` : '') +
-      `${played} attempt${played === 1 ? '' : 's'}, ${fins.length} finished` +
-      (bestRun ? ` · best ${fmt(bestRun.final_time_ms)}` : '') +
-      (played > 1 ? ` · ${dshort(byTime[0].started_at_ms)} to ${dshort(byTime[played - 1].started_at_ms)}` : '');
+      `${played} attempt${played === 1 ? '' : 's'}${inRuns ? ` (${inRuns} inside full runs)` : ''}, ${fins.length} finished` +
+      (bestRun ? ` · best ${tf(bestRun)(bestRun.final_time_ms)}` : '') +
+      (played > 1 ? ` · ${dshort(pool[0].started_at_ms)} to ${dshort(pool[played - 1].started_at_ms)}` : '');
     if (R) {
       document.getElementById('sub').insertAdjacentHTML('beforeend',
         ' · <a href="/big20/index.html">the race</a>');
     }
 
-    // The figures, as tiles.
     const tile = (v, label, sub, cls) =>
       `<div class="tile"><b class="${cls || ''}">${v}</b><span>${label}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
     const tiles = document.getElementById('tiles');
     tiles.hidden = false;
     tiles.innerHTML =
-      tile(played, played === 1 ? 'attempt' : 'attempts', `over ${days.length} day${days.length === 1 ? '' : 's'}` + counterSpan) +
+      tile(played, played === 1 ? 'attempt' : 'attempts', `over ${days.length} day${days.length === 1 ? '' : 's'}` + (inRuns ? ` · ${inRuns} inside full runs` : '') + counterSpan) +
       tile(fins.length, 'finished', played ? `${rate}% of attempts` : '') +
-      tile(bestRun ? fmt(bestRun.final_time_ms) : '—', 'best',
-           bestRun ? `#${bestRun.attempt_number} · ${dshort(bestRun.started_at_ms)}` : 'no finish yet', 'gold') +
-      tile(latest ? fmt(latest.final_time_ms) : '—', 'latest finish',
-           latest && latest !== bestRun ? `+${fmt(latest.final_time_ms - bestRun.final_time_ms)} off the best`
+      tile(bestRun ? tf(bestRun)(bestRun.final_time_ms) : '—', 'best', bestRun ? when(bestRun) : 'no finish yet', 'gold') +
+      tile(latest ? tf(latest)(latest.final_time_ms) : '—', 'latest finish',
+           latest && latest !== bestRun ? `+${(latest.practice || bestRun.practice ? fmt : fmtS)(latest.final_time_ms - bestRun.final_time_ms)} off the best`
            : latest ? 'is the best' : '') +
       tile(avg != null ? fmt(avg) : '—', 'average finish', fins.length > 1 ? `over ${fins.length} finishes` : '') +
       (R && R.marathon_ms != null
-        ? tile(fmt(R.marathon_ms), 'in an Arcathlon', `${dshort(R.marathon_at_ms)} · not practice`) : '');
+        ? tile(fmtS(R.marathon_ms), 'in an Arcathlon', `${dshort(R.marathon_at_ms)} · not practice`) : '');
 
-    // The chart: every running of the game left to right, time up. A
-    // practice finish is a point on the line (green when it was a new
-    // best); a reset is a bar up to where the timer was; the game's segment
-    // in a full practice run is a square, and in an Arcathlon a ring, both
-    // on the same scale; his best Arcathlon time is a dashed rule.
-    const kindOf = r => r.practice ? 'practice' : /run/i.test(r.event || '') ? 'run' : 'marathon';
-    const all = D.runs.filter(r => r.practice || r.final_time_ms != null)
-      .map(r => Object.assign(r, { kind: kindOf(r) }))
-      .sort((a, b) => a.started_at_ms - b.started_at_ms);
     if (all.length) {
       const W = 860, H = 230, L = 56, Rm = 14, T = 12, B = 30;
       const top0 = Math.max(...all.map(r => r.practice ? (r.depth || 0) : r.final_time_ms), R && R.marathon_ms || 0, 1);
@@ -273,7 +285,6 @@ if (D.kind === 'game') {
       if (R && R.marathon_ms != null) {
         svg += `<line class="goalline" x1="${L}" x2="${W - Rm}" y1="${y(R.marathon_ms).toFixed(1)}" y2="${y(R.marathon_ms).toFixed(1)}"/>`;
       }
-      // Day labels along the bottom, one per first attempt of a day.
       let lastDay = null;
       all.forEach((r, i) => {
         if (r.day !== lastDay) {
@@ -291,9 +302,9 @@ if (D.kind === 'game') {
       if (pts.length > 1) svg += `<polyline class="line" points="${pts.join(' ')}"/>`;
       all.forEach((r, i) => {
         if (!r.practice) {
-          const label = esc((r.kind === 'run' ? 'in the full practice run of ' + dshort(r.started_at_ms) : (r.event || 'a marathon') + ' · ' + dshort(r.started_at_ms)) + ' · ' + fmt(r.final_time_ms));
+          const label = esc((r.kind === 'run' ? 'in the full practice run of ' + dshort(r.started_at_ms) : (r.event || 'a marathon') + ' · ' + dshort(r.started_at_ms)) + ' · ' + fmtS(r.final_time_ms) + (r.pb ? ' · new best' : ''));
           svg += r.kind === 'run'
-            ? `<rect class="seg" x="${(x(i) - 4.5).toFixed(1)}" y="${(y(r.final_time_ms) - 4.5).toFixed(1)}" width="9" height="9"><title>${label}</title></rect>`
+            ? `<rect class="${r.pb ? 'seg pb' : 'seg'}" x="${(x(i) - 4.5).toFixed(1)}" y="${(y(r.final_time_ms) - 4.5).toFixed(1)}" width="9" height="9"><title>${label}</title></rect>`
             : `<circle class="mara" cx="${x(i).toFixed(1)}" cy="${y(r.final_time_ms).toFixed(1)}" r="4.5"><title>${label}</title></circle>`;
         } else if (r.fin) {
           svg += `<circle class="${r.pb ? 'pb' : 'fin'}" cx="${x(i).toFixed(1)}" cy="${y(r.final_time_ms).toFixed(1)}" r="4.5"><title>${esc('#' + r.attempt_number + ' · ' + dshort(r.started_at_ms) + ' · ' + fmt(r.final_time_ms) + (r.pb ? ' · new best' : ''))}</title></circle>`;
@@ -310,54 +321,53 @@ if (D.kind === 'game') {
         (R && R.marathon_ms != null ? `<span><i class="mar"></i>his best Arcathlon time</span>` : '') + `</div>`;
     }
 
-    // The attempts, by day, newest first. The bar is how far each got,
-    // on one scale for the whole page, so a reset deep into the game
-    // reads as what it was.
-    const top = Math.max(...byTime.map(r => r.depth || 0), 1);
-    const rows = [...byTime].reverse();
-    // The number is LiveSplit's own where the bot read it off his counter,
-    // and the bot's ordinal (#n) where it did not.
+    // Every running, by day, newest first, in one table. The bar is how
+    // far each got, on one scale for the whole page, so a reset deep into
+    // the game reads as what it was. The number is LiveSplit's own where
+    // the bot read it off his counter, and the bot's ordinal (#n) where it
+    // did not; a full run's segment links to that run's page.
+    const top = Math.max(...all.map(r => r.depth || 0), 1);
+    const rows = [...all].reverse();
     let html = `<tr><th class="n">run</th><th class="num">Result</th><th class="bar">How far</th><th>Against the best</th></tr>`;
     let day = null;
     for (const r of rows) {
       if (r.day !== day) {
         day = r.day;
-        const ofDay = byTime.filter(x => x.day === day);
+        const ofDay = all.filter(x => x.day === day && x.kind !== 'marathon');
         const f = ofDay.filter(x => x.fin);
-        const b = f.length ? Math.min(...f.map(x => x.final_time_ms)) : null;
-        html += `<tr class="day"><td colspan="4">${esc(dshort(r.started_at_ms))}<small>${ofDay.length} attempt${ofDay.length === 1 ? '' : 's'}` +
-                `${f.length ? ` · ${f.length} finished · best ${fmt(b)}` : ' · no finish'}</small></td></tr>`;
+        const b = f.length ? f.reduce((m, x) => x.final_time_ms < m.final_time_ms ? x : m) : null;
+        const runsOfDay = ofDay.filter(x => x.kind === 'run').length;
+        html += `<tr class="day"><td colspan="4">${esc(dshort(r.started_at_ms))}<small>` +
+                (ofDay.length ? `${ofDay.length} attempt${ofDay.length === 1 ? '' : 's'}${runsOfDay ? ` (${runsOfDay} in a full run)` : ''}` +
+                 `${f.length ? ` · ${f.length} finished · best ${tf(b)(b.final_time_ms)}` : ' · no finish'}` : 'an Arcathlon') +
+                `</small></td></tr>`;
       }
       const pct = r.depth != null ? Math.max(1, Math.min(100, 100 * r.depth / top)) : 0;
-      const against = r.fin
+      const against = r.kind === 'marathon'
+        ? `<span class="delta">${r.href ? `<a href="${r.href}">${esc(r.event)}</a>` : esc(r.event)} · not practice</span>`
+        : r.fin
         ? (r === bestRun ? '<span class="delta">the best</span>'
-           : `<span class="delta">+${fmt(r.final_time_ms - bestRun.final_time_ms)}</span>`)
+           : bestRun ? `<span class="delta">+${(r.practice || bestRun.practice ? fmt : fmtS)(r.final_time_ms - bestRun.final_time_ms)}</span>` : '')
         : (r.depth != null && bestRun
            ? `<span class="delta">reset at ${Math.round(100 * r.depth / bestRun.final_time_ms)}% of the best</span>`
            : r.depth != null ? '<span class="delta">reset</span>' : '');
+      const who = r.kind === 'run' ? `<a class="tag" href="${runHref(r)}">full run</a>`
+        : r.kind === 'marathon' ? '<span class="tag">arcathlon</span>'
+        : r.ls_attempt != null ? r.ls_attempt : r.attempt_number != null ? '#' + r.attempt_number : '';
+      const barCls = r === bestRun ? 'pb' : r.kind === 'run' ? 'seg' : r.kind === 'marathon' ? 'mara' : r.fin ? 'fin' : '';
       html += `<tr>
-        <td class="n tnum">${r.ls_attempt != null ? r.ls_attempt : r.attempt_number != null ? '#' + r.attempt_number : ''}</td>
+        <td class="n tnum">${who}</td>
         <td class="num tnum${r === bestRun ? ' best' : ''}">${
-          r.fin ? fmt(r.final_time_ms) + (r.pb && r !== bestRun ? '<span class="tag">new best</span>' : '')
+          r.fin ? tf(r)(r.final_time_ms) + (r.pb && r !== bestRun ? '<span class="tag">new best</span>' : '')
           : r.depth != null ? `<span class="none">reset at ${fmt(r.depth)}</span>`
           : '<span class="none">—</span>'}</td>
-        <td class="bar"><div class="depth"><i class="${r === bestRun ? 'pb' : r.fin ? 'fin' : ''}" style="width:${pct.toFixed(1)}%"></i></div></td>
+        <td class="bar"><div class="depth"><i class="${barCls}" style="width:${pct.toFixed(1)}%"></i></div></td>
         <td>${against}</td>
       </tr>`;
     }
     document.getElementById('grid').innerHTML = html;
-    if (marathon.length) {
-      html = `<tr class="day"><td colspan="4">In his full runs and Arcathlons<small>race conditions, not practice attempts</small></td></tr>` +
-        marathon.slice().reverse().map(r => `<tr>
-          <td class="n tnum"></td>
-          <td class="num tnum">${r.final_time_ms != null ? fmt(r.final_time_ms) : '<span class="none">—</span>'}</td>
-          <td class="bar"></td>
-          <td class="delta">${esc(dshort(r.started_at_ms))} · ${r.href ? `<a href="${r.href}">${esc(r.event)}</a>` : esc(r.event)}</td>
-        </tr>`).join('');
-      document.getElementById('grid').insertAdjacentHTML('beforeend', html);
-    }
     document.getElementById('note').textContent =
-      'Every attempt, newest first, by day. A finish shows its time, with the fastest marked and each new best tagged; a reset shows how far the timer had got. The bars share one scale, so a reset deep into the game reads as what it was.' +
+      'Every running of the game, newest first, by day: his attempts on their own and, tagged, the game inside each full practice run, on one scale and against one best. A finish shows its time, with the fastest marked and each new best tagged; a reset shows how far the timer had got. A full run\'s time is the board\'s, to the second; an attempt\'s is his timer\'s, to the tenth. An Arcathlon completion of the same game is listed where it happened and counts for nothing here.' +
       (D.race ? ` Practice for Big 20 ${D.race.name}, game ${D.race.n} of ${D.race.of || 20}.` : '');
   } else {
     document.getElementById('grid').innerHTML =
@@ -366,7 +376,7 @@ if (D.kind === 'game') {
         <td class="tnum">${dshort(r.started_at_ms)}</td>
         <td>${r.href ? `<a href="${r.href}">${esc(r.event)}</a>` : esc(r.event)}</td>
         <td class="num tnum${r.final_time_ms != null && r.final_time_ms === best ? ' best' : ''}">${
-          r.final_time_ms != null ? fmt(r.final_time_ms) : '<span class="none">—</span>'}</td>
+          r.final_time_ms != null ? fmtS(r.final_time_ms) : '<span class="none">—</span>'}</td>
       </tr>`).join('');
     document.getElementById('note').textContent = played > 1
       ? 'The fastest running is marked. Times are the game’s own segment of the marathon, as its board recorded it.'

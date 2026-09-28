@@ -226,7 +226,14 @@ while IFS= read -r game; do
                                 date: $b.date, marathon_ms: $r.marathon_ms, marathon_at_ms: $r.marathon_at_ms}
                else null end),
       runs: [.other_events[] as $e | $e.games[] | select(.game == $g)
-             | {day: $e.day, started_at_ms, event: $e.label, practice: ($e.practice // false),
+             | {day: $e.day, started_at_ms, event: $e.label,
+                # Per ROW, not per day: a day holds his full run and his attempts
+                # on their own side by side, and only the category of a row says
+                # which it is (the race writes "<race> run" for the full run;
+                # an Arcathlon writes its own).
+                practice: ((.category // "") as $c
+                           | ($c | ascii_downcase | endswith(" run") | not)
+                             and ($c | test("^arcathlon"; "i") | not)),
                 href: (if ($e.label | startswith("Arcathlon #"))
                        then "/arcathlon/" + ($e.label | ltrimstr("Arcathlon #")) + "/index.html"
                        elif $e.randomized then "/rando/" + $e.day + "/index.html"
