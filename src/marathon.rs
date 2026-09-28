@@ -130,6 +130,10 @@ const JUST_NOW_MS: i64 = 180_000;
 /// before the log says so.
 const UNVOUCHED_PASSES: u32 = 5;
 
+/// Passes a row must come back without cells, beside rows that have theirs,
+/// to count as a split he skipped.
+const SKIPPED_PASSES: u32 = 3;
+
 /// How far past the total as last read a finish filed at the broadcast's
 /// end may land: the pass that read the finished row read the total a few
 /// seconds before or after it.
@@ -272,6 +276,11 @@ struct Slot {
     /// beside its times, which is a delta that moved; when the broadcast
     /// ends on that pass, this is the finish the close has to go on.
     held_segment_ms: Option<i64>,
+    /// Passes in a row this slot's row came back with no cells while other
+    /// rows had theirs: a split he skipped prints "-" for its times, which
+    /// the reader returns as nothing. Such a row anchors no arithmetic; the
+    /// row under it is measured from the row above it.
+    blank_passes: u32,
 }
 
 impl Slot {
@@ -934,6 +943,7 @@ impl Marathon {
                 self.advance_runner(Some(s), &why);
             }
         }
+        let any_cells = board.rows.iter().any(|r| !r.cells.is_empty());
         for (row, slot_idx) in board.rows.iter().zip(alignment.iter()) {
             let Some(i) = *slot_idx else { continue };
             while self.slots.len() <= i {
@@ -945,6 +955,13 @@ impl Marathon {
             let mut cells = read_cells(row);
             self.carry_hour(i, &mut cells);
             self.slots[i].seen += 1;
+            if row.cells.is_empty() {
+                if any_cells {
+                    self.slots[i].blank_passes += 1;
+                }
+            } else {
+                self.slots[i].blank_passes = 0;
+            }
             // Under the runner's row, and not a row the board has shown
             // without a time before: on a board without comparisons a time
             // appearing on such a row is a finish, and the only word on
@@ -1723,6 +1740,34 @@ impl Marathon {
     /// was measured on a live board) and another pass usually settles it.
     /// Returns None while it is worth waiting, and the difference with
     /// `derived` set once it is not.
+    /// What the segment column may read for a candidate and still agree
+    /// with the board's arithmetic: the difference from the row above (see
+    /// `expected_segment`), and the difference from the last row this
+    /// tracker RECORDED above it when that is another number. The second is
+    /// a split he skipped: the row keeps its comparison and then shows
+    /// nothing, and the next row's segment spans both games (Monster Party
+    /// skipped, Parallel World's row reading 27:10 at 2:17:45, which is
+    /// 1:50:34 plus 27:11).
+    fn expectations(&self, i: usize, cum: i64) -> Vec<i64> {
+        let mut out = Vec::new();
+        if let Expect::Segment(e) = self.expected_segment(i, cum) {
+            out.push(e);
+        }
+        if let Some(rec) = self.slots[..i].iter().rev().find_map(|s| s.recorded) {
+            let span = cum - rec;
+            if span > 0 && !out.iter().any(|e| (e - span).abs() <= SEGMENT_SLACK_MS) {
+                out.push(span);
+            }
+        }
+        out
+    }
+
+    fn agrees(&self, i: usize, cum: i64, seg: i64) -> bool {
+        self.expectations(i, cum)
+            .iter()
+            .any(|e| (seg - e).abs() <= SEGMENT_SLACK_MS)
+    }
+
     fn segment_for(&mut self, i: usize, cum: i64) -> Option<(i64, bool)> {
         // A segment longer than the cumulative it is part of is not a
         // reading of this row at all — a real board came back with 46:44
@@ -1742,7 +1787,7 @@ impl Marathon {
         // 480p a "13:14" reads "13:24" and "13:34" as often as itself, and
         // between readings tied on votes the row above says which is right.
         let voted = votes()
-            .filter(|((_, s), _)| exp.is_some_and(|e| (*s - e).abs() <= SEGMENT_SLACK_MS))
+            .filter(|((_, s), _)| exp.is_some() && self.agrees(i, cum, *s))
             .max_by_key(|(_, v)| v.count)
             .or_else(|| votes().max_by_key(|((_, s), v)| (v.count, *s)))
             .map(|((_, s), v)| (*s, *v));
@@ -1754,7 +1799,7 @@ impl Marathon {
             // recorded as a cumulative.
             (_, Expect::Impossible) => None,
             (Some((seg, v)), Expect::Segment(exp)) => {
-                if (seg - exp).abs() <= SEGMENT_SLACK_MS {
+                if self.agrees(i, cum, seg) {
                     Some((seg, false))
                 } else {
                     self.slots[i].segment_waits += 1;
@@ -1851,9 +1896,9 @@ impl Marathon {
         if i == 0 {
             return false;
         }
-        let Expect::Segment(exp) = self.expected_segment(i, cum) else {
+        if !matches!(self.expected_segment(i, cum), Expect::Segment(_)) {
             return false;
-        };
+        }
         // Two readings of the segment column, the same standard the cumulative
         // itself is held to. `segment_for` will take a single reading that
         // agrees with the arithmetic, because by then the completion is
@@ -1862,7 +1907,7 @@ impl Marathon {
         self.slots[i]
             .segment_votes
             .iter()
-            .any(|((c, s), v)| *c == cum && settled(v) && (*s - exp).abs() <= SEGMENT_SLACK_MS)
+            .any(|((c, s), v)| *c == cum && settled(v) && self.agrees(i, cum, *s))
     }
 
     /// Does the row's own segment column rule a candidate out?
@@ -1894,9 +1939,9 @@ impl Marathon {
         if i == 0 {
             return false;
         }
-        let Expect::Segment(exp) = self.expected_segment(i, cum) else {
+        if !matches!(self.expected_segment(i, cum), Expect::Segment(_)) {
             return false;
-        };
+        }
         // Refused only by a column no settled reading of which agrees with
         // the arithmetic — the comparison-time case, "20:34 throughout"
         // where 16:16 was wanted. At 480p the column splits ("13:14" on four
@@ -1909,7 +1954,7 @@ impl Marathon {
         let mut disagrees = false;
         for ((c, s), v) in &self.slots[i].segment_votes {
             if *c == cum && *s <= cum && settled(v) {
-                if (*s - exp).abs() <= SEGMENT_SLACK_MS {
+                if self.agrees(i, cum, *s) {
                     agrees = true;
                 } else {
                     disagrees = true;
@@ -1965,9 +2010,16 @@ impl Marathon {
         // baseline, and without this the next completion has only the
         // total's three-minute window, which a cumulative read three ways in
         // three minutes misses.
-        let prev = match i {
-            0 => 0,
-            _ => match self.slots[i - 1].settled_cumulative().or_else(|| {
+        // The row above, past any row the board has shown blank for three
+        // passes: a split he skipped keeps its comparison and prints
+        // nothing, and the row under it is measured from the row above it.
+        let above = (0..i)
+            .rev()
+            .find(|j| self.slots[*j].blank_passes < SKIPPED_PASSES);
+        let prev = match (i, above) {
+            (0, _) => 0,
+            (_, None) => return Expect::Unanchored,
+            (_, Some(j)) => match self.slots[j].settled_cumulative().or_else(|| {
                 // Only a row that has never CHANGED since (a row that has
                 // shown another time since its baseline finished after the
                 // tracker looked, and its baseline was its comparison), and
@@ -1977,8 +2029,8 @@ impl Marathon {
                 // reached, and vouches for the previous run's time on the
                 // row below (Faria's 2:01:38 with the clock at 1:50 for
                 // Monster Party's 2:15:10).
-                (self.ordered() && !self.slots[i - 1].cumulative_votes.values().any(settled))
-                    .then(|| self.slots[i - 1].baseline_value())
+                (self.ordered() && !self.slots[j].cumulative_votes.values().any(settled))
+                    .then(|| self.slots[j].baseline_value())
                     .flatten()
                     .filter(|b| {
                         self.total_ms
@@ -1988,7 +2040,7 @@ impl Marathon {
                     // cumulatives only grow, so a baseline under a recorded
                     // cumulative is a misreading that settled, not a time.
                     .filter(|b| {
-                        self.slots[..i - 1]
+                        self.slots[..j]
                             .iter()
                             .rev()
                             .find_map(|s| s.recorded)
@@ -5334,6 +5386,184 @@ mod tests {
         assert_eq!(pac.len(), 1, "{seen:?}");
         assert_eq!(pac[0].segment_ms, 5 * min + 50_000);
         assert_eq!(pac[0].cumulative_ms, 8 * min + 22_000);
+    }
+
+    /// A split he skipped: the row keeps its comparison, then shows nothing,
+    /// and the next row's segment spans both games. The arithmetic from the
+    /// row above (the skipped row's comparison, never changed) denies it;
+    /// the arithmetic from the last row recorded agrees with it to the
+    /// second, and that is the one that counts.
+    #[test]
+    fn a_skipped_split_leaves_the_next_rows_segment_spanning_both() {
+        let mut m = race_tracker();
+        let pass =
+            |faria: &[&str], cat: &[&str], monster: &[&str], mcat: &[&str], para: &[&str]| {
+                board(
+                    Some("Practice Run"),
+                    vec![
+                        row("Faria", faria),
+                        row("(Save Princess)", cat),
+                        row("Monster Party", monster),
+                        row("(Any% No Manip)", mcat),
+                        row("Parallel World", para),
+                        row("(Worlds 3 and 4)", &["0:35", "2:17:04"]),
+                        row("Moon Crystal", &["14:28", "4:09:57"]),
+                    ],
+                )
+            };
+        let (h, min) = (3_600_000, 60_000);
+        let mut t = 1_000;
+        let mut total = h + 45 * min;
+        // Faria under way, then done in 7:31 at 1:50:04, its transition after.
+        for i in 0..3 {
+            let d = ["+0:10", "+0:12", "+0:15"][i];
+            let b = pass(
+                &[d, "7:46", "1:47:29"],
+                &["0:30", "1:47:59"],
+                &["15:48", "2:03:47"],
+                &["3:10", "2:06:57"],
+                &["9:31", "2:16:29"],
+            );
+            assert!(m.observe(&b, t, Some(total)).is_empty());
+            t += min;
+            total += min;
+        }
+        total = h + 50 * min + 10_000;
+        for _ in 0..3 {
+            let b = pass(
+                &["+2:35", "7:31", "1:50:04"],
+                &["+2:35", "0:30", "1:50:34"],
+                &["15:48", "2:03:47"],
+                &["3:10", "2:06:57"],
+                &["9:31", "2:16:29"],
+            );
+            m.observe(&b, t, Some(total));
+            t += min;
+            total += min;
+        }
+        // Monster Party skipped: its rows show nothing, Parallel World is on
+        // with its comparison and a moving delta, for eleven minutes.
+        for i in 0..11 {
+            let d = format!("+{}:00", 3 + i);
+            let b = pass(
+                &["+2:35", "7:31", "1:50:04"],
+                &["+2:35", "0:30", "1:50:34"],
+                &[],
+                &[],
+                &[&d, "9:31", "2:16:29"],
+            );
+            let seen = m.observe(&b, t, Some(total));
+            assert!(seen.iter().all(|c| c.game != "Parallel World"), "{seen:?}");
+            t += min;
+            total += min;
+        }
+        // Done: 27:10 at 2:17:45, both games in one segment.
+        total = 2 * h + 17 * min + 50_000;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let b = pass(
+                &["+2:35", "7:31", "1:50:04"],
+                &["+2:35", "0:30", "1:50:34"],
+                &[],
+                &[],
+                &["+1:16", "27:10", "2:17:45"],
+            );
+            seen.extend(m.observe(&b, t, Some(total)));
+            t += min;
+        }
+        let para: Vec<_> = seen.iter().filter(|c| c.game == "Parallel World").collect();
+        assert_eq!(para.len(), 1, "{seen:?}");
+        assert_eq!(para[0].segment_ms, 27 * min + 10_000);
+        assert_eq!(para[0].cumulative_ms, 2 * h + 17 * min + 45_000);
+        assert!(
+            !para[0].segment_derived,
+            "the column read it; nothing was derived"
+        );
+        assert!(
+            seen.iter().all(|c| c.game != "Monster Party"),
+            "a skipped game is no run"
+        );
+    }
+
+    /// The same skipped split with the transition row above it never
+    /// recorded (it read its final time from the first pass, so it never
+    /// changed): the arithmetic walks past the two blank rows to that
+    /// row's standing time, and the segment agrees with it to the second.
+    #[test]
+    fn a_skipped_split_is_walked_past_to_the_row_above_it() {
+        let mut m = race_tracker();
+        let pass = |faria: &[&str], monster: &[&str], mcat: &[&str], para: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Faria", faria),
+                    row("(Save Princess)", &["0:30", "1:50:34"]),
+                    row("Monster Party", monster),
+                    row("(Any% No Manip)", mcat),
+                    row("Parallel World", para),
+                    row("(Worlds 3 and 4)", &["0:35", "2:17:04"]),
+                    row("Moon Crystal", &["14:28", "4:09:57"]),
+                ],
+            )
+        };
+        let (h, min) = (3_600_000, 60_000);
+        let mut t = 1_000;
+        let mut total = h + 45 * min;
+        for i in 0..3 {
+            let d = ["+0:10", "+0:12", "+0:15"][i];
+            let b = pass(
+                &[d, "7:46", "1:47:29"],
+                &["15:48", "2:03:47"],
+                &["3:10", "2:06:57"],
+                &["9:31", "2:16:29"],
+            );
+            assert!(m.observe(&b, t, Some(total)).is_empty());
+            t += min;
+            total += min;
+        }
+        total = h + 50 * min + 10_000;
+        for _ in 0..3 {
+            let b = pass(
+                &["+2:35", "7:31", "1:50:04"],
+                &["15:48", "2:03:47"],
+                &["3:10", "2:06:57"],
+                &["9:31", "2:16:29"],
+            );
+            m.observe(&b, t, Some(total));
+            t += min;
+            total += min;
+        }
+        for i in 0..11 {
+            let d = format!("+{}:00", 3 + i);
+            let b = pass(
+                &["+2:35", "7:31", "1:50:04"],
+                &[],
+                &[],
+                &[&d, "9:31", "2:16:29"],
+            );
+            assert!(m
+                .observe(&b, t, Some(total))
+                .iter()
+                .all(|c| c.game != "Parallel World"));
+            t += min;
+            total += min;
+        }
+        total = 2 * h + 17 * min + 50_000;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let b = pass(
+                &["+2:35", "7:31", "1:50:04"],
+                &[],
+                &[],
+                &["+1:16", "27:10", "2:17:45"],
+            );
+            seen.extend(m.observe(&b, t, Some(total)));
+            t += min;
+        }
+        let para: Vec<_> = seen.iter().filter(|c| c.game == "Parallel World").collect();
+        assert_eq!(para.len(), 1, "{seen:?}");
+        assert_eq!(para[0].segment_ms, 27 * min + 10_000);
+        assert!(!para[0].segment_derived);
     }
 
     /// The broadcast ends within a minute of the last game's finish: the
