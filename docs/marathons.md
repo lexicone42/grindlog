@@ -221,6 +221,13 @@ blank, and a segment also agrees with the arithmetic when it is the
 difference from the last row recorded. The skipped game is no run; the
 spanning segment is filed as the board shows it.
 
+**Rounding.** Every cell is rounded on its own, so a row's segment can sit
+two seconds off the difference of two cumulatives and still be what the
+board printed (Steel Legion 14:44 at 1:42:00 under a transition recorded
+at 1:27:18). The segment column refuses a candidate only past 2.5 s; it
+vouches for one, and is taken as read, only within a second, and outside
+that the arithmetic's value is filed as derived.
+
 **The broadcast's last pass.** A finish in the last minute of a broadcast has
 one pass on the board and no second one coming — on 2026-09-24 Moon Crystal
 finished at 4:54:30 and the stream ended within the minute — so when the

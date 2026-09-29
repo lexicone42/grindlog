@@ -96,6 +96,12 @@ pub const AGREE_SPREAD_MS: i64 = 45_000;
 /// its cumulative and the previous game's before the reading is held back
 /// for another pass. The board prints whole seconds.
 const SEGMENT_SLACK_MS: i64 = 1000;
+/// The slack for REFUSING a candidate by its segment column: a transition row recorded from its own
+/// display is rounded on its own, so the row under it can read two seconds
+/// off the arithmetic and still be right (Steel Legion 14:44 at 1:42:00
+/// under a transition at 1:27:18: 882 wanted, 884 read). Vouching for a
+/// completion keeps the tighter slack.
+const DENY_SLACK_MS: i64 = 2500;
 /// The slack for a segment checked against a DERIVED cumulative (see
 /// `backfill`): the derived value is one displayed time less another, and
 /// LiveSplit rounds each of them, so the difference can be out by a second
@@ -1775,9 +1781,13 @@ impl Marathon {
     }
 
     fn agrees(&self, i: usize, cum: i64, seg: i64) -> bool {
+        self.agrees_within(i, cum, seg, SEGMENT_SLACK_MS)
+    }
+
+    fn agrees_within(&self, i: usize, cum: i64, seg: i64, slack: i64) -> bool {
         self.expectations(i, cum)
             .iter()
-            .any(|e| (seg - e).abs() <= SEGMENT_SLACK_MS)
+            .any(|e| (seg - e).abs() <= slack)
     }
 
     fn segment_for(&mut self, i: usize, cum: i64) -> Option<(i64, bool)> {
@@ -1966,7 +1976,7 @@ impl Marathon {
         let mut disagrees = false;
         for ((c, s), v) in &self.slots[i].segment_votes {
             if *c == cum && *s <= cum && settled(v) {
-                if self.agrees(i, cum, *s) {
+                if self.agrees_within(i, cum, *s, DENY_SLACK_MS) {
                     agrees = true;
                 } else {
                     disagrees = true;
@@ -5592,6 +5602,64 @@ mod tests {
         assert_eq!(para.len(), 1, "{seen:?}");
         assert_eq!(para[0].segment_ms, 27 * min + 10_000);
         assert!(!para[0].segment_derived);
+    }
+
+    /// A transition row recorded from its own display is rounded on its
+    /// own, so the row under it can read two seconds off the arithmetic
+    /// and still be right: Steel Legion 14:44 at 1:42:00 under a transition
+    /// recorded at 1:27:18 (882 wanted, 884 read) was refused by the segment
+    /// column on a 1 s slack. Refusal allows the rounding; the completion
+    /// is still vouched for on the tighter one.
+    #[test]
+    fn a_segment_two_seconds_off_a_transition_anchor_is_not_refused() {
+        let mut m = race_tracker();
+        let pass = |cat: &[&str], steel: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Uninvited", &["12:39", "1:26:37"]),
+                    row("(Any%)", cat),
+                    row("Steel Legion", steel),
+                    row("(Any% All Bosses)", &["0:32", "1:39:44"]),
+                    row("Moon Crystal", &["14:28", "4:09:57"]),
+                ],
+            )
+        };
+        let (h, min) = (3_600_000, 60_000);
+        let mut t = 1_000;
+        let mut total = h + 26 * min + 50_000;
+        // The transition under way, then done at 1:27:18; Steel Legion on.
+        for _ in 0..2 {
+            let b = pass(&["+0:05", "0:42", "1:27:19"], &["11:52", "1:39:12"]);
+            m.observe(&b, t, Some(total));
+            t += min;
+            total += min;
+        }
+        for _ in 0..3 {
+            let b = pass(&["0:42", "1:27:18"], &["+0:05", "11:52", "1:39:12"]);
+            m.observe(&b, t, Some(total));
+            t += min;
+            total += min;
+        }
+        // Steel Legion done: 14:44 at 1:42:00, two seconds off 1:27:18 + 14:44.
+        // The column never agrees within the second, so the arithmetic's
+        // value is filed once the segment's patience runs out.
+        total = h + 42 * min + 5_000;
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            let b = pass(&["0:42", "1:27:18"], &["+2:48", "14:44", "1:42:00"]);
+            seen.extend(m.observe(&b, t, Some(total)));
+            t += min;
+            total += min;
+        }
+        let steel: Vec<_> = seen.iter().filter(|c| c.game == "Steel Legion").collect();
+        assert_eq!(steel.len(), 1, "{seen:?}");
+        assert_eq!(steel[0].cumulative_ms, h + 42 * min);
+        assert!(
+            (steel[0].segment_ms - (14 * min + 44_000)).abs() <= 2_000,
+            "{}",
+            steel[0].segment_ms
+        );
     }
 
     /// The broadcast ends within a minute of the last game's finish: the
