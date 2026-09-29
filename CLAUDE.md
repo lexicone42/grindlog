@@ -121,7 +121,12 @@ Three rules that must not be got wrong:
   deleted 1888 Ninja Gaiden runs.
 - Run `scripts/audit-arcathlon.sh` before and after any change to
   `marathon.rs`, `roster.rs`, `signature.rs` or the gate in `sanity.rs`,
-  and diff the `REC`, `BAD` and `SUM` lines. For a race board (the Big 20),
+  and diff the `REC`, `BAD` and `SUM` lines. Run `scripts/audit-race.sh` too: it
+  replays every Big 20 day captured so far (live logs and VOD replays, the
+  corpus under `race-audit/`) and fails on any row that moved against
+  `race-audit/expected.txt`; read the diff, and `--update` only when the
+  new answer is the better one. Two rules that mended one day's log each
+  cost rows on other days, and only this comparison said so. For a race board (the Big 20),
   `NG_MARATHON_TRACE=<row name|slot|all> ngtwitchtimer --config live.toml
   audit --dir <dir with boards-<vod>.jsonl and obs-<vod>.jsonl>` replays the
   tracker over a board log in a second and says, per pass, which guard
