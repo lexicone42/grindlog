@@ -1075,6 +1075,17 @@ impl Marathon {
             if fixed < prev {
                 fixed += HOUR_MS;
             }
+            debug!(
+                "marathon row {}: {} read without its hour; {} after row {}'s {}",
+                i + 1,
+                crate::timeparse::format_ms_seconds(c),
+                crate::timeparse::format_ms_seconds(fixed),
+                self.slots[..i]
+                    .iter()
+                    .rposition(|s| s.recorded.is_some())
+                    .map_or(0, |j| j + 1),
+                crate::timeparse::format_ms_seconds(prev)
+            );
             cells.cumulative_ms = Some(fixed);
             return;
         }
@@ -1596,9 +1607,10 @@ impl Marathon {
             .collect();
         basis.sort();
         eprintln!(
-            "trace slot {i} {name:?} at {} runner {:?} baseline {:?} baseline_votes {:?}",
+            "trace slot {i} {name:?} at {} runner {:?} recorded {:?} baseline {:?} baseline_votes {:?}",
             at_ms / 1000,
             self.runner,
+            self.slots[i].recorded.map(|r| r / 1000),
             self.slots[i].baseline,
             basis
         );
@@ -2390,7 +2402,7 @@ fn read_cells(row: &BoardRow) -> Cells {
     // delta reads and the cumulative does not — on one broadcast the last
     // row read "+2:23", "25:16" for three passes running while the game was
     // still going, and 25:16 outvoted the real cumulative when it came.
-    let cells: Vec<&String> = row.cells.iter().skip_while(|c| is_signed(c)).collect();
+    let cells: Vec<&String> = row.cells.iter().skip_while(|c| is_delta_cell(c)).collect();
     let n = cells.len();
     if n == 0 {
         return Cells {
@@ -2422,6 +2434,22 @@ fn is_signed(cell: &str) -> bool {
     t.len() > 1
         && (t.starts_with('+') || t.starts_with('-'))
         && t[1..].chars().any(|c| c.is_ascii_digit())
+}
+
+/// A cell that is the delta and never a time: signed, or a decimal with no
+/// colon ("5.4", "21.8", "2.34"), which is the delta with its sign lost —
+/// the time columns print whole seconds and never a fraction. Taken for a
+/// time, such a cell put a transition's "0:30" in the cumulative column,
+/// where the hour carry made it 4:00:30 and it was filed. Only the time
+/// columns are read past it; where the runner is (`has_delta`) still asks
+/// for a sign, since a stray decimal reads on rows he is nowhere near.
+fn is_delta_cell(cell: &str) -> bool {
+    let t = cell.trim();
+    is_signed(t)
+        || (t.len() > 1
+            && t.contains('.')
+            && !t.contains(':')
+            && t.chars().any(|c| c.is_ascii_digit()))
 }
 
 /// A row's name with the time column's leftovers taken off it. The delta is
