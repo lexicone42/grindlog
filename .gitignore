@@ -58,3 +58,5 @@ nohup.out
 # Agent worktrees the tooling places inside the repository
 /.claude/
 obs-live.jsonl.*
+# The race-day audit corpus (scripts/audit-race.sh): links to board logs
+race-audit/
