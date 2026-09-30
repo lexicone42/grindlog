@@ -1810,7 +1810,9 @@ impl Marathon {
         // between readings tied on votes the row above says which is right.
         let voted = votes()
             .filter(|((_, s), _)| exp.is_some() && self.agrees(i, cum, *s))
-            .max_by_key(|(_, v)| v.count)
+            // Ties on votes go to the larger reading, so two replays of one
+            // log agree to the second (a HashMap order decided them).
+            .max_by_key(|((_, s), v)| (v.count, *s))
             .or_else(|| votes().max_by_key(|((_, s), v)| (v.count, *s)))
             .map(|((_, s), v)| (*s, *v));
         match (voted, expected) {
@@ -2639,6 +2641,13 @@ pub fn replay(
                     let mut m = Marathon::new(alias.name.clone(), alias.rosters.clone());
                     m.seed(&recorded);
                     state = Some(m);
+                } else {
+                    // The board the tracker holds, read again: a pass that
+                    // disowned it is not carried forward. Without this a
+                    // garbled pass and a later scroll to the top of the
+                    // window each counted as one of the three, and the
+                    // harness rebuilt a tracker the run loop kept.
+                    hits = 0;
                 }
             }
         }

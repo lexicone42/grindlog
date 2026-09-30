@@ -120,8 +120,14 @@ for id in "${ids[@]}"; do
                       AND r.started_at_ms < $hi AND r.ended_at_ms > $lo)"
   captured=$(q "$LIVE" "SELECT COUNT(*) FROM runs WHERE $LIVE_ROWS")
   if $replace; then
-    echo "  $captured live-captured practice run(s) in this VOD's span are REPLACED by the replay's"
-    gone="$LIVE_ROWS"
+    # Game by game: a live row goes only where the replay filed the same game
+    # and category on this day. A replay that missed a game the live pass
+    # caught (Steel Legion on 2026-09-28: live 14:44, the replay nothing)
+    # must not take the live row with it; the two passes are merged, and the
+    # games kept from live are named here.
+    kept=$(q "$LIVE" "ATTACH DATABASE '$srcabs' AS src; SELECT group_concat(DISTINCT game) FROM runs WHERE $LIVE_ROWS AND (game, category) NOT IN (SELECT game, category FROM src.runs);")
+    echo "  $captured live-captured practice run(s) in this VOD's span are REPLACED by the replay's, game by game${kept:+; kept from live, the replay has no row for: $kept}"
+    gone="$LIVE_ROWS AND (game, category) IN (SELECT game, category FROM src.runs)"
   else
     echo "  $captured live-captured practice run(s) in this VOD's span are kept (--replace-live to prefer the replay)"
     gone="0"

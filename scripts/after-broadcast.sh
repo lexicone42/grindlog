@@ -48,29 +48,43 @@ open() { sqlite3 -readonly -cmd '.timeout 10000' "$DB" "select count(*) from ses
 say() { echo "=== $(date -Is) $*"; }
 
 if [ "$now" = 0 ]; then
+  # Closed on three polls in a row: a restart of the bot (a rollout, a crash,
+  # a stream blip) closes the session for ten or twenty seconds and opens a
+  # new one, and one poll landing in that gap took the stream for over.
   say "waiting for the live session to close"
-  while [ "$(open)" != 0 ]; do sleep 60; done
+  zero=0
+  while :; do
+    if [ "$(open)" = 0 ]; then zero=$((zero + 1)); else zero=0; fi
+    [ "$zero" -ge 3 ] && break
+    sleep 60
+  done
 fi
 say "no live session open"
 
 if [ "$rollout" = 1 ]; then
   say "rollout from $(git branch --show-current) $(git log --oneline -1 | cut -c1-70)"
-  ./scripts/rollout.sh 2>&1 | grep -E '^==|test result|rollout-smoke|new pid|error|refus|smoke' | cut -c1-160
+  set -o pipefail
+  ./scripts/rollout.sh 2>&1 | grep -E '^==|test result|rollout-smoke|new pid|error|refus|smoke|not main|uncommitted|tests failed|gave up|did not come back' | cut -c1-160
+  rc=${PIPESTATUS[0]}
+  set +o pipefail
+  [ "$rc" = 0 ] || say "rollout FAILED (exit $rc); the bot stays on its build"
 fi
 
 # Today's VOD, and only once its length has stopped growing. list-vods
 # prints "id  date  hours  title"; a broadcast still being archived grows
 # by a tenth of an hour every six minutes.
 say "waiting for today's VOD on $channel to be listed and finished"
-id="" last="" n=0
+id="" last="" n=0 same=0
 while :; do
   line=$(./scripts/list-vods.sh "$channel" 2>/dev/null | awk -v d="$today" '$2 == d {print; exit}')
   if [ -n "$line" ]; then
     id=$(echo "$line" | awk '{print $1}')
     hours=$(echo "$line" | awk '{print $3}')
-    if [ "$hours" = "$last" ]; then
-      break
-    fi
+    # The length is printed in tenths of an hour, and a VOD still being
+    # written gains a tenth every six minutes: five polls two minutes apart
+    # agreeing span eight minutes, which a growing VOD cannot.
+    if [ "$hours" = "$last" ]; then same=$((same + 1)); else same=0; fi
+    [ "$same" -ge 4 ] && break
     last=$hours
   fi
   n=$((n + 1))
