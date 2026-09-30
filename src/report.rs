@@ -218,6 +218,13 @@ fn big20_prep(
         .chain(std::iter::once(cfg.game.other_category.as_str()))
         .collect();
     let (url, date) = rosters.event_source(event);
+    // The race's last game: a run that reached it is a finished run, however
+    // many of its games carry a time (a split he skipped keeps no time, and
+    // the next game's segment spans both).
+    let last_game = rosters
+        .lineup(event)
+        .last()
+        .map(|(name, _)| name.to_string());
     let games: Vec<serde_json::Value> = rosters
         .lineup(event)
         .into_iter()
@@ -392,6 +399,12 @@ fn big20_prep(
                 "started_at_ms": rows.iter().map(|r| r.started_at_ms).min(),
                 "games": rows.len(),
                 "reached_ms": rows.iter().filter_map(|r| r.last_timer_ms).max(),
+                // Reached the race's last game: finished, whatever the count
+                // (Monster Party's split skipped on 2026-09-28 left nineteen
+                // times and a run of the twenty).
+                "finished": last_game.as_deref().is_some_and(|last| {
+                    rows.iter().any(|r| r.last_timer_ms.is_some() && r.game == last)
+                }),
                 "segments_ms": rows.iter().filter_map(|r| r.final_time_ms).sum::<i64>(),
                 // Every game of the run, in the order he reached them: its
                 // segment and the clock it ended at. What the run-through page
@@ -1253,5 +1266,26 @@ mod tests {
         let rt = out["run_throughs"].as_array().unwrap();
         assert_eq!(rt.len(), 1, "{rt:?}");
         assert_eq!(rt[0]["games"], 3);
+        assert_eq!(
+            rt[0]["finished"], false,
+            "three games, the last not reached"
+        );
+
+        // A run that reached the race's last game is finished, however many
+        // of its games carry a time.
+        let out = big20_prep(
+            &[],
+            &[
+                race("Die Hard", 10_000, 142_000, Some(142_000)),
+                race("Pac-Mania", 20_000, 200_000, Some(372_000)),
+                race("Moon Crystal", 30_000, 782_000, Some(14_684_000)),
+            ],
+            &cfg,
+        );
+        let rt = out["run_throughs"].as_array().unwrap();
+        assert_eq!(rt.len(), 1, "{rt:?}");
+        assert_eq!(rt[0]["games"], 3);
+        assert_eq!(rt[0]["finished"], true, "{rt:?}");
+        assert_eq!(rt[0]["reached_ms"], 14_684_000);
     }
 }
