@@ -139,10 +139,24 @@ recorded cumulative less that segment, bottom up, each recorded row
 answering for the one above. The segment is the row's own column where it
 agrees with the arithmetic to within two seconds (a derived value carries
 two roundings), the arithmetic where the row above is recorded too and the
-column disagrees. Only a row the tracker first saw EMPTY is filed this way:
-a row already carrying its time when the board appeared was finished before
-the bot looked, and stays unrecorded, as it always has. The log line says
-"filed from the row below" and the completion carries `backfilled`.
+column disagrees. A row the tracker first saw EMPTY is filed this way, and
+so is a row that arrived carrying its comparison once the runner's row has
+been below it for four passes (its own column's chance to settle) — on a
+comparison board every row arrives with the previous run's time, and a
+game played since is told by the row under it saying it ended somewhere
+else. Jaws on 2026-09-29: its cumulative read "3:52:11", "3:54:13", "3:52:12"
+and never right, 11:38 in its column on every pass, the transition under it
+0:30 / 3:51:41 on ten passes, Moon Crystal under that recorded clean. A row
+that has settled on the very cumulative the row below derives is left to
+the ordinary path, which reads the segment column beside it; one settled
+somewhere else was the misreading the row below has just given the lie to.
+A category row whose column went with the runner standing on the row above
+it derives by the fixed transition its comparison showed. The derived
+cumulative snaps to the row's own reading, or its comparison, within a
+second (the board prints each time rounded, so a difference of two is out
+by a second half the time), and a split he skipped (the row blank for three
+passes) is not filed. The log line says "filed from the row below" and the
+completion carries `backfilled`.
 Measured before the rule, a full run of the twenty filed four games by the
 columns alone, with the transition rows read cleanly all the way down.
 
