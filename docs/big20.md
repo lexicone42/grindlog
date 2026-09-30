@@ -58,9 +58,16 @@ run the live capture already has wins over the replay's. When the live bot
 ran a build that has since been fixed — the week of 2026-09-08, whose live
 capture saw six of the twenty games and named two of them wrong — that is
 backwards: the flag deletes the live capture's practice rows inside the
-VOD's span before the insert, so the replay's pass lands whole. Still never
-a run of the tracked game, still never an Arcathlon row, and the numbering
-of every game touched is recomputed.
+VOD's span before the insert, so the replay's pass lands whole. A live row
+goes only where the replay has *the same run*: a run of the same game and
+category overlapping it in time, or the same finish (same final time, same
+category, same day — a board row is dated from when the tracker filed it,
+and the two passes can file one finish twenty minutes apart). A live row
+the replay has no counterpart for stays, and is named in the output; a
+replay that lost the layout after the board (2026-09-28: it saw two of the
+four Steel Legion attempts that followed the run) must not take the live
+rows with it. Still never a run of the tracked game, still never an
+Arcathlon row, and the numbering of every game touched is recomputed.
 
 **Rehearse with `LIVE=<a copy>` first.** Not optional. It is what caught the
 marathon import that would have deleted 1888 runs, and it is what caught

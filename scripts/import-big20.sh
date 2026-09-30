@@ -120,14 +120,27 @@ for id in "${ids[@]}"; do
                       AND r.started_at_ms < $hi AND r.ended_at_ms > $lo)"
   captured=$(q "$LIVE" "SELECT COUNT(*) FROM runs WHERE $LIVE_ROWS")
   if $replace; then
-    # Game by game: a live row goes only where the replay filed the same game
-    # and category on this day. A replay that missed a game the live pass
-    # caught (Steel Legion on 2026-09-28: live 14:44, the replay nothing)
-    # must not take the live row with it; the two passes are merged, and the
-    # games kept from live are named here.
-    kept=$(q "$LIVE" "ATTACH DATABASE '$srcabs' AS src; SELECT group_concat(DISTINCT game) FROM runs WHERE $LIVE_ROWS AND (game, category) NOT IN (SELECT game, category FROM src.runs);")
-    echo "  $captured live-captured practice run(s) in this VOD's span are REPLACED by the replay's, game by game${kept:+; kept from live, the replay has no row for: $kept}"
-    gone="$LIVE_ROWS AND (game, category) IN (SELECT game, category FROM src.runs)"
+    # Row by row: a live row goes only where the replay filed a run of the
+    # same game and category OVERLAPPING it in time (the same rule the
+    # insert below uses to skip a duplicate). A live row the replay has no
+    # counterpart for stays: a replay that missed a game (Steel Legion on
+    # 2026-09-28: live 14:44, the replay nothing) or its last attempts of one
+    # (the same day: live four Steel Legion attempts after the run, the
+    # replay two, its layout lost in the switch after the board) must not
+    # take the live rows with it. The rows kept from live are named here.
+    # "The same run" is an overlap in time, or the same finish: a board row
+    # is filed when the tracker sees it filed, and the live pass filed Mega
+    # Man 6 on 2026-09-28 nineteen minutes after the replay did, the same
+    # 665 s in the same category on the same day. Two different attempts
+    # of one game do not finish in the same time on the same day.
+    OVERLAPS="EXISTS (SELECT 1 FROM src.runs r WHERE r.game = runs.game AND r.category = runs.category
+                        AND ((r.started_at_ms < runs.ended_at_ms AND r.ended_at_ms > runs.started_at_ms)
+                             OR (r.final_time_ms IS NOT NULL AND r.final_time_ms = runs.final_time_ms
+                                 AND date(r.started_at_ms/1000,'unixepoch','localtime')
+                                   = date(runs.started_at_ms/1000,'unixepoch','localtime'))))"
+    kept=$(q "$LIVE" "ATTACH DATABASE '$srcabs' AS src; SELECT group_concat(game || ' ' || time(started_at_ms/1000,'unixepoch','localtime'), ', ') FROM runs WHERE $LIVE_ROWS AND NOT $OVERLAPS;")
+    echo "  $captured live-captured practice run(s) in this VOD's span are REPLACED by the replay's where it has the same run${kept:+; kept from live, the replay has no row for: $kept}"
+    gone="$LIVE_ROWS AND $OVERLAPS"
   else
     echo "  $captured live-captured practice run(s) in this VOD's span are kept (--replace-live to prefer the replay)"
     gone="0"
@@ -201,7 +214,12 @@ for id in "${ids[@]}"; do
         --
         -- Matched by OVERLAP, not by how close the starts are. Two attempts
         -- of the same game cannot overlap in time; the same attempt seen
-        -- twice must. That is the whole rule, and it needs no tolerance.
+        -- twice must. That is the rule, and it needs no tolerance — with
+        -- one addition: the same finish (game, category, final time) on
+        -- the same day is the same run too. A board row is dated from when
+        -- the tracker filed it, and the live pass filed Mega Man 6 on
+        -- 2026-09-28 nineteen minutes after the replay did, the same 665 s;
+        -- by overlap alone it landed twice.
         --
         -- A start-time epsilon was the first version and it let a duplicate
         -- through on the first day it was used: the live capture JOINED a
@@ -220,8 +238,11 @@ for id in "${ids[@]}"; do
         AND NOT EXISTS (
           SELECT 1 FROM runs e
            WHERE e.game = r.game
-             AND e.started_at_ms < r.ended_at_ms
-             AND e.ended_at_ms > r.started_at_ms)
+             AND ((e.started_at_ms < r.ended_at_ms AND e.ended_at_ms > r.started_at_ms)
+                  OR (e.category = r.category AND r.final_time_ms IS NOT NULL
+                      AND e.final_time_ms = r.final_time_ms
+                      AND date(e.started_at_ms/1000,'unixepoch','localtime')
+                        = date(r.started_at_ms/1000,'unixepoch','localtime'))))
       ORDER BY r.started_at_ms;
     DROP TABLE target;
     -- Renumber every (game, category) this batch touched, from scratch and

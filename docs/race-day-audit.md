@@ -24,6 +24,7 @@ Severity: loses-rows-on-race-day / loses-rows-sometimes. One game in ~6 comparis
 **Fix:** let `backfill()` walk a `Was`-baseline row once the runner has passed it and the row below is recorded with a settled segment, and let an odd slot's segment fall back to `baseline_segment_ms` (the fixed 0:30) when its votes were absorbed. Proof: `scripts/audit-race.sh` on 2026-09-29-live gains `37:13871/698` (Jaws) and the day reads 20; all other days byte-identical.
 
 ## 3. `import-big20.sh --replace-live` (the command after-broadcast.sh prints) deletes live-caught race rows the replay did not file
+**Landed (per-game merge, then per-run: a live row goes only where the replay has an overlapping run or the same finish on the same day; kept rows are named).** The per-game version still lost the two late Steel Legion attempts of 2026-09-28 the replay never saw.
 `scripts/import-big20.sh:118-120, 166-168`; printed by `scripts/after-broadcast.sh:89`
 LIVE_ROWS is every hls run in the VOD span that is not Ninja Gaiden/Arcathlon — all 'Big 20 #23 run' and 'Big 20 #23' rows — and it is deleted wholesale before the replay's rows are inserted, with nothing compared game by game. On 2026-09-28 live filed Steel Legion (884 s) and the replay did not (it filed Parallel World instead); rehearsed on a copy, the day keeps 18/20 so nothing looks wrong, Steel Legion vanishes, three Steel Legion practice attempts (incl. the 758 s best) go with it, and attempt numbers close over the gap.
 Severity: loses-rows-sometimes / loses-rows-on-race-day.
