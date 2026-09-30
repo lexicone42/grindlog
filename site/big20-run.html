@@ -135,7 +135,9 @@ const games = D.games || [];
 const all = (D.run_throughs || []).slice().sort((a, b) => a.started_at_ms - b.started_at_ms);
 const run = all.find(r => r.started_at_ms === D.run_started_at_ms) || all[all.length - 1];
 const segOf = (r, game) => (r.segments || []).find(s => key(s.game) === key(game));
-const complete = r => r.games >= games.length && r.reached_ms != null;
+// Reached the race's last game: complete, however many games carry a time
+// (a skipped split keeps none; the next game's segment spans both).
+const complete = r => (r.finished || r.games >= games.length) && r.reached_ms != null;
 const done = all.filter(complete);
 const bestRun = done.length ? done.reduce((m, r) => r.reached_ms < m.reached_ms ? r : m) : null;
 const idx = all.indexOf(run);

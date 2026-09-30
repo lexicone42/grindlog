@@ -308,7 +308,12 @@ const betweenOf = r => {
   const inGame = segs.reduce((n, s) => n + s.ms, 0);
   return r.reached_ms != null && r.reached_ms >= inGame ? r.reached_ms - inGame : null;
 };
-const completeRuns = (D.run_throughs || []).filter(r => r.games >= games.length && r.reached_ms != null && betweenOf(r) != null)
+// A run that reached the race's last game is complete, however many of its
+// games carry a time: a split he skipped keeps no time, and the next game's
+// segment spans both, so the clock at the end and the time between games
+// are still his.
+const isComplete = r => (r.finished || r.games >= games.length) && r.reached_ms != null;
+const completeRuns = (D.run_throughs || []).filter(r => isComplete(r) && betweenOf(r) != null)
   .sort((a, b) => a.started_at_ms - b.started_at_ms);
 const quickest = completeRuns.reduce((m, r) => (m == null || betweenOf(r) < betweenOf(m)) ? r : m, null);
 const latestRun = completeRuns.length ? completeRuns[completeRuns.length - 1] : null;
@@ -347,7 +352,7 @@ practiceRuns();
 function fullRuns() {
   const rs = D.run_throughs || [];
   if (!rs.length) return '';
-  const done = rs.filter(r => r.games >= games.length && r.reached_ms != null);
+  const done = rs.filter(isComplete);
   const best = done.length ? Math.min(...done.map(r => r.reached_ms)) : null;
   return `<div><div class="lbl">Practice runs</div><div class="runs"><b>${rs.length}</b> run${rs.length === 1 ? '' : 's'} of the twenty` +
     (best != null ? `, best <b>${fmt(best)}</b>` : `, none over all twenty yet`) + `</div>` +
@@ -376,7 +381,7 @@ function practiceRuns() {
     r.between = r.reached_ms != null && r.reached_ms >= r.inGame ? r.reached_ms - r.inGame : null;
     r.deltas = segs.filter(s => bestOf.get(s.game) != null).map(s => ({ game: s.game, d: s.ms - bestOf.get(s.game) }));
     r.vsBests = r.deltas.length ? r.deltas.reduce((n, x) => n + x.d, 0) : null;
-    r.complete = r.games >= games.length && r.reached_ms != null;
+    r.complete = isComplete(r);
     r.live = r === live;
     r.vsPrev = r.complete && prevDone ? r.reached_ms - prevDone.reached_ms : null;
     if (r.complete) prevDone = r;
