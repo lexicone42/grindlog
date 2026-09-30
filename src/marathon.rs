@@ -1167,6 +1167,22 @@ impl Marathon {
         // time (a tracker started with the total at 51:00 otherwise files a
         // 51:59 comparison on its second pass).
         let ordered = self.roster.is_some_and(|e| self.rosters.ordered(e));
+        // A cumulative equal to the comparison's with a different segment
+        // beside it is a finish that landed on the comparison's time — or
+        // the comparison's own segment column misread. The finish has a
+        // segment the board's arithmetic backs; the misread has not
+        // (2026-09-28: comparison 12:59 / 1:26:37, read "12:39 1:26:37" on
+        // two passes five minutes apart as the total approached 1:26:37,
+        // filed as the finish a minute before the real one, 12:57 / 1:26:33).
+        // With nothing above to anchor the arithmetic the segment is taken
+        // at its word, as before.
+        let backed = match (observed, cells.segment_ms) {
+            (Some(c), Some(s)) => {
+                let e = self.expectations(i, c);
+                e.is_empty() || e.iter().any(|x| (s - x).abs() <= DENY_SLACK_MS)
+            }
+            _ => true,
+        };
         let slot = &mut self.slots[i];
         // A row under the runner's shows its comparison, however it reads
         // this pass: the reading feeds the baseline and nothing else, and
@@ -1272,7 +1288,7 @@ impl Marathon {
         // finish that landed on the comparison's time: what changed is the
         // other column.
         let same_segment = match (slot.baseline_segment_ms, cells.segment_ms) {
-            (Some(b), Some(s)) => b == s,
+            (Some(b), Some(s)) => b == s || !backed,
             _ => true,
         };
         if matches!(slot.baseline, Baseline::Was(b) if same_time(b, cum)) && same_segment {
@@ -5433,6 +5449,79 @@ mod tests {
         assert_eq!(pac.len(), 1, "{seen:?}");
         assert_eq!(pac[0].segment_ms, 5 * min + 50_000);
         assert_eq!(pac[0].cumulative_ms, 8 * min + 22_000);
+    }
+
+    /// The comparison's segment column misread is still the comparison:
+    /// Pac-Mania's 5:28 / 8:22 read "5:08 8:22" on two passes as the total
+    /// came up on 8:22. A finish that landed on the comparison's cumulative
+    /// has a segment the row above accounts for; 5:08 is 42 seconds off it.
+    #[test]
+    fn the_comparisons_segment_misread_is_not_a_finish_on_its_cumulative() {
+        let mut m = race_tracker();
+        let pass = |die: &[&str], cat: &[&str], pac: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Die Hard", die),
+                    row("(Any% Beginner)", cat),
+                    row("Pac-Mania", pac),
+                    row("(Sandbox)", &["0:30", "8:52"]),
+                    row("Double Dragon II", &["25:34", "34:26"]),
+                    row("Moon Crystal", &["14:15", "4:14:48"]),
+                ],
+            )
+        };
+        let min = 60_000;
+        let mut t = 1_000;
+        for i in 0..3 {
+            let delta = ["+0.3", "+0.5", "+0.2"][i];
+            let b = pass(
+                &[delta, "2:23", "2:23"],
+                &["0:30", "2:53"],
+                &["5:28", "8:22"],
+            );
+            assert!(m.observe(&b, t, Some(30_000 + i as i64 * min)).is_empty());
+            t += min;
+        }
+        for i in 0..3 {
+            let b = pass(
+                &["-22.0", "2:01", "2:01"],
+                &["-22.0", "0:30", "2:32"],
+                &["5:28", "8:22"],
+            );
+            m.observe(&b, t, Some(2 * min + 40_000 + i as i64 * min));
+            t += min;
+        }
+        // Pac-Mania under way; the comparison's segment comes back "5:08"
+        // on passes five minutes apart, the total closing on 8:22.
+        for i in 0..6 {
+            let pac = ["5:28", "5:08", "5:28", "5:28", "5:28", "5:08"][i];
+            let b = pass(
+                &["-22.0", "2:01", "2:01"],
+                &["-22.0", "0:30", "2:32"],
+                &[pac, "8:22"],
+            );
+            let seen = m.observe(&b, t, Some(3 * min + 30_000 + i as i64 * min));
+            assert!(seen.iter().all(|c| c.game != "Pac-Mania"), "{seen:?}");
+            // The misread is the comparison: it casts no vote to settle.
+            assert!(m.slots[2].cumulative_votes.is_empty(), "pass {i}");
+            t += min;
+        }
+        // Done in 5:46, at 8:18.
+        let mut seen = Vec::new();
+        for i in 0..3 {
+            let b = pass(
+                &["-22.0", "2:01", "2:01"],
+                &["-22.0", "0:30", "2:32"],
+                &["5:46", "8:18"],
+            );
+            seen.extend(m.observe(&b, t, Some(8 * min + 20_000 + i as i64 * min)));
+            t += min;
+        }
+        let pac: Vec<_> = seen.iter().filter(|c| c.game == "Pac-Mania").collect();
+        assert_eq!(pac.len(), 1, "{seen:?}");
+        assert_eq!(pac[0].segment_ms, 5 * min + 46_000);
+        assert_eq!(pac[0].cumulative_ms, 8 * min + 18_000);
     }
 
     /// A split he skipped: the row keeps its comparison, then shows nothing,
