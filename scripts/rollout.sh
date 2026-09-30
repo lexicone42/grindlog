@@ -91,11 +91,16 @@ n=0
 while :; do
   last=$(tail -1 obs-live.jsonl 2>/dev/null || true)
   age=$(( $(date +%s) - $(stat -c %Y obs-live.jsonl 2>/dev/null || echo 0) ))
+  # A marathon in force: the board holds the lock and the run state machine
+  # is fed nothing, so every frame reads IDLE while twenty games are being
+  # tracked. The log says when a board was taken up and when it ended.
+  inforce=$(sed 's/\x1b\[[0-9;]*m//g' logs/live.log 2>/dev/null | awk '/marathon board: /{s=NR} /marathon (over|set aside)/{e=NR} END{print (s>e) ? 1 : 0}')
   # No fresh frames for a minute = offline; IDLE = between runs.
-  if [ "$age" -gt 60 ] || echo "$last" | grep -q '"phase":"IDLE"'; then break; fi
+  if [ "$age" -gt 60 ]; then break; fi
+  if [ "${inforce:-0}" = 0 ] && echo "$last" | grep -q '"phase":"IDLE"'; then break; fi
   sleep 2; n=$((n+1))
-  [ $((n % 30)) -eq 0 ] && echo "   still in a run ($((n*2))s)..."
-  [ "$n" -gt 1800 ] && { echo "gave up waiting after an hour" >&2; exit 1; }
+  [ $((n % 30)) -eq 0 ] && echo "   still in a $([ "${inforce:-0}" = 1 ] && echo marathon || echo run) ($((n*2))s)..."
+  [ "$n" -gt 10800 ] && { echo "gave up waiting after six hours" >&2; exit 1; }
 done
 echo "== restarting (SIGTERM; the supervisor brings it back on the new binary)"
 kill "$pid"
