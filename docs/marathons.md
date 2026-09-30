@@ -208,8 +208,14 @@ which moved, so a finish takes one pass more than it used to; the segment
 from that pass is held for the close. A finish that lands on the
 comparison's own cumulative to the second (Pac-Mania 5:50 at 8:22 against
 5:28 at 8:22) shows as a change in the segment column alone, so the
-baseline keeps its segment beside it. Between candidates tied on votes the
-one the board's arithmetic vouches for is tried first.
+baseline keeps its segment beside it — and a changed segment counts only
+where the board's arithmetic from the row above backs it (within 2.5 s).
+The comparison's own segment column misread is the other way a segment
+changes: 12:59 / 1:26:37 read "12:39 1:26:37" on two passes as the total
+approached 1:26:37 and was filed as the finish a minute before the real
+12:57 / 1:26:33 (2026-09-28). Where nothing above anchors the arithmetic
+the segment is taken at its word. Between candidates tied on votes the one
+the board's arithmetic vouches for is tried first.
 
 **A skipped split.** A split he skips keeps its comparison on the board and
 then prints "-" for its times, which the reader returns as no cells at all;
