@@ -121,6 +121,12 @@ fn same_time(a: i64, b: i64) -> bool {
 /// before recording the difference instead and saying so.
 const SEGMENT_PATIENCE: u32 = 4;
 
+/// How long after the runner's row has moved below a row that arrived with
+/// its comparison the row's own cumulative column is left to settle before
+/// the row under it is asked instead (`backfill`). Harvest files the column's
+/// own reading; the arithmetic is a second out half the time.
+const BACKFILL_PATIENCE_MS: i64 = SEGMENT_PATIENCE as i64 * 60_000;
+
 /// How far a completion's cumulative may exceed the marathon total that was
 /// last read. At the moment a game ends the two are the same value; a
 /// comparison time still to be run is minutes ahead of the total, which is
@@ -287,6 +293,8 @@ struct Slot {
     /// the reader returns as nothing. Such a row anchors no arithmetic; the
     /// row under it is measured from the row above it.
     blank_passes: u32,
+    /// When the runner's row first moved below this one.
+    passed_ms: Option<i64>,
 }
 
 impl Slot {
@@ -946,7 +954,7 @@ impl Marathon {
                     row.name.as_deref().unwrap_or(""),
                     row.cells
                 );
-                self.advance_runner(Some(s), &why);
+                self.advance_runner(Some(s), at_ms, &why);
             }
         }
         let any_cells = board.rows.iter().any(|r| !r.cells.is_empty());
@@ -1010,7 +1018,7 @@ impl Marathon {
                 .iter()
                 .rposition(|s| s.recorded.is_some())
                 .map(|i| if i % 2 == 0 { i + 2 } else { i + 1 });
-            self.advance_runner(past, "the row above it recorded");
+            self.advance_runner(past, at_ms, "the row above it recorded");
         }
         // A row said to be unvouched, now filed: said too, so the two lines
         // pair up in the log and a watcher can tell a row in limbo from one
@@ -1048,12 +1056,15 @@ impl Marathon {
     /// the same guards.
     /// The runner's row moves down the board and never up: a delta read
     /// on a row, or a row recorded, puts him there or below.
-    fn advance_runner(&mut self, to: Option<usize>, why: &str) {
+    fn advance_runner(&mut self, to: Option<usize>, at_ms: i64, why: &str) {
         let Some(to) = to else { return };
         if self.runner.is_some_and(|r| r >= to) {
             return;
         }
         self.runner = Some(to);
+        for slot in self.slots.iter_mut().take(to) {
+            slot.passed_ms.get_or_insert(at_ms);
+        }
         if to < self.slots.len() {
             info!(
                 "marathon: runner on row {} ({}): {why}",
@@ -1678,28 +1689,87 @@ impl Marathon {
     fn backfill(&mut self, at_ms: i64) -> Vec<Completion> {
         let mut out = Vec::new();
         for i in (0..self.slots.len().saturating_sub(1)).rev() {
-            // Only a row this tracker first saw EMPTY. A row already carrying
-            // a time when the board first appeared was finished before the
-            // bot looked, and is not recorded (the rule every replay starts
-            // at second 0 for); the row under it says nothing new about it.
-            if self.slots[i].recorded.is_some() || self.slots[i].baseline != Baseline::Empty {
+            // A row this tracker first saw EMPTY, or one that arrived with
+            // its comparison and that the runner has since gone past. A row
+            // already carrying a time when the board first appeared was
+            // finished before the bot looked, and is not recorded (the rule
+            // every replay starts at second 0 for); on a comparison board
+            // every row arrives carrying the previous run's time, and the
+            // one he has played since is told from the comparison by the
+            // runner's row having moved below it — and, below, by the row
+            // under it saying it ended somewhere other than that comparison
+            // (Jaws 2026-09-29: its cumulative read seven ways and never
+            // right, 11:38 in its segment column on every pass, and the
+            // transition under it 0:30 / 3:51:41 on ten).
+            if self.slots[i].recorded.is_some() {
                 continue;
             }
+            let passed = self.slots[i]
+                .passed_ms
+                .is_some_and(|p| at_ms - p >= BACKFILL_PATIENCE_MS);
+            let arrived = match self.slots[i].baseline {
+                Baseline::Empty => false,
+                Baseline::Was(_) if passed => true,
+                _ => continue,
+            };
             let Some(below_cum) = self.slots[i + 1].recorded else {
                 continue;
             };
             // The row below's segment column, whatever cumulative it was read
             // beside: a row filed from below itself carries a derived
-            // cumulative no vote was cast for.
-            let Some(below_seg) = self.slots[i + 1].best_segment(below_cum) else {
+            // cumulative no vote was cast for. A category row's column, when
+            // its votes went with the runner standing on the row above it
+            // (`under`), is the fixed transition its comparison showed.
+            let below_seg = self.slots[i + 1].best_segment(below_cum).or_else(|| {
+                (self.ordered() && (i + 1) % 2 == 1)
+                    .then_some(self.slots[i + 1].baseline_segment_ms)
+                    .flatten()
+            });
+            let Some(below_seg) = below_seg else {
                 continue;
             };
-            let cum = below_cum - below_seg;
+            let derived = below_cum - below_seg;
+            // A row that arrived with its comparison and has since settled on
+            // the very cumulative the row below derives is `harvest`'s to
+            // file, with the segment column read beside it (Double Dragon II
+            // at 34:40, its column split 24:31 / 24:11 / 24:21: the reading
+            // the arithmetic agrees with is the one to file, and the guards
+            // are still weighing it). One settled somewhere else is the
+            // misreading the row below has just given the lie to.
+            if arrived
+                && self.slots[i]
+                    .cumulative_votes
+                    .iter()
+                    .any(|(c, v)| settled(v) && (c - derived).abs() <= 1000)
+            {
+                continue;
+            }
+            // The row's own column, where it read within a second of the
+            // arithmetic: the board prints each time rounded, so a difference
+            // of two of them is out by a second half the time, and a row
+            // whose own cumulative was read is filed at what it read (Pac-Mania
+            // 11:29 on 44 passes, 11:30 by the row below less its 0:30).
+            let cum = self.slots[i]
+                .cumulative_votes
+                .keys()
+                .copied()
+                .chain(self.slots[i].baseline_value())
+                .filter(|c| (c - derived).abs() <= 1000)
+                .min_by_key(|c| ((c - derived).abs(), *c))
+                .unwrap_or(derived);
             if cum <= 0 || !self.coherent(i, cum) {
                 continue;
             }
+            // A split he skipped keeps its comparison and then prints
+            // nothing: there is no time to file, and the row under it spans
+            // both games.
+            if self.slots[i].blank_passes >= SKIPPED_PASSES {
+                continue;
+            }
             let ended_at_ms = self.slots[i + 1].recorded_at_ms.unwrap_or(at_ms) - below_seg;
-            if self.known.contains(&cum) {
+            // Within the second: a row this bot recorded before it restarted,
+            // derived here from the row below rather than read.
+            if self.known.iter().any(|k| (k - cum).abs() <= 1000) {
                 self.slots[i].recorded = Some(cum);
                 self.slots[i].recorded_at_ms = Some(ended_at_ms);
                 continue;
@@ -5080,6 +5150,117 @@ mod tests {
         assert_eq!(seen[0].game, "Yoshi");
         assert_eq!(seen[0].cumulative_ms, 4 * h + 4 * 60_000 + 51_000);
         assert_eq!(seen[0].segment_ms, 618_000);
+    }
+
+    /// A comparison board, and a row whose cumulative never reads twice the
+    /// same: Jaws 11:38 at 3:51:11 read "3:52:11", "3:54:13", "3:52:12",
+    /// while its segment column read 11:38 on every pass. The transition
+    /// under it read nothing but its delta. Moon Crystal under both records
+    /// clean; the transition is filed from it by the fixed 0:30 its
+    /// comparison showed, and Jaws from the transition.
+    #[test]
+    fn a_comparison_row_the_runner_passed_is_filed_from_the_row_below() {
+        let mut m = race_tracker();
+        let pass = |cel: &[&str], t1: &[&str], jaws: &[&str], t2: &[&str], moon: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Celeste Mario", cel),
+                    row("(Any%)", t1),
+                    row("Jaws", jaws),
+                    row("(Any%)", t2),
+                    row("Moon Crystal", moon),
+                ],
+            )
+        };
+        let h = 3_600_000;
+        let min = 60_000;
+        let mut t = 1_000;
+        // Celeste under way against the comparisons.
+        for i in 0..3 {
+            let delta = ["+0.3", "+0.5", "+0.2"][i];
+            let b = pass(
+                &[delta, "12:47", "3:44:32"],
+                &["0:30", "3:45:03"],
+                &["8:42", "3:53:45"],
+                &["0:30", "3:54:15"],
+                &["12:23", "4:06:39"],
+            );
+            assert!(m
+                .observe(&b, t, Some(3 * h + 32 * min + i as i64 * min))
+                .is_empty());
+            t += min;
+        }
+        // Celeste done at 3:39:02, then Jaws under way.
+        let mut seen = Vec::new();
+        for i in 0..4 {
+            let delta = ["-5:30", "-5:30", "-5:29", "-5:31"][i];
+            let b = pass(
+                &["-5:30", "13:08", "3:39:02"],
+                &["-5:30", "0:30", "3:39:33"],
+                &[delta, "8:42", "3:53:45"],
+                &["0:30", "3:54:15"],
+                &["12:23", "4:06:39"],
+            );
+            seen.extend(m.observe(&b, t, Some(3 * h + 39 * min + 10_000 + i as i64 * min)));
+            t += min;
+        }
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].game, "Celeste Mario's Zap n Dash");
+        // Jaws done at 3:51:11, its cumulative never reading the same twice.
+        // Moon Crystal's delta cell does not read yet, so the runner's row
+        // stays on Jaws and the transition's 0:30 / 3:51:41 is taken for
+        // what it always showed.
+        let jaws_cum = [
+            "3:52:11", "3:54:13", "3:52:12", "3:53:11", "3:52:17", "3:54:11", "3:52:21", "3:51:14",
+            "3:57:11",
+        ];
+        for (i, jaws) in jaws_cum.iter().enumerate().take(3) {
+            let b = pass(
+                &["-5:30", "13:08", "3:39:02"],
+                &["-5:30", "0:30", "3:39:33"],
+                &["-2:34", "11:38", jaws],
+                &["0:30", "3:51:41"],
+                &["12:23", "4:06:39"],
+            );
+            let seen = m.observe(&b, t, Some(3 * h + 52 * min + i as i64 * min));
+            assert!(seen.is_empty(), "{seen:?}");
+            t += min;
+        }
+        // Moon Crystal's delta reads and moves: the runner is on it.
+        for (i, jaws) in jaws_cum.iter().enumerate().skip(3) {
+            let delta = ["-2:07", "-2:06", "-2:08", "-2:07", "-2:05", "-2:09"][i - 3];
+            let b = pass(
+                &["-5:30", "13:08", "3:39:02"],
+                &["-5:30", "0:30", "3:39:33"],
+                &["-2:34", "11:38", jaws],
+                &["0:30", "3:51:41"],
+                &[delta, "12:23", "4:06:39"],
+            );
+            let seen = m.observe(&b, t, Some(3 * h + 55 * min + (i as i64 - 3) * min));
+            assert!(seen.is_empty(), "{seen:?}");
+            t += min;
+        }
+        // Moon Crystal done at 4:04:44.
+        let mut seen = Vec::new();
+        for i in 0..3 {
+            let b = pass(
+                &["-5:30", "13:08", "3:39:02"],
+                &["-5:30", "0:30", "3:39:33"],
+                &["-2:34", "11:38", "3:52:11"],
+                &["0:30", "3:51:41"],
+                &["-1:55", "13:02", "4:04:44"],
+            );
+            seen.extend(m.observe(&b, t, Some(4 * h + 4 * min + 50_000 + i as i64 * min)));
+            t += min;
+        }
+        let games: Vec<&str> = seen.iter().map(|c| c.game.as_str()).collect();
+        assert_eq!(games, ["Moon Crystal", "Jaws"], "{seen:?}");
+        let jaws = &seen[1];
+        assert!(jaws.backfilled);
+        assert_eq!(jaws.cumulative_ms, 3 * h + 51 * min + 11_000);
+        assert_eq!(jaws.segment_ms, 11 * min + 38_000);
+        assert!(!jaws.segment_derived);
     }
 
     /// The backfill walks up through a row it derived itself: Celeste's
