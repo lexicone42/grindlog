@@ -231,6 +231,17 @@ approached 1:26:37 and was filed as the finish a minute before the real
 the segment is taken at its word. Between candidates tied on votes the one
 the board's arithmetic vouches for is tried first.
 
+**The start of a run.** The board appears with the rows carrying the
+previous run's times, and the first row's comparison stands just ahead of
+the total — by exactly the time he has left in it. A row's first reading is
+taken for a finish only when it is at or behind the clock (within 5 s); one
+ahead of it is the comparison (2026-10-01: Die Hard 2:06 and Pac-Mania 6:34
+filed three minutes in, the day before's times, while the real ones were
+4:27 and 5:30). And a baseline settles only on the reading with the most
+votes so far: a comparison read two ways ("9:31" twice, "9:11" four
+times) otherwise settled on whichever pair came first, and the right
+reading then looked like a change.
+
 **A skipped split.** A split he skips keeps its comparison on the board and
 then prints "-" for its times, which the reader returns as no cells at all;
 the next row's segment spans both games (Monster Party skipped on
