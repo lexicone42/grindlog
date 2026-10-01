@@ -133,6 +133,14 @@ const BACKFILL_PATIENCE_MS: i64 = SEGMENT_PATIENCE as i64 * 60_000;
 /// what this rejects.
 const AHEAD_OF_TOTAL_MS: i64 = 60_000;
 
+/// How far ahead of the total a row's FIRST reading may stand and still be
+/// taken for a finish rather than a comparison (`vote`, the empty-baseline
+/// shortcut). A finish is never ahead of the clock by more than the pass
+/// that read it; a comparison the runner is about to reach is ahead of it
+/// by exactly the time he has left (Die Hard's 2:06 with the total at 1:14
+/// on 2026-10-01, filed as a finish and the previous run's time).
+const FIRST_READING_AHEAD_MS: i64 = 5_000;
+
 /// How far behind the marathon total a cumulative may be and still be a game
 /// that has only just finished. Three minutes: the board is read once a
 /// minute, and the total is frozen through the pause between games anyway.
@@ -1230,9 +1238,10 @@ impl Marathon {
             // settle as the baseline and held the game up for eighteen
             // minutes — the misreading is minutes ahead of the total, and this
             // is exactly the test that tells them apart.
-            if !under
-                && ((alone && fresh && observed.is_some_and(|c| just_now(c, total_ms))) || chained)
-            {
+            let just_finished = |c: i64| {
+                just_now(c, total_ms) && total_ms.is_some_and(|t| c <= t + FIRST_READING_AHEAD_MS)
+            };
+            if !under && ((alone && fresh && observed.is_some_and(just_finished)) || chained) {
                 slot.baseline = Baseline::Empty;
             } else {
                 // The same time read with and without its hour digit is one
@@ -1267,7 +1276,18 @@ impl Marathon {
                 });
                 v.count += 1;
                 v.last_ms = at_ms;
-                if settled(v) {
+                // Settled only by the reading with the most votes so far: a
+                // comparison read two ways ("9:31" twice, "9:11" four times)
+                // otherwise settled on whichever pair came first, and the
+                // right reading then looked like a change — a comparison
+                // filed as a finish, vouched for by the row above's own
+                // comparison (Pac-Mania 2026-10-01).
+                let plurality = {
+                    let mine = v.count;
+                    slot.baseline_votes.values().all(|o| o.count <= mine)
+                };
+                let v = slot.baseline_votes.get(&observed).expect("just inserted");
+                if settled(v) && plurality {
                     slot.baseline = match observed {
                         Some(ms) => Baseline::Was(ms),
                         None => Baseline::Empty,
@@ -1736,7 +1756,13 @@ impl Marathon {
             // the arithmetic agrees with is the one to file, and the guards
             // are still weighing it). One settled somewhere else is the
             // misreading the row below has just given the lie to.
+            // A category row carries no completion, so filing it by
+            // derivation costs nothing even where harvest could have: its
+            // arithmetic may be impossible while the game row above still
+            // shows a comparison ahead of the clock.
+            let category = self.ordered() && i % 2 == 1;
             if arrived
+                && !category
                 && self.slots[i]
                     .cumulative_votes
                     .iter()
@@ -5558,6 +5584,102 @@ mod tests {
         assert_eq!(seen[0].game, "Moon Crystal");
         assert_eq!(seen[0].segment_ms, 19 * 60_000 + 11_000);
         assert_eq!(seen[0].cumulative_ms, 4 * h + 38 * 60_000 + 17_000);
+    }
+
+    /// The board appears with the tracker, at the start of a run: the rows
+    /// carry the previous run's times, the first row shows only its
+    /// comparison cumulative for a while, and the total stands just short of
+    /// it. That comparison is not a finish (2026-10-01: Die Hard 2:06 and
+    /// Pac-Mania 6:34 filed three minutes in, the day before's times; the
+    /// real ones were 4:27 and 5:30).
+    #[test]
+    fn a_rows_comparison_just_ahead_of_the_clock_at_the_start_is_not_a_finish() {
+        let mut m = race_tracker();
+        let pass = |die: &[&str], cat: &[&str], pac: &[&str]| {
+            board(
+                Some("Practice Run"),
+                vec![
+                    row("Die Hard", die),
+                    row("(Any% Beginner)", cat),
+                    row("Pac-Mania", pac),
+                    row("(Sandbox)", &["0:30", "9:41"]),
+                    row("Double Dragon II", &["21:25", "32:24"]),
+                    row("Moon Crystal", &["13:27", "3:56:20"]),
+                ],
+            )
+        };
+        let min = 60_000;
+        let mut t = 1_000;
+        let mut total = 70_000;
+        let mut seen = Vec::new();
+        // The first row shows its comparison alone, then with its segment,
+        // then with a growing delta; Pac-Mania's comparison reads two ways.
+        let die_cells: [&[&str]; 14] = [
+            &["2:06", "2:06"],
+            &["2:06"],
+            &["2:06"],
+            &["2:06", "2:06"],
+            &["2:06"],
+            &["2.7", "2:06", "2:06"],
+            &["2:06"],
+            &["2:06", "2:06"],
+            &["1:04", "2:06"],
+            &["1:16", "2:06", "2:06"],
+            &["1:36", "2:06", "2:06"],
+            &["1:46", "2:06", "2:06"],
+            &["+1:58", "2:06", "2:06"],
+            &["2:16", "2:06", "2:06"],
+        ];
+        for (i, die) in die_cells.iter().enumerate() {
+            let pac: &[&str] = if i % 4 == 2 {
+                &["6:34", "9:31"]
+            } else {
+                &["6:34", "9:11"]
+            };
+            seen.extend(m.observe(&pass(die, &["0:30", "2:36"], pac), t, Some(total)));
+            t += 10_000;
+            total += 10_000;
+        }
+        assert!(seen.is_empty(), "comparisons filed as finishes: {seen:?}");
+        // Die Hard done in 4:27; the transition runs, then Pac-Mania.
+        total = 4 * min + 30_000;
+        for i in 0..4 {
+            let delta = ["1:58", "2:10", "2:20", "2:21"][i];
+            seen.extend(m.observe(
+                &pass(
+                    &["4:27", "4:27"],
+                    &[delta, "0:30", "2:36"],
+                    &["6:34", "9:11"],
+                ),
+                t,
+                Some(total),
+            ));
+            t += min;
+            total += min;
+        }
+        let die: Vec<_> = seen.iter().filter(|c| c.game == "Die Hard").collect();
+        assert_eq!(die.len(), 1, "{seen:?}");
+        assert_eq!(die[0].cumulative_ms, 4 * min + 27_000);
+        assert!(seen.iter().all(|c| c.game != "Pac-Mania"), "{seen:?}");
+        // Pac-Mania done in 5:30 at 10:28, the total there.
+        total = 10 * min + 30_000;
+        for _ in 0..4 {
+            seen.extend(m.observe(
+                &pass(
+                    &["4:27", "4:27"],
+                    &["2:21", "0:30", "4:58"],
+                    &["5:30", "10:28"],
+                ),
+                t,
+                Some(total),
+            ));
+            t += min;
+            total += min;
+        }
+        let pac: Vec<_> = seen.iter().filter(|c| c.game == "Pac-Mania").collect();
+        assert_eq!(pac.len(), 1, "{seen:?}");
+        assert_eq!(pac[0].cumulative_ms, 10 * min + 28_000);
+        assert_eq!(pac[0].segment_ms, 5 * min + 30_000);
     }
 
     /// A finish at the comparison's own cumulative: Die Hard twenty-two
