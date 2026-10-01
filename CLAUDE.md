@@ -209,6 +209,13 @@ client (aws-lc, through rustls) compiles from source once per target dir.
 
 ## The glyph reader
 
+A learned reader can sit in front of it: `[timer] reader = "cnn"` reads the
+timer with the net in `src/cnn.rs` (weights `assets/timer_ocr.json`, trained by
+the sibling `../timer-ocr` project from the streamer's VODs; `src/cnn.rs` is a
+copy of its `net.rs` and `tiles.rs`), and the glyph reader and tesseract take
+only what it declines. See docs/detection.md, *Reading the timer with a
+learned net*.
+
 The timer is read by templates harvested from the streamer's own footage
 (`assets/glyphs.json`), with tesseract for the frames it declines. The
 session-close line in the log reports `glyph reader N read / M declined`;

@@ -734,6 +734,42 @@ channel's two themes. To retrain for another font, size or theme:
    `ngtwitchtimer glyphs boxes crop.png` shows how one crop is cut and
    scored.
 
+### Reading the timer with a learned net
+
+`reader = "cnn"` under `[timer]` puts a small convolutional net in front
+of both: it reads the frame, the glyph reader (when its templates are
+present) takes what it declines, and tesseract what the glyph reader
+declines in turn. The net is trained by the
+[timer-ocr](../../timer-ocr) project from the streamer's own VODs —
+tesseract labels the frames offline, the monotonic-timer constraint says
+which labels to believe, and twenty epochs on a GPU take a quarter of an
+hour — and exported as `assets/timer_ocr.json`: about 26k weights with
+batch norm folded in, and the slicing geometry beside them. `src/cnn.rs`
+is a copy of that project's `net.rs` and `tiles.rs` (keep them in step)
+and is the whole inference: no ML runtime, no tesseract on the timer
+path at all.
+
+The reader is indifferent to where the crop sits, how large the timer is
+drawn and what colour it is. It stretches the crop so its background is
+black and its ink white (the 25th percentile and the 99th), finds the
+digits' bounding box (the band of consecutive inked rows with the most
+ink, so a separator line or the text row under the timer cannot stretch
+it), and lays fixed slots off that box's right edge leftwards, scaled by
+its height — the timer is right-aligned and grows to the left, so the
+leftmost slots are blank until the minutes need them, and blank is a
+class. Each slot is resized to 24x32 and read; a slot blank between two
+that are not, ink against the crop's edge, no digit band, or any slot
+under 50% confidence declines the frame. The countdown's minus is a class
+too, dropped from the reading as tesseract and the glyph reader drop it.
+
+Measured on the two VODs it was built with (2026-08-25 and 2026-08-27,
+1080p60): on a VOD never trained on, every one of grindlog's 50 recorded
+runs found from the readings alone, none missed or invented, and on the
+three finished runs where its final time differed from grindlog's by
+40-120 ms the pixels sided with the net every time — tesseract's small
+hundredths again. `tests/fixtures/cnn/` holds real crops named by their
+reading, and a test reads them with the shipped weights.
+
 ### Finding the LiveSplit pane automatically
 
 `ngtwitchtimer locate` OCRs a whole frame (from the configured source, or

@@ -2221,8 +2221,23 @@ pub async fn run(cfg: Config) -> Result<()> {
     let pre = PreprocessCfg::from(&cfg.timer);
     // The purpose-built digit reader for the timer, when configured; it
     // declines frames it is unsure of, which then go to tesseract as before.
+    let cnn_reader = match cfg.timer.reader.as_str() {
+        "cnn" => {
+            let path = std::path::Path::new(&cfg.timer.cnn_weights);
+            let r = crate::cnn::CnnReader::load(path).with_context(|| {
+                format!("timer.reader = \"cnn\" needs weights at {}", path.display())
+            })?;
+            info!("timer reader: learned net from {}", path.display());
+            Some(r)
+        }
+        _ => None,
+    };
+    // With the learned reader in front, the glyph reader is the second
+    // opinion where its templates exist, and tesseract the last.
+    let glyph_optional =
+        cnn_reader.is_some() && std::path::Path::new(&cfg.timer.glyph_templates).exists();
     let glyph_reader = match cfg.timer.reader.as_str() {
-        "glyph" => {
+        "glyph" | "cnn" if cfg.timer.reader == "glyph" || glyph_optional => {
             let path = std::path::Path::new(&cfg.timer.glyph_templates);
             let gr =
                 crate::glyph::GlyphReader::load(path, cfg.timer.threshold).with_context(|| {
@@ -2234,8 +2249,8 @@ pub async fn run(cfg: Config) -> Result<()> {
             info!("timer reader: glyph templates from {}", path.display());
             Some(gr)
         }
-        "tesseract" => None,
-        other => anyhow::bail!("unknown timer.reader {other:?} (tesseract | glyph)"),
+        "tesseract" | "cnn" => None,
+        other => anyhow::bail!("unknown timer.reader {other:?} (tesseract | glyph | cnn)"),
     };
     let mut tracker = Tracker::new(cfg.detection.clone());
 
@@ -2368,6 +2383,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     // window pair is reset every few hundred frames to notice a theme or
     // font the templates do not cover.
     let (mut glyph_hits, mut glyph_declines) = (0u64, 0u64);
+    let (mut cnn_hits, mut cnn_declines) = (0u64, 0u64);
     let (mut glyph_win_hits, mut glyph_win_declines) = (0u64, 0u64);
     // Consecutive probe frames skipped as static; capped so a frozen timer
     // is still found.
@@ -2723,11 +2739,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                         warn!("failed to close session {id}: {e:#}");
                     } else {
                         info!(
-                            "session #{id} closed ({} of {} frames read, {} layout events, {} OCR passes skipped as static, glyph reader {} read / {} declined; identity {})",
+                            "session #{id} closed ({} of {} frames read, {} layout events, {} OCR passes skipped as static, cnn reader {} read / {} declined, glyph reader {} read / {} declined; identity {})",
                             health.parsed,
                             health.frames,
                             health.events.len(),
                             ocr_skipped,
+                            cnn_hits,
+                            cnn_declines,
                             glyph_hits,
                             glyph_declines,
                             pane_identity.tally().describe()
@@ -2819,11 +2837,29 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // parser will not take, which counts as a decline. Its boxes
                 // are in crop pixels, tesseract's in the upscaled image, so
                 // scale to match.
-                let glyph_hit = glyph_reader
+                // The learned reader first; the glyph reader only sees the
+                // frames it declines, and tesseract those the glyph reader
+                // declines in turn.
+                let cnn_hit = cnn_reader
                     .as_ref()
-                    .and_then(|gr| gr.read(&g))
+                    .and_then(|r| r.read(&g))
                     .filter(|rd| parse_timer_text(&rd.text).is_some());
-                if glyph_reader.is_some() {
+                if cnn_reader.is_some() {
+                    if cnn_hit.is_some() {
+                        cnn_hits += 1;
+                    } else {
+                        cnn_declines += 1;
+                    }
+                }
+                let glyph_hit = if cnn_hit.is_some() {
+                    None
+                } else {
+                    glyph_reader
+                        .as_ref()
+                        .and_then(|gr| gr.read(&g))
+                        .filter(|rd| parse_timer_text(&rd.text).is_some())
+                };
+                if glyph_reader.is_some() && cnn_hit.is_none() {
                     if glyph_hit.is_some() {
                         glyph_hits += 1;
                         glyph_win_hits += 1;
@@ -2856,8 +2892,14 @@ pub async fn run(cfg: Config) -> Result<()> {
                         glyph_win_declines = 0;
                     }
                 }
-                let ocr_result = match &glyph_hit {
-                    Some(rd) => {
+                let ocr_result = match (&cnn_hit, &glyph_hit) {
+                    (Some(rd), _) => {
+                        reader_used = "cnn";
+                        let up = pre.upscale.max(1);
+                        let (x, y, w, h) = rd.ink;
+                        Ok((rd.text.clone(), Some((x * up, y * up, w * up, h * up))))
+                    }
+                    (None, Some(rd)) => {
                         reader_used = "glyph";
                         let up = pre.upscale.max(1);
                         let x0 = rd.boxes.iter().map(|b| b.x).min().unwrap_or(0);
@@ -2869,7 +2911,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                             Some((x0 * up, y0 * up, (x1 - x0) * up, (y1 - y0) * up)),
                         ))
                     }
-                    None => {
+                    (None, None) => {
                         reader_used = "tess";
                         // The upscaled, thresholded image is tesseract's, and
                         // is built only when tesseract reads: the glyph reader
@@ -3085,32 +3127,45 @@ pub async fn run(cfg: Config) -> Result<()> {
                 let c = &mut cands[ci];
                 let crop = c.regs.timer;
                 let (png, proc, g) = read_timer(&union_bright, crop)?;
-                let glyph = glyph_reader.as_ref().map(|gr| gr.read_diag(&g));
-                let (rd, bbox) = match glyph {
-                    Some(Ok(r)) if parse_time(&r.text).is_some() => {
-                        reader_used = "glyph";
-                        // Only the box's left edge matters here: it is where
-                        // the ink search below starts.
-                        let up = pre.upscale.max(1);
-                        let x0 = r.boxes.iter().map(|b| b.x).min().unwrap_or(0);
-                        (r.text, Some((x0 * up, 0, 0, 0)))
-                    }
-                    // Nothing glyph-shaped at this position — no digit band,
-                    // or ink in a hundred pieces: the timer is not here, and
-                    // tesseract would only confirm it at a hundred times the
-                    // cost. A probe frame tries a dozen positions, and the
-                    // stretches with no timer on screen are long; with
-                    // tesseract at every one of them the bot fell behind the
-                    // stream. (Light digits on dark only: on an inverted
-                    // theme the reader sees the background as ink.)
-                    Some(Err(crate::glyph::Decline::Segmentation(_))) if pre.invert => {
-                        (String::new(), None)
-                    }
-                    _ => {
-                        reader_used = "tess";
-                        match ocr_engine.recognize_boxed(&png).await {
-                            Ok((t, b)) => (t.trim().to_string(), b),
-                            Err(_) => (String::new(), None),
+                let cnn = cnn_reader
+                    .as_ref()
+                    .and_then(|r| r.read(&g))
+                    .filter(|rd| parse_time(&rd.text).is_some());
+                let glyph = if cnn.is_some() {
+                    None
+                } else {
+                    glyph_reader.as_ref().map(|gr| gr.read_diag(&g))
+                };
+                let (rd, bbox) = if let Some(rd) = cnn {
+                    reader_used = "cnn";
+                    (rd.text, Some((rd.ink.0 * pre.upscale.max(1), 0, 0, 0)))
+                } else {
+                    match glyph {
+                        Some(Ok(r)) if parse_time(&r.text).is_some() => {
+                            reader_used = "glyph";
+                            // Only the box's left edge matters here: it is where
+                            // the ink search below starts.
+                            let up = pre.upscale.max(1);
+                            let x0 = r.boxes.iter().map(|b| b.x).min().unwrap_or(0);
+                            (r.text, Some((x0 * up, 0, 0, 0)))
+                        }
+                        // Nothing glyph-shaped at this position — no digit band,
+                        // or ink in a hundred pieces: the timer is not here, and
+                        // tesseract would only confirm it at a hundred times the
+                        // cost. A probe frame tries a dozen positions, and the
+                        // stretches with no timer on screen are long; with
+                        // tesseract at every one of them the bot fell behind the
+                        // stream. (Light digits on dark only: on an inverted
+                        // theme the reader sees the background as ink.)
+                        Some(Err(crate::glyph::Decline::Segmentation(_))) if pre.invert => {
+                            (String::new(), None)
+                        }
+                        _ => {
+                            reader_used = "tess";
+                            match ocr_engine.recognize_boxed(&png).await {
+                                Ok((t, b)) => (t.trim().to_string(), b),
+                                Err(_) => (String::new(), None),
+                            }
                         }
                     }
                 };

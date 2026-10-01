@@ -72,7 +72,7 @@ crop_h = 90
                                 #   glyph reader declines); first parse wins. Extra
                                 #   OCR only on frames that failed; useful when the
                                 #   streamer's themes want different cutoffs
-# reader = "tesseract"          # or "glyph": a purpose-built reader that matches
+# reader = "tesseract"          # or "cnn" (see cnn_weights), or "glyph": a purpose-built reader that matches
                                 #   each digit against templates harvested from
                                 #   the streamer's own footage; frames it declines
                                 #   go to tesseract, which also always reads the
@@ -80,6 +80,12 @@ crop_h = 90
                                 #   background only: on a dark-on-light timer it
                                 #   declines every frame. Retraining: docs/detection.md,
                                 #   "Reading the timer with templates"
+# cnn_weights = "assets/timer_ocr.json"  # weights for reader = "cnn": the learned
+                                #   reader the timer-ocr project trains from the
+                                #   streamer's own VODs (light digits on dark, any
+                                #   position or size); frames it declines go to the
+                                #   glyph reader when its templates exist, then
+                                #   tesseract
 # glyph_templates = "assets/glyphs.json"  # templates for the glyph reader (from
                                 #   `glyphs train`; the shipped file is trained on
                                 #   the reference channel's two themes). A relative
