@@ -73,14 +73,23 @@ pub struct InkBox {
     /// narrower than its cell when it is a 1.
     pub last_left: u32,
     pub last_right: u32,
+    /// Where the crop's usable area ends: the crop's edges, or the pane
+    /// border's columns where the crop reaches over them.
+    pub edge_left: u32,
+    pub edge_right: u32,
 }
 
 impl InkBox {
     fn height(&self) -> u32 {
         self.bottom - self.top
     }
-    fn clipped(&self, w: u32, h: u32) -> bool {
-        self.left <= 1 || self.top <= 1 || self.right >= w - 1 || self.bottom >= h - 1
+    fn clipped(&self, _w: u32, h: u32) -> bool {
+        // Ink in the first or last usable column, or the first or last row:
+        // a glyph that reaches the edge is cut by it.
+        self.left <= self.edge_left
+            || self.top == 0
+            || self.right >= self.edge_right
+            || self.bottom >= h
     }
 }
 
@@ -112,6 +121,26 @@ pub fn normalise(crop: &GrayImage) -> Option<GrayImage> {
 pub fn ink_box(norm: &GrayImage) -> Option<InkBox> {
     let (w, h) = norm.dimensions();
     let ink = |x: u32, y: u32| norm.get_pixel(x, y).0[0] >= 128;
+    // A column inked over nearly the whole crop is the pane's border, not a
+    // glyph: the crop ends there. Columns past the first such column on
+    // the right (or before the last on the left) are not looked at, and
+    // the border is where "cut by the edge" is measured from.
+    let full: Vec<bool> = (0..w)
+        .map(|x| (0..h).filter(|y| ink(x, *y)).count() as u32 * 10 >= h * 9)
+        .collect();
+    let x_lo = full
+        .iter()
+        .rposition(|f| *f)
+        .filter(|x| (*x as u32) < w / 2)
+        .map(|x| x as u32 + 1)
+        .unwrap_or(0);
+    let x_hi = full
+        .iter()
+        .position(|f| *f)
+        .filter(|x| (*x as u32) >= w / 2)
+        .map(|x| x as u32)
+        .unwrap_or(w);
+    let ink = |x: u32, y: u32| x >= x_lo && x < x_hi && ink(x, y);
     let mut rows = vec![0u32; h as usize];
     for y in 0..h {
         rows[y as usize] = (0..w).filter(|x| ink(*x, y)).count() as u32;
@@ -162,11 +191,14 @@ pub fn ink_box(norm: &GrayImage) -> Option<InkBox> {
     let sliver = ((bottom - top) / 10).max(3);
     while runs
         .last()
-        .is_some_and(|r| r.1 - r.0 < sliver && r.1 + 3 >= w)
+        .is_some_and(|r| r.1 - r.0 < sliver && r.1 + 3 >= x_hi)
     {
         runs.pop();
     }
-    while runs.first().is_some_and(|r| r.1 - r.0 < sliver && r.0 <= 3) {
+    while runs
+        .first()
+        .is_some_and(|r| r.1 - r.0 < sliver && r.0 <= x_lo + 3)
+    {
         runs.remove(0);
     }
     let (left, right) = (runs.first()?.0, runs.last()?.1);
@@ -181,6 +213,8 @@ pub fn ink_box(norm: &GrayImage) -> Option<InkBox> {
         bottom,
         last_left: last.0,
         last_right: last.1,
+        edge_left: x_lo,
+        edge_right: x_hi,
     })
 }
 
@@ -360,6 +394,30 @@ impl Weights {
     }
 }
 
+/// Is this a time the way LiveSplit prints one: `S.hh`, `M:SS.hh`,
+/// `MM:SS.hh` or `H:MM:SS.hh`, exactly two hundredths, every part after
+/// the first exactly two digits? The bot's own parser is forgiving of
+/// tesseract's damage; the net's slots are not damaged that way, and a
+/// reading outside the print is a slot that slipped.
+fn livesplit_print(text: &str) -> bool {
+    let Some((whole, frac)) = text.split_once('.') else {
+        return false;
+    };
+    if frac.len() != 2 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let parts: Vec<&str> = whole.split(':').collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return false;
+    }
+    parts.iter().enumerate().all(|(i, p)| {
+        !p.is_empty()
+            && p.len() <= 2
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && (i == 0 || (p.len() == 2 && p.parse::<u32>().is_ok_and(|v| v < 60)))
+    })
+}
+
 /// What the reader says about a crop.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reading {
@@ -410,8 +468,12 @@ impl CnnReader {
             return None;
         }
         let text = text.trim_start_matches('-').to_string();
-        // Slots read with confidence that do not spell a time are another
-        // overlay in the crop (a board's cumulative column), not the timer.
+        // Slots read with confidence that do not spell a time as LiveSplit
+        // prints one are another overlay in the crop (a board's cumulative
+        // column), or a slot that slipped a cell ("27.391"): not the timer.
+        if !livesplit_print(&text) {
+            return None;
+        }
         crate::timeparse::parse_timer_text(&text)?;
         Some(Reading {
             text,
@@ -449,11 +511,25 @@ mod tests {
                     bottom: y + 40,
                     last_left: x,
                     last_right: x + 100,
+                    edge_left: 0,
+                    edge_right: 200,
                 },
                 "{x} {y} {b}"
             );
         }
         assert!(normalise(&GrayImage::from_pixel(50, 20, Luma([30]))).is_none());
+    }
+
+    #[test]
+    fn only_a_time_as_livesplit_prints_it_is_a_reading() {
+        for ok in ["5.00", "34.56", "9:30.77", "12:34.56", "1:02:03.45", "0.20"] {
+            assert!(livesplit_print(ok), "{ok}");
+        }
+        for bad in [
+            "27.391", "3:0612", "1:60.00", "1:2.00", "12:34.5", "", "31383400", "5",
+        ] {
+            assert!(!livesplit_print(bad), "{bad}");
+        }
     }
 
     #[test]
