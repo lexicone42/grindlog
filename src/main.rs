@@ -13,6 +13,7 @@ mod board;
 mod calibrate;
 mod capture;
 mod chat;
+mod cnn;
 mod config;
 mod counter;
 mod db;

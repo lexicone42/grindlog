@@ -462,15 +462,22 @@ pub struct TimerCfg {
     /// 75), and this covers both.
     #[serde(default)]
     pub retry_thresholds: Vec<u8>,
-    /// How the timer's digits are read: "tesseract" (general OCR), or
+    /// How the timer's digits are read: "tesseract" (general OCR);
     /// "glyph" — a purpose-built reader matching each glyph against templates
     /// harvested from this streamer's own footage (`ngtwitchtimer glyphs
-    /// train`), with tesseract as the fallback when it declines a frame.
+    /// train`), with tesseract as the fallback when it declines a frame; or
+    /// "cnn" — the learned reader (`cnn_weights`), then the glyph reader
+    /// where its templates are present, then tesseract.
     #[serde(default = "d_reader")]
     pub reader: String,
     /// Template file for the glyph reader.
     #[serde(default = "d_glyph_templates")]
     pub glyph_templates: String,
+    /// Weights for the learned reader (`reader = "cnn"`): the net the
+    /// timer-ocr project trains from this streamer's VODs, exported with
+    /// its slicing geometry.
+    #[serde(default = "d_cnn_weights")]
+    pub cnn_weights: String,
     /// true when the timer is light text on a dark background (the usual
     /// LiveSplit look); produces black digits on white for tesseract.
     #[serde(default = "d_true")]
@@ -488,6 +495,7 @@ impl Default for TimerCfg {
             threshold: d_threshold(),
             reader: d_reader(),
             glyph_templates: d_glyph_templates(),
+            cnn_weights: d_cnn_weights(),
             auto_threshold: false,
             retry_thresholds: Vec::new(),
             invert: true,
@@ -939,6 +947,9 @@ fn d_reader() -> String {
 }
 fn d_glyph_templates() -> String {
     "assets/glyphs.json".into()
+}
+fn d_cnn_weights() -> String {
+    "assets/timer_ocr.json".into()
 }
 fn d_threshold() -> u8 {
     140
