@@ -249,7 +249,7 @@ impl Fingerprint {
                 .map(|c| c.to_ascii_lowercase())
                 .collect()
         };
-        let (Some(seen), want) = (read.map(&norm), norm(&self.category)) else {
+        let (Some(seen), want) = (read.map(norm), norm(&self.category)) else {
             return;
         };
         if seen.is_empty() || want.is_empty() {
