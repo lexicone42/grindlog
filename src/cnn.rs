@@ -103,14 +103,26 @@ pub fn normalise(crop: &GrayImage) -> Option<GrayImage> {
         return None;
     }
     v.sort_unstable();
-    let bg = v[v.len() / 4] as f32;
-    let peak = v[v.len() * 99 / 100] as f32;
+    // Which way round is the ink? The median is the background; the ink is
+    // whichever tail reaches further from it. Dark digits on a light pane
+    // (the race timer) are turned over so that everything after this sees
+    // light ink on dark.
+    let median = v[v.len() / 2] as f32;
+    let lo = v[v.len() / 100] as f32;
+    let hi = v[v.len() * 99 / 100] as f32;
+    let dark_ink = median - lo > hi - median;
+    let (bg, peak) = if dark_ink {
+        (255.0 - v[v.len() * 3 / 4] as f32, 255.0 - lo)
+    } else {
+        (v[v.len() / 4] as f32, hi)
+    };
     if peak - bg < 40.0 {
         return None;
     }
     let scale = 255.0 / (peak - bg);
     Some(GrayImage::from_fn(crop.width(), crop.height(), |x, y| {
         let p = crop.get_pixel(x, y).0[0] as f32;
+        let p = if dark_ink { 255.0 - p } else { p };
         Luma([((p - bg) * scale).clamp(0.0, 255.0) as u8])
     }))
 }

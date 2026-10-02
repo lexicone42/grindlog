@@ -193,6 +193,12 @@ pub struct LayoutCfg {
     pub attempts_counter: Option<Rect>,
     #[serde(default)]
     pub lifetime_sob: Option<Rect>,
+    /// Weights for the learned reader on this layout's timer, where it is
+    /// drawn differently from the base layout's (the race timer: another
+    /// size, dark on light, hours). The same net with its own slicing
+    /// geometry; omitted, the layout uses `[timer] cnn_weights`.
+    #[serde(default)]
+    pub cnn_weights: Option<String>,
 }
 
 /// A crop with threshold/invert settings for a static text row of the

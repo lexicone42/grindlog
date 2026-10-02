@@ -2221,17 +2221,40 @@ pub async fn run(cfg: Config) -> Result<()> {
     let pre = PreprocessCfg::from(&cfg.timer);
     // The purpose-built digit reader for the timer, when configured; it
     // declines frames it is unsure of, which then go to tesseract as before.
-    let cnn_reader = match cfg.timer.reader.as_str() {
-        "cnn" => {
-            let path = std::path::Path::new(&cfg.timer.cnn_weights);
+    // One learned reader per layout (index 0 the base layout, then
+    // `[[layouts]]` in order): the base weights, or the layout's own where
+    // its timer is drawn differently.
+    let cnn_readers: Vec<Option<crate::cnn::CnnReader>> = if cfg.timer.reader == "cnn" {
+        let mut readers = Vec::with_capacity(cfg.layouts.len() + 1);
+        let mut paths = vec![cfg.timer.cnn_weights.clone()];
+        paths.extend(cfg.layouts.iter().map(|l| {
+            l.cnn_weights
+                .clone()
+                .unwrap_or_else(|| cfg.timer.cnn_weights.clone())
+        }));
+        for (i, p) in paths.iter().enumerate() {
+            let path = std::path::Path::new(p);
             let r = crate::cnn::CnnReader::load(path).with_context(|| {
                 format!("timer.reader = \"cnn\" needs weights at {}", path.display())
             })?;
-            info!("timer reader: learned net from {}", path.display());
-            Some(r)
+            if i == 0 || cfg.layouts[i - 1].cnn_weights.is_some() {
+                info!(
+                    "timer reader: learned net from {} ({})",
+                    path.display(),
+                    if i == 0 {
+                        "base layout"
+                    } else {
+                        cfg.layouts[i - 1].name.as_str()
+                    }
+                );
+            }
+            readers.push(Some(r));
         }
-        _ => None,
+        readers
+    } else {
+        (0..=cfg.layouts.len()).map(|_| None).collect()
     };
+    let cnn_reader = cnn_readers[0].as_ref();
     // With the learned reader in front, the glyph reader is the second
     // opinion where its templates exist, and tesseract the last.
     let glyph_optional =
@@ -2840,8 +2863,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // The learned reader first; the glyph reader only sees the
                 // frames it declines, and tesseract those the glyph reader
                 // declines in turn.
+                let cnn_reader = cnn_readers.get(active_layout).and_then(|r| r.as_ref());
                 let cnn_hit = cnn_reader
-                    .as_ref()
                     .and_then(|r| r.read(&g))
                     .filter(|rd| parse_timer_text(&rd.text).is_some());
                 if cnn_reader.is_some() {
@@ -3127,8 +3150,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                 let c = &mut cands[ci];
                 let crop = c.regs.timer;
                 let (png, proc, g) = read_timer(&union_bright, crop)?;
-                let cnn = cnn_reader
-                    .as_ref()
+                let cnn = cnn_readers
+                    .get(c.layout)
+                    .and_then(|r| r.as_ref())
                     .and_then(|r| r.read(&g))
                     .filter(|rd| parse_time(&rd.text).is_some());
                 let glyph = if cnn.is_some() {
