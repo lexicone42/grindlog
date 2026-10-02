@@ -130,7 +130,7 @@ pub fn normalise(crop: &GrayImage) -> Option<GrayImage> {
 /// The digits' bounding box in a normalised crop: the band of consecutive
 /// inked rows with the most ink (so a separator line or the text row under
 /// the timer cannot stretch it), and that band's inked columns.
-pub fn ink_box(norm: &GrayImage) -> Option<InkBox> {
+pub fn ink_box(norm: &GrayImage, expect: Option<u32>) -> Option<InkBox> {
     let (w, h) = norm.dimensions();
     let ink = |x: u32, y: u32| norm.get_pixel(x, y).0[0] >= 128;
     // A column inked over nearly the whole crop is the pane's border, not a
@@ -156,6 +156,11 @@ pub fn ink_box(norm: &GrayImage) -> Option<InkBox> {
     let mut rows = vec![0u32; h as usize];
     for y in 0..h {
         rows[y as usize] = (0..w).filter(|x| ink(*x, y)).count() as u32;
+        // A row inked nearly edge to edge is a bar or a pane's edge, not
+        // text (the dark pane above the race timer, turned over).
+        if rows[y as usize] * 10 >= (x_hi - x_lo) * 9 {
+            rows[y as usize] = 0;
+        }
     }
     let mut bands: Vec<(u32, u32, u64)> = Vec::new();
     let mut y = 0;
@@ -176,10 +181,29 @@ pub fn ink_box(norm: &GrayImage) -> Option<InkBox> {
         }
         bands.push((top, last + 1, sum));
     }
-    let (top, bottom, _) = bands
+    let (mut top, mut bottom, _) = bands
         .into_iter()
         .filter(|b| b.1 - b.0 >= 8)
         .max_by_key(|b| b.2)?;
+    // Two rows of text one above the other touch through their
+    // anti-aliasing (the race total and the segment timer under it). Where
+    // the band is taller than the digits are known to be (by more than 15%),
+    // it is split
+    // at its thinnest interior row and the fuller side kept.
+    if let Some(e) = expect {
+        if (bottom - top) * 20 > e * 23 {
+            let (lo, hi) = (top + (bottom - top) / 5, bottom - (bottom - top) / 5);
+            if let Some(cut) = (lo..hi).min_by_key(|y| rows[*y as usize]) {
+                let above: u64 = (top..cut).map(|y| rows[y as usize] as u64).sum();
+                let below: u64 = (cut + 1..bottom).map(|y| rows[y as usize] as u64).sum();
+                if above >= below {
+                    bottom = cut;
+                } else {
+                    top = cut + 1;
+                }
+            }
+        }
+    }
     // The band's glyphs as runs of inked columns, a run ending at a gap of
     // two empty columns or more (the point and the colon are glyphs of
     // their own).
@@ -234,7 +258,7 @@ pub fn ink_box(norm: &GrayImage) -> Option<InkBox> {
 /// None with no digit band, or one against the crop's edge.
 pub fn tiles_ink(norm: &GrayImage, geo: &Geometry) -> Option<(Vec<GrayImage>, InkBox)> {
     let (w, h) = norm.dimensions();
-    let bx = ink_box(norm)?;
+    let bx = ink_box(norm, Some(geo.band_ref))?;
     if bx.clipped(w, h) {
         return None;
     }
@@ -513,7 +537,7 @@ mod tests {
     fn the_ink_box_is_the_digits_wherever_they_sit_and_however_dim() {
         for (x, y, b) in [(40, 10, 220u8), (90, 25, 90u8)] {
             let n = normalise(&crop((x, y, 100, 40), b)).unwrap();
-            let bx = ink_box(&n).unwrap();
+            let bx = ink_box(&n, None).unwrap();
             assert_eq!(
                 bx,
                 InkBox {
@@ -556,8 +580,8 @@ mod tests {
         assert_eq!(tiles.len(), 3);
         assert!(tiles.iter().all(|t| t.dimensions() == (24, 32)));
         assert_eq!(bx.right, 140);
-        let n = normalise(&crop((40, 3, 100, 74), 220)).unwrap();
-        assert_eq!(tiles_ink(&n, &geo).unwrap().1.height(), 74);
+        let n = normalise(&crop((40, 3, 100, 44), 220)).unwrap();
+        assert_eq!(tiles_ink(&n, &geo).unwrap().1.height(), 44);
         let n = normalise(&crop((0, 10, 100, 40), 220)).unwrap();
         assert!(tiles_ink(&n, &geo).is_none());
     }
