@@ -133,9 +133,17 @@ for id in "${ids[@]}"; do
     # Man 6 on 2026-09-28 nineteen minutes after the replay did, the same
     # 665 s in the same category on the same day. Two different attempts
     # of one game do not finish in the same time on the same day.
+    # A board row is one game per run, so for a run category the replay's
+    # row for a game supersedes any live row of that game on the day: a
+    # comparison the live tracker filed as a finish three minutes before the
+    # real one (Pac-Mania 6:34 at 09:57, the real 5:30 at 10:05, 2026-10-01)
+    # overlaps nothing and would otherwise stay beside it.
     OVERLAPS="EXISTS (SELECT 1 FROM src.runs r WHERE r.game = runs.game AND r.category = runs.category
                         AND ((r.started_at_ms < runs.ended_at_ms AND r.ended_at_ms > runs.started_at_ms)
                              OR (r.final_time_ms IS NOT NULL AND r.final_time_ms = runs.final_time_ms
+                                 AND date(r.started_at_ms/1000,'unixepoch','localtime')
+                                   = date(runs.started_at_ms/1000,'unixepoch','localtime'))
+                             OR (lower(r.category) LIKE '% run'
                                  AND date(r.started_at_ms/1000,'unixepoch','localtime')
                                    = date(runs.started_at_ms/1000,'unixepoch','localtime'))))"
     kept=$(q "$LIVE" "ATTACH DATABASE '$srcabs' AS src; SELECT group_concat(game || ' ' || time(started_at_ms/1000,'unixepoch','localtime'), ', ') FROM runs WHERE $LIVE_ROWS AND NOT $OVERLAPS;")

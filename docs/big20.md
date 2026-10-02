@@ -62,7 +62,11 @@ VOD's span before the insert, so the replay's pass lands whole. A live row
 goes only where the replay has *the same run*: a run of the same game and
 category overlapping it in time, or the same finish (same final time, same
 category, same day — a board row is dated from when the tracker filed it,
-and the two passes can file one finish twenty minutes apart). A live row
+and the two passes can file one finish twenty minutes apart). For a run category
+(a board row is one game per run) the replay's row for a game supersedes
+any live row of that game on the day, overlapping or not: a comparison the
+live tracker filed as a finish three minutes before the real one overlaps
+nothing and would otherwise stay beside it. A live row
 the replay has no counterpart for stays, and is named in the output; a
 replay that lost the layout after the board (2026-09-28: it saw two of the
 four Steel Legion attempts that followed the run) must not take the live
