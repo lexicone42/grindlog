@@ -280,25 +280,37 @@ else
   check tracker-churn 0 "$replaced rebuild(s) in the last hour"
 fi
 if [ "$open" -gt 0 ] && command -v jq >/dev/null; then
-  state=$(sqlite3 -readonly -cmd '.timeout 5000' "$DB" "select coalesce(events,'[]') from sessions where source='hls' and ended_at_ms is null order by started_at_ms desc limit 1" 2>/dev/null \
-    | jq -r '[.[] | select(.k == "marathon") | select(.d | test(" (started|resumed|board replaced|ended)$"))] | last | .d // ""' 2>/dev/null)
+  events=$(sqlite3 -readonly -cmd '.timeout 5000' "$DB" "select coalesce(events,'[]') from sessions where source='hls' and ended_at_ms is null order by started_at_ms desc limit 1" 2>/dev/null)
+  # The event in force, when it began, and what it has filed since: all of
+  # it from this session's own events, never from the log, whose last
+  # "marathon row" line may be yesterday's (the race board up before the
+  # start read as "last completion 1440 min ago", naming the previous
+  # day's Moon Crystal).
+  read -r state_t state <<<"$(jq -r '[.[] | select(.k == "marathon") | select(.d | test(" (started|resumed|board replaced|ended)$"))] | last | "\(.t // 0) \(.d // "")"' <<<"$events" 2>/dev/null)"
+  last_done_t=$(jq -r --argjson since "${state_t:-0}" '[.[] | select(.k == "marathon" and .t >= $since) | select(.d | test(" (started|resumed|board replaced|ended)$") | not) | .t] | max // 0' <<<"$events" 2>/dev/null)
   case "$state" in
     *" started"|*" resumed"|*" board replaced")
-      last_row=$(plain | awk '/marathon row/ {t=$1} END {print t}')
-      lr=$(date -d "${last_row:-1970-01-01T00:00:00Z}" +%s 2>/dev/null || echo 0)
+      lr=$(( (last_done_t > state_t ? last_done_t : state_t) / 1000 ))
       since_row=$((now - lr))
       if [ "$since_row" -gt 3600 ]; then
-        check tracker-stall 1 "a marathon is in force (${state% started}) and the last completion was $((since_row / 60)) min ago"
+        check tracker-stall 1 "a marathon is in force ($state) and nothing has been filed for $((since_row / 60)) min"
       else
-        check tracker-stall 0 "marathon in force, last completion $((since_row / 60)) min ago"
+        check tracker-stall 0 "marathon in force, last filed or started $((since_row / 60)) min ago"
       fi
       # The runner's row: the tracker says "runner on row N (game)" as it
       # moves down an ordered board, and nothing under that row is filed.
       # A row that has not moved in 45 minutes while the run is in force —
       # his longest game is under that — is a cursor stuck behind a refused
       # row, and every game after it is being held back.
-      runner=$(plain | awk '/marathon: runner on row/ {t=$1; l=$0} END {if (l) {sub(/.*runner on row /, "", l); sub(/\): .*/, ")", l); print t " " l}}')
-      if [ -n "$runner" ]; then
+      # Only this event's lines, and not once the runner's own game is
+      # filed: that is the last game done, and the runner stays there.
+      state_iso=$(date -u -d "@$((state_t / 1000))" +%Y-%m-%dT%H:%M:%S)
+      runner=$(plain | awk -v since="$state_iso" '$1 >= since && /marathon: runner on row/ {t=$1; l=$0} END {if (l) {sub(/.*runner on row /, "", l); sub(/\): .*/, ")", l); print t " " l}}')
+      runner_game=$(sed -n 's/.*(\(.*\))$/\1/p' <<<"$runner")
+      runner_done=$(jq -r --argjson since "${state_t:-0}" --arg g "$runner_game" '[.[] | select(.k == "marathon" and .t >= $since and $g != "" and (.d | startswith($g + " ")))] | length' <<<"$events" 2>/dev/null)
+      if [ -n "$runner" ] && [ "${runner_done:-0}" -gt 0 ]; then
+        check tracker-runner 0 "the runner's game ($runner_game) is filed: the run is done"
+      elif [ -n "$runner" ]; then
         rt=$(date -d "${runner%% *}" +%s 2>/dev/null || echo 0)
         since_runner=$((now - rt))
         if [ "$since_runner" -gt 2700 ]; then
@@ -307,7 +319,7 @@ if [ "$open" -gt 0 ] && command -v jq >/dev/null; then
           check tracker-runner 0 "runner on row ${runner#* }, $((since_runner / 60)) min ago"
         fi
       else
-        check tracker-runner 0 "no runner's row logged yet"
+        check tracker-runner 0 "no runner's row logged since the event began"
       fi
       # The running total, read under the board lock. A pane the race scene
       # moved a few pixels still locks as the board, while the total's crop
@@ -337,13 +349,15 @@ fi
 # The board prints the previous run's times on the rows not yet reached, and
 # a comparison filed as a finish is exactly that; the tracker warns as it
 # files one ("is the previous run's time to the second"), and this counts
-# today's rows under every board [[games]] name against the run before. One
+# today's rows under every board [[games]] name against the run before —
+# the one run before, as the tracker's own check does: against any earlier
+# run, a dozen practice runs in, chance collisions raised the alarm. One
 # is a repeat that happens; two is a day to replay (docs/big20.md).
 boards=$(awk '/^\[\[/{if(m&&n)print n; n="";m=0} /^name = /{n=$0} /^mode = "board"/{m=1} END{if(m&&n)print n}' live.toml 2>/dev/null \
          | sed 's/^name = "\([^"]*\)"$/\1/' | sed "s/'/''/g; s/.*/'&'/" | paste -sd, -)
 if [ -n "$boards" ]; then
   day_ms=$(($(date -d 'today 00:00' +%s) * 1000))
-  echoes=$(sqlite3 -readonly -cmd '.timeout 5000' "$DB" "select count(*) from runs r where r.category in ($boards) and r.started_at_ms >= $day_ms and r.outcome = 'finished' and r.final_time_ms is not null and exists (select 1 from runs p where p.game = r.game and p.category = r.category and p.outcome = 'finished' and p.final_time_ms = r.final_time_ms and p.started_at_ms < r.started_at_ms - 3600000)" 2>/dev/null || echo 0)
+  echoes=$(sqlite3 -readonly -cmd '.timeout 5000' "$DB" "select count(*) from runs r where r.category in ($boards) and r.started_at_ms >= $day_ms and r.outcome = 'finished' and r.final_time_ms is not null and r.final_time_ms = (select p.final_time_ms from runs p where p.game = r.game and p.category = r.category and p.outcome = 'finished' and p.final_time_ms is not null and p.started_at_ms < r.started_at_ms - 3600000 order by p.started_at_ms desc limit 1)" 2>/dev/null || echo 0)
   if [ "${echoes:-0}" -ge 2 ]; then
     check tracker-echo 1 "$echoes of today's board rows carry the previous run's time to the second: comparisons filed as finishes? replay the day (docs/big20.md)"
   else
