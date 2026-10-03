@@ -87,7 +87,7 @@ for id in "$@"; do
   if nice -n "$prio" "$bin" --config "$cfg" run > "$out/log-$id.txt" 2>&1; then
     sed -i 's/\x1b\[[0-9;]*m//g' "$out/log-$id.txt"
     sqlite3 "$out/vod-$id.db" \
-      "SELECT 'VOD $id: '||COUNT(*)||' run(s) of '||COUNT(DISTINCT game)||' game(s): '
+      "SELECT 'VOD $id: '||SUM(n)||' run(s) of '||COUNT(*)||' game(s): '
        ||GROUP_CONCAT(g,', ') FROM (SELECT game g, COUNT(*) n FROM runs GROUP BY game);" \
       2>/dev/null || echo "VOD $id: no runs"
   else
