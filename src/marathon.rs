@@ -2707,20 +2707,102 @@ pub fn replay(
     passes: &[Pass],
     restart_at: Option<usize>,
 ) -> (Vec<Completion>, String) {
+    let r = replay_disrupted(
+        cfg,
+        passes,
+        restart_at.map(|at_pass| Disruption {
+            at_pass,
+            gap_ms: 0,
+            kind: DisruptKind::Crash,
+        }),
+    );
+    (r.out, r.summary)
+}
+
+/// What can happen to the bot in the middle of a broadcast, as the run loop
+/// meets it. `audit --disrupt` replays every captured day with one of these
+/// at every pass and compares what is filed with the undisturbed replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisruptKind {
+    /// The stream blips and ffmpeg reconnects: the tracker is kept and
+    /// only the passes in the gap go unseen.
+    Reconnect,
+    /// Twitch reports the channel offline (`CaptureEvent::StreamOffline`):
+    /// the marathon is closed, what the close returns is filed, and the
+    /// event is taken up again from the database when the board returns.
+    Offline,
+    /// The process dies (a panic, an OOM, `kill -9`): nothing is closed and
+    /// the restarted bot takes the event up from the database.
+    Crash,
+    /// SIGTERM (a rollout, a plain `kill`): the shutdown path closes the
+    /// marathon and files what the close returns, then the supervisor
+    /// restarts the bot, which takes the event up from the database.
+    Sigterm,
+}
+
+impl DisruptKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "reconnect" => Some(Self::Reconnect),
+            "offline" => Some(Self::Offline),
+            "crash" => Some(Self::Crash),
+            "sigterm" => Some(Self::Sigterm),
+            _ => None,
+        }
+    }
+}
+
+/// One disruption: at pass `at_pass`, lasting `gap_ms` of broadcast time
+/// in which no pass is seen.
+#[derive(Debug, Clone, Copy)]
+pub struct Disruption {
+    pub at_pass: usize,
+    pub gap_ms: i64,
+    pub kind: DisruptKind,
+}
+
+/// What a replay filed. `at_disruption` is the range of `out` the close at
+/// the disruption filed (empty unless the kind closes the marathon).
+pub struct Replayed {
+    pub out: Vec<Completion>,
+    pub at_disruption: std::ops::Range<usize>,
+    pub summary: String,
+}
+
+/// [`replay`] with a disruption, modelled the way the run loop meets it.
+pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruption>) -> Replayed {
     let mut state: Option<Marathon> = None;
     let mut misses: u32 = 0;
     let mut hits: u32 = 0;
     // The database: every cumulative recorded for this event so far.
     let mut recorded: Vec<i64> = Vec::new();
     let mut out = Vec::new();
+    let mut at_disruption = 0..0;
     let mut verdicts = [0u32; 3];
+    let resume_ms = disrupt.and_then(|d| passes.get(d.at_pass).map(|p| p.at_ms + d.gap_ms));
     for (n, p) in passes.iter().enumerate() {
-        if restart_at == Some(n) {
-            // The process goes down and comes back. Everything it had
-            // learned about the board goes with it; the database stays.
-            state = None;
-            misses = 0;
-            hits = 0;
+        if let Some(d) = disrupt.filter(|d| d.at_pass == n) {
+            if matches!(d.kind, DisruptKind::Offline | DisruptKind::Sigterm) {
+                if let Some(mut m) = state.take() {
+                    let from = out.len();
+                    for c in m.close(p.at_ms) {
+                        recorded.push(c.cumulative_ms);
+                        out.push(c);
+                    }
+                    at_disruption = from..out.len();
+                }
+            }
+            if d.kind != DisruptKind::Reconnect {
+                // The process goes down and comes back, or the stream does.
+                // Everything it had learned about the board goes with it;
+                // the database stays.
+                state = None;
+                misses = 0;
+                hits = 0;
+            }
+        }
+        if disrupt.is_some_and(|d| n >= d.at_pass) && resume_ms.is_some_and(|r| p.at_ms < r) {
+            continue;
         }
         match classify(&p.board, cfg, state.as_ref()) {
             // Not evidence of anything: a marathon in force keeps reading the
@@ -2782,8 +2864,16 @@ pub fn replay(
         verdicts[2],
         verdicts[0],
         verdicts[1],
-        match restart_at {
-            Some(n) => format!(", restarted at pass {n}"),
+        match disrupt {
+            Some(d) if d.kind == DisruptKind::Crash && d.gap_ms == 0 => {
+                format!(", restarted at pass {}", d.at_pass)
+            }
+            Some(d) => format!(
+                ", {:?} at pass {} for {} s",
+                d.kind,
+                d.at_pass,
+                d.gap_ms / 1000
+            ),
             None => String::new(),
         },
         match &state {
@@ -2791,7 +2881,11 @@ pub fn replay(
             None => "no marathon in force at the end".to_string(),
         }
     );
-    (out, summary)
+    Replayed {
+        out,
+        at_disruption,
+        summary,
+    }
 }
 
 #[cfg(test)]

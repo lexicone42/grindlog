@@ -61,7 +61,8 @@ use anyhow::{Context, Result};
 use crate::board::{game_matches, Board, BoardRow};
 use crate::config::{Config, GameMode};
 use crate::marathon::{
-    clean_name, replay, row_cumulative_ms, Completion, Pass, AGREE, AGREE_SPREAD_MS,
+    clean_name, replay, replay_disrupted, row_cumulative_ms, Completion, DisruptKind, Disruption,
+    Pass, AGREE, AGREE_SPREAD_MS,
 };
 use crate::roster::Rosters;
 use crate::timeparse::format_ms_seconds;
@@ -234,6 +235,204 @@ fn rosters_of(cfg: &Config) -> Rosters {
 }
 
 /// Every broadcast the capture directory holds, oldest first.
+/// What `audit --disrupt` sweeps: one kind of disruption, how long the
+/// broadcast is unseen, every `step`-th pass, optionally one day or one pass.
+pub struct DisruptSpec {
+    pub kind: DisruptKind,
+    pub gap_ms: i64,
+    pub step: usize,
+    pub only_vod: Option<String>,
+    pub at_pass: Option<usize>,
+}
+
+/// A disruption at every pass of every captured day, each replay compared
+/// slot by slot with the same day replayed undisturbed. The reference is the
+/// undisturbed replay, not the truth: what this measures is what the
+/// disruption costs. One line per pass that costs anything:
+///
+///   DISRUPT <day> pass=<n> t=<s> total=<s> LOST 39:14180/807 WRONG ...
+///
+/// LOST a row the undisturbed replay files and this one does not; WRONG a
+/// row filed more than 1.5 s off it; DUP a row filed twice; EXTRA a row the
+/// undisturbed replay does not file. "(close)" marks a row filed by the
+/// close at the disruption. Then one line per day:
+///
+///   DAY <day> kind=offline gap=120 points=263 bad=44 lost=41 wrong=3 dup=0 extra=2
+///
+/// With `at_pass`, the rows each replay files are printed as well.
+pub fn disrupt(cfg: &Config, dir: &Path, spec: &DisruptSpec) -> Result<()> {
+    for vod in captured_vods(dir)? {
+        if spec.only_vod.as_deref().is_some_and(|o| o != vod) {
+            continue;
+        }
+        let passes = passes_from_logs(dir, &vod)?;
+        if passes.is_empty() {
+            continue;
+        }
+        let base = replay_disrupted(cfg, &passes, None);
+        let want: std::collections::BTreeMap<usize, (i64, i64)> = base
+            .out
+            .iter()
+            .map(|c| (c.slot, (c.cumulative_ms, c.segment_ms)))
+            .collect();
+        let points: Vec<usize> = match spec.at_pass {
+            Some(n) => vec![n],
+            None => (1..passes.len()).step_by(spec.step.max(1)).collect(),
+        };
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let chunk = points.len().div_ceil(threads).max(1);
+        let mut lines: Vec<(usize, Vec<String>, [usize; 4])> = std::thread::scope(|s| {
+            let handles: Vec<_> = points
+                .chunks(chunk)
+                .map(|ks| {
+                    let (passes, want) = (&passes, &want);
+                    s.spawn(move || {
+                        ks.iter()
+                            .map(|&k| {
+                                let got = replay_disrupted(
+                                    cfg,
+                                    passes,
+                                    Some(Disruption {
+                                        at_pass: k,
+                                        gap_ms: spec.gap_ms,
+                                        kind: spec.kind,
+                                    }),
+                                );
+                                let (notes, counts) = compare(want, &got);
+                                (k, notes, counts, got)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("a disrupted replay panicked"))
+                .map(|(k, notes, counts, got)| {
+                    if spec.at_pass.is_some() {
+                        for (i, c) in got.out.iter().enumerate() {
+                            println!(
+                                "FILED {vod} pass={k} {}:{}/{}{}{}",
+                                c.slot + 1,
+                                c.cumulative_ms / 1000,
+                                c.segment_ms / 1000,
+                                if got.at_disruption.contains(&i) {
+                                    " (close)"
+                                } else {
+                                    ""
+                                },
+                                if c.backfilled { " (backfilled)" } else { "" },
+                            );
+                        }
+                        println!("SUMMARY {vod} pass={k} {}", got.summary);
+                    }
+                    (k, notes, counts)
+                })
+                .collect()
+        });
+        lines.sort_by_key(|l| l.0);
+        let t0 = passes[0].at_ms;
+        let mut bad = 0;
+        let mut sum = [0usize; 4];
+        for (k, notes, counts) in &lines {
+            if notes.is_empty() {
+                continue;
+            }
+            bad += 1;
+            for j in 0..4 {
+                sum[j] += counts[j];
+            }
+            println!(
+                "DISRUPT {vod} pass={k} t={} total={} {}",
+                (passes[*k].at_ms - t0) / 1000,
+                passes[*k].total_ms.map_or(-1, |t| t / 1000),
+                notes.join(" ")
+            );
+        }
+        println!(
+            "DAY {vod} kind={} gap={} points={} bad={bad} lost={} wrong={} dup={} extra={}",
+            format!("{:?}", spec.kind).to_lowercase(),
+            spec.gap_ms / 1000,
+            lines.len(),
+            sum[0],
+            sum[1],
+            sum[2],
+            sum[3]
+        );
+    }
+    Ok(())
+}
+
+/// A disrupted replay against the undisturbed one: the notes, and counts of
+/// lost, wrong, duplicated and extra rows.
+fn compare(
+    want: &std::collections::BTreeMap<usize, (i64, i64)>,
+    got: &crate::marathon::Replayed,
+) -> (Vec<String>, [usize; 4]) {
+    const OFF_MS: i64 = 1_500;
+    let mut seen: std::collections::BTreeMap<usize, Vec<(i64, i64, bool)>> = Default::default();
+    for (i, c) in got.out.iter().enumerate() {
+        seen.entry(c.slot).or_default().push((
+            c.cumulative_ms,
+            c.segment_ms,
+            got.at_disruption.contains(&i),
+        ));
+    }
+    let tag = |closed: bool| if closed { " (close)" } else { "" };
+    let mut notes = Vec::new();
+    let mut counts = [0usize; 4];
+    for (slot, (cum, seg)) in want {
+        match seen.get(slot) {
+            None => {
+                counts[0] += 1;
+                notes.push(format!("LOST {}:{}/{}", slot + 1, cum / 1000, seg / 1000));
+            }
+            Some(v) => {
+                for (c, s, closed) in v {
+                    if (c - cum).abs() > OFF_MS || (s - seg).abs() > OFF_MS {
+                        counts[1] += 1;
+                        notes.push(format!(
+                            "WRONG {}:{}/{} want {}/{}{}",
+                            slot + 1,
+                            c / 1000,
+                            s / 1000,
+                            cum / 1000,
+                            seg / 1000,
+                            tag(*closed)
+                        ));
+                    }
+                }
+                if v.len() > 1 {
+                    counts[2] += 1;
+                    notes.push(format!(
+                        "DUP {}:{}",
+                        slot + 1,
+                        v.iter()
+                            .map(|x| format!("{}{}", x.0 / 1000, tag(x.2)))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ));
+                }
+            }
+        }
+    }
+    for (slot, v) in &seen {
+        if !want.contains_key(slot) {
+            for (c, s, closed) in v {
+                counts[3] += 1;
+                notes.push(format!(
+                    "EXTRA {}:{}/{}{}",
+                    slot + 1,
+                    c / 1000,
+                    s / 1000,
+                    tag(*closed)
+                ));
+            }
+        }
+    }
+    (notes, counts)
+}
+
 fn captured_vods(dir: &Path) -> Result<Vec<String>> {
     let mut vods: Vec<String> = std::fs::read_dir(dir)
         .with_context(|| format!("reading capture directory {}", dir.display()))?

@@ -35,7 +35,7 @@ mod timeparse;
 mod twitch_hls;
 mod util;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 /// Tracks a Twitch streamer's speedrun attempts by OCR-reading the on-screen
@@ -122,6 +122,23 @@ enum Command {
         /// per broadcast
         #[arg(long, default_value = "arcathlon-db")]
         dir: std::path::PathBuf,
+        /// Sweep a disruption over every pass instead (reconnect, offline,
+        /// crash, sigterm) and report what each one costs against the
+        /// undisturbed replay; see scripts/audit-disrupt.sh
+        #[arg(long)]
+        disrupt: Option<String>,
+        /// How long the broadcast goes unseen, seconds
+        #[arg(long, default_value_t = 120)]
+        gap: i64,
+        /// Every Nth pass only
+        #[arg(long, default_value_t = 1)]
+        step: usize,
+        /// One day of the corpus only
+        #[arg(long)]
+        only: Option<String>,
+        /// One pass only, printing what each replay files
+        #[arg(long)]
+        at: Option<usize>,
     },
 }
 
@@ -239,7 +256,32 @@ async fn main() -> Result<()> {
             layout,
             dump_fixture,
         } => pane::run(cfg, image, thresholds, layout, dump_fixture).await,
-        Command::Audit { dir } => audit::run(&cfg, &dir).map(|_| ()),
+        Command::Audit {
+            dir, disrupt: None, ..
+        } => audit::run(&cfg, &dir).map(|_| ()),
+        Command::Audit {
+            dir,
+            disrupt: Some(kind),
+            gap,
+            step,
+            only,
+            at,
+        } => {
+            let kind = marathon::DisruptKind::parse(&kind).with_context(|| {
+                format!("--disrupt {kind:?}: one of reconnect, offline, crash, sigterm")
+            })?;
+            audit::disrupt(
+                &cfg,
+                &dir,
+                &audit::DisruptSpec {
+                    kind,
+                    gap_ms: gap * 1000,
+                    step,
+                    only_vod: only,
+                    at_pass: at,
+                },
+            )
+        }
         Command::Glyphs { action } => match action {
             GlyphsAction::Train {
                 corpus,
