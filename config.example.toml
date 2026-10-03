@@ -216,6 +216,11 @@ crop_h = 90
 # splits = { crop_x = 515, crop_y = 513, crop_w = 100, crop_h = 252 }
 # attempts_counter = { crop_x = 540, crop_y = 487, crop_w = 80, crop_h = 30 }
 # lifetime_sob = { crop_x = 505, crop_y = 897, crop_w = 110, crop_h = 34 }
+# cnn_weights = "assets/timer_ocr_race.json"  # the learned reader's weights for
+                                #   this layout's timer where it is drawn
+                                #   differently (another size, dark on light,
+                                #   hours): the same net with its own slicing
+                                #   geometry. Omitted, [timer] cnn_weights
 
 [layout_search]                 # tolerance for the streamer nudging LiveSplit
 # drift_px = 36                 # probe offsets up to this far around each layout
