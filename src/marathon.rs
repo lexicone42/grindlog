@@ -146,6 +146,10 @@ const FIRST_READING_AHEAD_MS: i64 = 5_000;
 /// minute, and the total is frozen through the pause between games anyway.
 const JUST_NOW_MS: i64 = 180_000;
 
+/// How long the total stands still, away from zero, before the run is taken
+/// to have ended: two pane passes, and more than any stall of the reader.
+const STOPPED_TOTAL_MS: i64 = 30_000;
+
 /// Passes a settled, coherent cumulative can go with nothing vouching for it
 /// before the log says so.
 const UNVOUCHED_PASSES: u32 = 5;
@@ -204,8 +208,36 @@ struct Cells {
     blank: bool,
 }
 
+/// A map as a list of pairs, for the checkpoint: JSON keys are strings, and
+/// a vote is keyed by a reading that may be absent or a pair of times.
+mod pairs {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+    use std::hash::Hash;
+
+    pub fn serialize<K, V, S>(m: &HashMap<K, V>, s: S) -> Result<S::Ok, S::Error>
+    where
+        K: Serialize + Ord,
+        V: Serialize,
+        S: Serializer,
+    {
+        let mut v: Vec<(&K, &V)> = m.iter().collect();
+        v.sort_by(|a, b| a.0.cmp(b.0));
+        s.collect_seq(v)
+    }
+
+    pub fn deserialize<'de, K, V, D>(d: D) -> Result<HashMap<K, V>, D::Error>
+    where
+        K: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        Ok(Vec::<(K, V)>::deserialize(d)?.into_iter().collect())
+    }
+}
+
 /// The cumulative a row showed when the board came into view.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 enum Baseline {
     /// Not settled yet; no completion can be read off this row.
     #[default]
@@ -219,7 +251,7 @@ enum Baseline {
 
 /// How often a value was read off a row, and over what stretch of the
 /// broadcast.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct Vote {
     count: u32,
     first_ms: i64,
@@ -241,7 +273,7 @@ fn settled(v: &Vote) -> bool {
     v.count >= AGREE && v.spread_ms() >= AGREE_SPREAD_MS
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 struct Slot {
     /// Every spelling of the row's name that was legible, by how often it was
     /// read. The board prints one name and tesseract makes several of it.
@@ -258,11 +290,14 @@ struct Slot {
     /// of passes, the baseline settled on a misreading of it off two passes
     /// ten seconds apart, and the comparison time the row had shown all
     /// along was then recorded as a finished game the runner never played.
+    #[serde(with = "pairs")]
     baseline_votes: HashMap<Option<i64>, Vote>,
     /// Readings of a cumulative that differs from the baseline: a completion
     /// in the making.
+    #[serde(with = "pairs")]
     cumulative_votes: HashMap<i64, Vote>,
     /// Votes for the segment column, per cumulative it was read beside.
+    #[serde(with = "pairs")]
     segment_votes: HashMap<(i64, i64), Vote>,
     /// Passes spent with a confirmed cumulative whose segment column will not
     /// agree with the previous game's.
@@ -566,12 +601,13 @@ pub fn classify<'a>(board: &Board, cfg: &'a Config, current: Option<&Marathon>) 
 }
 
 /// One marathon in progress: the ten slots of a board and what each has shown.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Marathon {
     /// The event, and the category every run of it is filed under.
     category: String,
     slots: Vec<Slot>,
     /// Event numbers read out of the title ("Arcathlon #6"), by count.
+    #[serde(with = "pairs")]
     numbers: HashMap<u32, u32>,
     /// Cumulative times already in the database for this event, so a restart
     /// mid-event does not record a completion twice.
@@ -584,10 +620,24 @@ pub struct Marathon {
     /// a finish on the broadcast's last pass is checked against when the
     /// timer was gone by then.
     last_total_ms: Option<i64>,
+    /// The total as read, and since when it has read that (within half a
+    /// second): a race clock runs without pause from the start to the last
+    /// split, so one standing still is a run that has ended.
+    held_total: Option<(i64, i64)>,
+    /// The total the run ended on, once it has stood still for
+    /// `STOPPED_TOTAL_MS` away from zero.
+    stopped_total_ms: Option<i64>,
+    /// Carried on with after a drop or a restart (`resume`): the event began
+    /// under this tracker's watch or an earlier one's, whatever has been
+    /// filed of it yet.
+    #[serde(default)]
+    carried_on: bool,
     /// Pane passes seen, for the log.
     passes: u32,
     /// The events this board may be, and the ten games of each. Empty where
     /// none is configured, and then every row keeps the name as read.
+    /// Attached again on a resume from a checkpoint: configuration, not state.
+    #[serde(skip)]
     rosters: Arc<Rosters>,
     /// Which of them the rows say this board is.
     roster: Option<usize>,
@@ -635,6 +685,9 @@ impl Marathon {
             known: Vec::new(),
             total_ms: None,
             last_total_ms: None,
+            held_total: None,
+            stopped_total_ms: None,
+            carried_on: false,
             passes: 0,
             rosters,
             roster: None,
@@ -676,6 +729,75 @@ impl Marathon {
 
     pub fn seed(&mut self, cumulatives: &[i64]) {
         self.known = cumulatives.to_vec();
+    }
+
+    /// Is the row above this one, as the board's arithmetic measures from it,
+    /// a finish recorded in this run rather than a comparison?
+    fn anchored_by_a_finish(&self, i: usize) -> bool {
+        i == 0
+            || (0..i)
+                .rev()
+                .find(|j| self.slots[*j].blank_passes < SKIPPED_PASSES)
+                .is_some_and(|j| self.slots[j].recorded.is_some())
+    }
+
+    /// The total the run ended on, where this cumulative is it: on the passes
+    /// after the end the timer goes unread as the broadcast cuts away from
+    /// the board, and the final split has nothing else to vouch for it. Only
+    /// for that one value: a total standing still is also a stuck reader,
+    /// and as the total for anything else it vetoed real completions.
+    fn ended_on(&self, cum: i64) -> Option<i64> {
+        self.stopped_total_ms.filter(|t| (cum - t).abs() <= 1_000)
+    }
+
+    /// A tracker taken up again in the middle of an event: rebuilt over what
+    /// the database has filed of it, or carried on with after a drop or a
+    /// restart.
+    fn taken_up_again(&self) -> bool {
+        self.carried_on || !self.known.is_empty()
+    }
+
+    /// Is this tracker, set aside or saved before a drop or a restart, the
+    /// one to carry on with on this board? The same event, a board it does
+    /// not disown, and a clock not behind what it has filed (a new run of
+    /// the same event starts again from zero).
+    pub fn resumable(&self, category: &str, board: &Board, total_ms: Option<i64>) -> bool {
+        self.resume_verdict(category, board, total_ms) == Resume::Carry
+    }
+
+    /// The same, told apart: a board that is plainly not this event's (or a
+    /// new run of it) ends it; one that only does not match this pass, its
+    /// names damaged or the window mid-scroll, may on the next.
+    pub fn resume_verdict(&self, category: &str, board: &Board, total_ms: Option<i64>) -> Resume {
+        // Measured against what it filed, not the total it last read: one
+        // misread total before a drop (5:13:31 with the clock at 3:14) made
+        // the returning clock look like a new run, and the event was closed
+        // and started again from nothing.
+        let furthest = self.slots.iter().filter_map(|s| s.recorded).max();
+        let new_run = match (total_ms, furthest) {
+            (Some(t), Some(f)) => t + AHEAD_OF_TOTAL_MS < f,
+            _ => false,
+        };
+        if self.category != category || new_run {
+            Resume::Over
+        } else if self.disowns(board) {
+            Resume::NotYet
+        } else {
+            Resume::Carry
+        }
+    }
+
+    /// Carry on with a tracker set aside or read back from a checkpoint:
+    /// its configuration attached again, and whatever was filed for the
+    /// event meanwhile added to what it knows is filed.
+    pub fn resume(&mut self, rosters: Arc<Rosters>, filed: &[i64]) {
+        self.rosters = rosters;
+        self.carried_on = true;
+        for c in filed {
+            if !self.known.contains(c) {
+                self.known.push(*c);
+            }
+        }
     }
 
     /// How the session is tagged: the event, with its number when the title
@@ -895,6 +1017,15 @@ impl Marathon {
         if total_ms.is_some() {
             self.last_total_ms = total_ms;
         }
+        if let Some(t) = total_ms {
+            if self.held_total.is_none_or(|(v, _)| (v - t).abs() > 500) {
+                self.held_total = Some((t, at_ms));
+            }
+        }
+        self.stopped_total_ms = self
+            .held_total
+            .filter(|(v, since)| *v >= STOPPED_TOTAL_MS && at_ms - since >= STOPPED_TOTAL_MS)
+            .map(|(v, _)| v);
         if let Some(t) = board.title.as_deref() {
             if let Some(n) = event_number(t) {
                 *self.numbers.entry(n).or_insert(0) += 1;
@@ -1165,18 +1296,28 @@ impl Marathon {
         // Nothing else identifies it: the row shows what it always showed
         // from the moment this tracker starts, so it never reaches
         // `harvest`, where `known` is otherwise applied.
-        let already = observed.is_some_and(|c| self.known.contains(&c));
+        // Within a second: the close at a drop or a shutdown files what it
+        // last settled, which can be a second off what the board prints, and
+        // an exact match then met the same game as new and filed it twice.
+        let already = observed.is_some_and(|c| self.known.iter().any(|k| (k - c).abs() <= 1_000));
         // A row whose first time comes under a row this tracker watched
         // finish, and exceeds it, finished on the tracker's watch: its time
         // is a completion to judge, not a baseline. The race board's "-"
         // cells often do not read at 480p, so a row can carry no vote until
         // its time appears, and that time was taken for a baseline ("11:30 /
         // 51:59" under a recorded 40:28, never filed). Never the first row,
-        // where the arithmetic holds of any number; and never under a row
-        // recorded from the database after a restart, which was finished
-        // before the tracker looked, as the rows under it may have been.
+        // where the arithmetic holds of any number. Under a row recorded
+        // from the database after a restart too: that row is this run's,
+        // a row under it whose time continues it to the second is this run's
+        // as well, and if it is not among the times already filed it is a
+        // finish this tracker missed while it was down, not a comparison (a
+        // comparison continues the previous run's chain, not this one's).
+        // Taken for a baseline it was never filed, and on a board whose run
+        // had ended in the gap — no deltas left to place the runner — every
+        // game finished in the gap went with it, the final among them.
         let chained = i > 0
-            && self.slots[i - 1].recorded_at_ms.is_some()
+            && (self.slots[i - 1].recorded_at_ms.is_some()
+                || (self.taken_up_again() && self.slots[i - 1].recorded.is_some()))
             && observed.is_some_and(|c| self.arithmetic_backs(i, c));
         // On an ordered board the unrun rows carry the previous run's times
         // as comparisons from the first pass, and a comparison the total
@@ -1186,6 +1327,26 @@ impl Marathon {
         // time (a tracker started with the total at 51:00 otherwise files a
         // 51:59 comparison on its second pass).
         let ordered = self.roster.is_some_and(|e| self.rosters.ordered(e));
+        // A tracker taken up again in the middle of an event — the bot
+        // restarted, or the stream came back after a drop — starts with the
+        // event's filed times and nothing else. On an ordered board every
+        // row above the runner's has finished in this run, and the runner's
+        // own row shows a time at or behind the clock only once he has
+        // finished it: a time there that is not one already filed is a
+        // finish this tracker did not see happen, and is judged as one.
+        // Taken for a baseline, it was never filed: a game finished in the
+        // minutes of the gap, or still settling when the drop came, and
+        // every row under it then waited behind it; and the game being run,
+        // whose one comparison vote from before the runner reached it made
+        // the finish a second baseline vote, which settled (2026-10-01: a
+        // two-minute drop in Moon Crystal's last minutes lost the final).
+        // Every guard `harvest` applies still applies.
+        let resumed_finish = ordered
+            && !under
+            && self.taken_up_again()
+            && !already
+            && self.runner.is_some_and(|r| i <= r)
+            && observed.is_some_and(|c| total_ms.is_some_and(|t| c <= t + FIRST_READING_AHEAD_MS));
         // A cumulative equal to the comparison's with a different segment
         // beside it is a finish that landed on the comparison's time — or
         // the comparison's own segment column misread. The finish has a
@@ -1202,6 +1363,21 @@ impl Marathon {
             }
             _ => true,
         };
+        // The run is over and this row reads the time it ended on: the final
+        // split, whatever the tracker thought of where the runner was. Only
+        // in a tracker taken up again mid-event, whose filed times say the
+        // run is today's; a fresh one may be looking at a board left on
+        // yesterday's finished run, whose total stands still at its final.
+        // A drop in the last game's last minutes, with the broadcast ending
+        // a few passes after the bot came back, showed the top of the board
+        // and the pinned final row and nothing to anchor it (2026-10-01).
+        let run_ended_here = self.taken_up_again()
+            && !already
+            && observed.is_some_and(|c| {
+                self.stopped_total_ms
+                    .is_some_and(|t| (c - t).abs() <= 1_000)
+            });
+        let under = under && !run_ended_here;
         let slot = &mut self.slots[i];
         // A row under the runner's shows its comparison, however it reads
         // this pass: the reading feeds the baseline and nothing else, and
@@ -1241,7 +1417,12 @@ impl Marathon {
             let just_finished = |c: i64| {
                 just_now(c, total_ms) && total_ms.is_some_and(|t| c <= t + FIRST_READING_AHEAD_MS)
             };
-            if !under && ((alone && fresh && observed.is_some_and(just_finished)) || chained) {
+            if !under
+                && ((alone && fresh && observed.is_some_and(just_finished))
+                    || chained
+                    || resumed_finish
+                    || run_ended_here)
+            {
                 slot.baseline = Baseline::Empty;
             } else {
                 // The same time read with and without its hour digit is one
@@ -1391,8 +1572,10 @@ impl Marathon {
                         // cumulative, rather than somewhere else on the board:
                         // either the marathon total, or the row's own two
                         // columns against the row above it.
-                        && (self.total_agrees(i, *c, total_ms) || self.board_vouches(i, *c))
-                        // And no finish stands ahead of the clock. The board's own
+                        && (self.total_agrees(i, *c, total_ms.or(self.ended_on(*c)))
+                            || self.board_vouches(i, *c))
+                        // And no finish stands ahead of the clock where the row
+                        // above anchors it with its comparison. The board's own
                         // arithmetic vouches for a comparison as readily as for a
                         // finish: with the transition row above still unrecorded
                         // (its passes lost, or its delta moving), the row above's
@@ -1401,7 +1584,11 @@ impl Marathon {
                         // time was filed minutes before the clock reached it
                         // (2026-09-29 with three passes lost: Parallel World at
                         // 2:17:45 on a clock at 2:10:55, and Mega Man 6 lost).
-                        && total_ms.is_none_or(|t| *c <= t + AHEAD_OF_TOTAL_MS)
+                        // Under a row recorded in this run the arithmetic is this
+                        // run's, and the total has no veto: a dead timer read
+                        // hours wrong refused real finishes (VOD 2839800169).
+                        && (self.anchored_by_a_finish(i)
+                            || total_ms.is_none_or(|t| *c <= t + AHEAD_OF_TOTAL_MS))
                         // A row the total alone vouches for — nothing recorded
                         // above it to check the arithmetic against — must not
                         // be within a digit of its own comparison: the pinned
@@ -2779,9 +2966,35 @@ pub struct Replayed {
     pub summary: String,
 }
 
+/// Whether a tracker kept across a drop or a restart is this board's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resume {
+    Carry,
+    NotYet,
+    Over,
+}
+
+/// How long a tracker set aside when the stream went offline waits for the
+/// board to come back before its event is closed: longer than any drop
+/// measured (2026-09-22: eight minutes).
+pub const ASIDE_GRACE_MS: i64 = 15 * 60 * 1000;
+
+/// How old a saved tracker may be and still be carried on with after a
+/// restart.
+pub const CHECKPOINT_RESUME_MS: i64 = 30 * 60 * 1000;
+
 /// [`replay`] with a disruption, modelled the way the run loop meets it.
 pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruption>) -> Replayed {
     let mut state: Option<Marathon> = None;
+    // What the run loop keeps across a drop or a restart: the tracker set
+    // aside when the stream went offline, and the checkpoint written after
+    // every pass — which, whenever it is read back, is the tracker as it was
+    // dropped, so the model moves the tracker there as it drops it rather
+    // than copying it every pass.
+    let mut aside: Option<(Marathon, i64)> = None;
+    let mut checkpoint: Option<(Marathon, i64)> = None;
+    let mut last_at: i64 = 0;
+    let mut aside_refused: u32 = 0;
     let mut misses: u32 = 0;
     let mut hits: u32 = 0;
     // The database: every cumulative recorded for this event so far.
@@ -2792,27 +3005,41 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
     let resume_ms = disrupt.and_then(|d| passes.get(d.at_pass).map(|p| p.at_ms + d.gap_ms));
     for (n, p) in passes.iter().enumerate() {
         if let Some(d) = disrupt.filter(|d| d.at_pass == n) {
-            if matches!(d.kind, DisruptKind::Offline | DisruptKind::Sigterm) {
-                if let Some(mut m) = state.take() {
-                    let from = out.len();
-                    for c in m.close(p.at_ms) {
-                        recorded.push(c.cumulative_ms);
-                        out.push(c);
-                    }
-                    at_disruption = from..out.len();
+            // Offline sets the tracker aside rather than closing it; a
+            // shutdown leaves the checkpoint; a crash loses what it had not
+            // saved, which the checkpoint after the last pass holds.
+            if d.kind == DisruptKind::Offline {
+                if let Some(m) = state.take() {
+                    aside = Some((m, p.at_ms));
                 }
             }
             if d.kind != DisruptKind::Reconnect {
                 // The process goes down and comes back, or the stream does.
-                // Everything it had learned about the board goes with it;
-                // the database stays.
-                state = None;
+                // What it had in memory goes with it; the checkpoint and the
+                // database stay.
+                if let Some(m) = state.take() {
+                    checkpoint = Some((m, last_at));
+                }
                 misses = 0;
                 hits = 0;
             }
         }
         if disrupt.is_some_and(|d| n >= d.at_pass) && resume_ms.is_some_and(|r| p.at_ms < r) {
             continue;
+        }
+        // The board stayed away past the grace: the event set aside is
+        // closed as the broadcast's end, when the grace ran out.
+        if aside
+            .as_ref()
+            .is_some_and(|(_, since)| p.at_ms - since > ASIDE_GRACE_MS)
+        {
+            let (mut m, since) = aside.take().expect("checked");
+            let from = out.len();
+            for c in m.close(since + ASIDE_GRACE_MS) {
+                recorded.push(c.cumulative_ms);
+                out.push(c);
+            }
+            at_disruption = from..out.len();
         }
         match classify(&p.board, cfg, state.as_ref()) {
             // Not evidence of anything: a marathon in force keeps reading the
@@ -2825,13 +3052,67 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
                 // Somebody else's board — but the rows are left alone until
                 // enough passes agree, and then the event is over.
                 if misses >= crate::app::MARATHON_LET_GO {
-                    state = None;
+                    if let Some(m) = state.take() {
+                        checkpoint = Some((m, last_at));
+                    }
                 }
                 continue;
             }
             Verdict::Board(alias) => {
                 verdicts[2] += 1;
                 misses = 0;
+                let mut waiting = false;
+                if state.is_none() {
+                    let verdict = aside
+                        .as_ref()
+                        .map(|(m, _)| m.resume_verdict(&alias.name, &p.board, p.total_ms));
+                    if verdict == Some(Resume::NotYet) {
+                        aside_refused += 1;
+                    }
+                    let give_up = verdict == Some(Resume::Over)
+                        || (verdict == Some(Resume::NotYet)
+                            && aside_refused >= crate::app::MARATHON_TAKE_UP);
+                    waiting = verdict == Some(Resume::NotYet) && !give_up;
+                    let resumed = match aside.take() {
+                        Some((m, _)) if verdict == Some(Resume::Carry) => Some(m),
+                        Some(a) if waiting => {
+                            aside = Some(a);
+                            None
+                        }
+                        Some((mut m, since)) => {
+                            // Another board, or a new run: the event set
+                            // aside is over, and closed as it ended.
+                            let from = out.len();
+                            for c in m.close(since) {
+                                recorded.push(c.cumulative_ms);
+                                out.push(c);
+                            }
+                            at_disruption = from..out.len();
+                            None
+                        }
+                        None => match checkpoint.take() {
+                            Some((m, at))
+                                if p.at_ms - at <= CHECKPOINT_RESUME_MS
+                                    && m.resumable(&alias.name, &p.board, p.total_ms) =>
+                            {
+                                Some(m)
+                            }
+                            other => {
+                                checkpoint = other;
+                                None
+                            }
+                        },
+                    };
+                    if let Some(mut m) = resumed {
+                        m.resume(alias.rosters.clone(), &recorded);
+                        state = Some(m);
+                        hits = 0;
+                        aside_refused = 0;
+                    }
+                }
+                if waiting {
+                    continue;
+                }
                 if state
                     .as_ref()
                     .is_none_or(|m| m.category() != alias.name || m.disowns(&p.board))
@@ -2860,8 +3141,16 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
             recorded.push(c.cumulative_ms);
             out.push(c);
         }
+        last_at = p.at_ms;
     }
-    // The broadcast ended: a finish on its last pass is filed at the close.
+    // The broadcast ended: a finish on its last pass is filed at the close,
+    // and so is one on the last pass before a drop it never came back from.
+    if let Some((mut m, since)) = aside.take() {
+        for c in m.close(since) {
+            recorded.push(c.cumulative_ms);
+            out.push(c);
+        }
+    }
     if let (Some(m), Some(p)) = (state.as_mut(), passes.last()) {
         for c in m.close(p.at_ms) {
             recorded.push(c.cumulative_ms);
@@ -4078,25 +4367,34 @@ mod tests {
         // He is deep into the third game: the total has left both finished
         // rows far behind, which is what a restart mid-event looks like.
         let total = Some(3_600_000);
+        let mut filed = Vec::new();
         // Two passes settle the row's baseline at its real, recorded value.
         for t in 0..2 {
-            assert!(m
-                .observe(&pass(&["15:52", "15:52"]), t * 60_000, total)
-                .is_empty());
+            filed.extend(m.observe(&pass(&["15:52", "15:52"]), t * 60_000, total));
         }
         // The documented misreading, twice, a minute apart — enough votes and
         // enough spread — and then the pane thins to the row being played and
         // the row's cells go unread, which does not clear the votes.
         for t in 2..4 {
-            let seen = m.observe(&pass(&["15:52", "18:52"]), t * 60_000, total);
-            assert!(seen.is_empty(), "at {t}: {seen:?}");
+            filed.extend(m.observe(&pass(&["15:52", "18:52"]), t * 60_000, total));
         }
         for t in 4..9 {
-            assert!(
-                m.observe(&pass(&[]), t * 60_000, total).is_empty(),
-                "a row already in the database is not recorded again at {t}"
-            );
+            filed.extend(m.observe(&pass(&[]), t * 60_000, total));
         }
+        assert!(
+            filed.iter().all(|c| c.slot != 0),
+            "a row already in the database is not recorded again: {filed:?}"
+        );
+        // SMB 2 is not in the database and its 27:18 continues Ninja Gaiden
+        // III's recorded 15:52 by its own 11:25 to the second: a game this
+        // run finished while the bot was down, filed once, not lost.
+        assert_eq!(
+            filed
+                .iter()
+                .map(|c| (c.slot, c.cumulative_ms, c.segment_ms))
+                .collect::<Vec<_>>(),
+            vec![(1, 1_638_000, 685_000)]
+        );
     }
 
     /// A baseline settles the way a completion does: two readings a good
@@ -6834,6 +7132,75 @@ mod race_fixtures {
     /// transition row above Parallel World unrecorded: its comparison
     /// 2:17:45 was filed as his finish minutes before the clock reached it,
     /// and Mega Man 6 was lost behind it.
+    /// A tracker written out as the bot's checkpoint and read back carries
+    /// on exactly as the one that never stopped: the same completions, to
+    /// the millisecond, from the pass it was saved after.
+    #[test]
+    fn a_checkpoint_read_back_carries_on_as_if_never_stopped() {
+        let cfg = config();
+        let alias = cfg
+            .games
+            .iter()
+            .find(|g| g.name == "Big 20 #23 run")
+            .expect("the race in live.toml");
+        let (passes, _) = load("2026-10-01-live");
+        let mut kept = Marathon::new(alias.name.clone(), alias.rosters.clone());
+        for p in &passes[..150] {
+            kept.observe(&p.board, p.at_ms, p.total_ms);
+        }
+        let text = serde_json::to_string(&kept).expect("serialise");
+        let mut back: Marathon = serde_json::from_str(&text).expect("read back");
+        back.resume(alias.rosters.clone(), &[]);
+        let rows = |c: Vec<Completion>| {
+            c.into_iter()
+                .map(|c| (c.slot, c.game, c.cumulative_ms, c.segment_ms, c.ended_at_ms))
+                .collect::<Vec<_>>()
+        };
+        for p in &passes[150..] {
+            assert_eq!(
+                rows(kept.observe(&p.board, p.at_ms, p.total_ms)),
+                rows(back.observe(&p.board, p.at_ms, p.total_ms)),
+                "at {}",
+                p.at_ms
+            );
+        }
+        let end = passes.last().expect("passes").at_ms;
+        assert_eq!(rows(kept.close(end)), rows(back.close(end)));
+    }
+
+    /// Every kind of interruption at the points that cost a game before the
+    /// tracker was kept across them: the first minutes, mid-run, a game
+    /// finishing in the gap, a row still settling when the drop came (217,
+    /// two passes after a total misread 5:13:31), and Moon Crystal's last
+    /// minutes, where a two-minute drop lost the race's final on every
+    /// corpus day. An eight-minute drop from Moon Crystal's last minutes
+    /// outlasts this broadcast, which ended at 3:56:20 on the clock: nothing
+    /// shows the final, and none is asked for.
+    #[test]
+    fn a_drop_or_a_restart_mid_race_loses_nothing() {
+        let (passes, key) = load("2026-10-01-live");
+        let early = [26, 33, 96, 108, 124, 162, 214, 217, 241];
+        let late = [255, 257, 258];
+        for (kind, gap_ms, points) in [
+            (DisruptKind::Offline, 120_000, &early[..]),
+            (DisruptKind::Offline, 120_000, &late[..]),
+            (DisruptKind::Offline, 480_000, &early[..]),
+            (DisruptKind::Crash, 60_000, &early[..]),
+            (DisruptKind::Crash, 60_000, &late[..]),
+            (DisruptKind::Sigterm, 30_000, &early[..]),
+            (DisruptKind::Sigterm, 30_000, &late[..]),
+        ] {
+            for &at_pass in points {
+                let d = Disruption {
+                    at_pass,
+                    gap_ms,
+                    kind,
+                };
+                check("2026-10-01-live", &passes, &key, Some(d));
+            }
+        }
+    }
+
     #[test]
     fn a_comparison_is_not_filed_ahead_of_the_clock() {
         let (mut passes, key) = load("2026-09-29-live");

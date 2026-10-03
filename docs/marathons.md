@@ -115,10 +115,42 @@ session-close line lists the rows still unfiled.
 **A first time under a watched row.** At 480p the board's "-" cells often
 do not read, so a game's row carries no vote at all until its time
 appears — and a first reading with a time was a baseline, "finished before
-the bot looked". Under a row THIS tracker watched finish (not one recorded
-from the database after a restart), and exceeding it, a first time is a
-completion to judge instead. Crisis Force, "11:30 / 51:59" on four passes
-under a recorded 40:28, was never filed for this.
+the bot looked". Under a row THIS tracker watched finish, and exceeding
+it by the row's own segment, a first time is a completion to judge
+instead. Crisis Force, "11:30 / 51:59" on four passes under a recorded
+40:28, was never filed for this. In a tracker taken up again mid-event the
+same holds under a row recorded before the restart: that row is this
+run's, and a time continuing it to the second is this run's too.
+
+**Across a drop or a restart.** A tracker rebuilt from the database alone
+takes whatever a row shows on its first passes for that row's comparison,
+so a game finished while the bot was away, or still settling when the drop
+came, was never filed, and every row under it waited behind it. The close
+at a drop made it worse: a game in progress is the row above plus a
+segment growing in step with the total, which on one pass is exactly what
+a game that has just finished looks like, and it was filed at whatever its
+segment had reached. `scripts/audit-disrupt.sh` measures all of this: it
+replays every day of the race corpus once per pass with a disruption at
+that pass (a 30 s reconnect, 2 and 8 minutes offline, a crash, a SIGTERM)
+and counts the passes at which one costs a row against the same day
+undisturbed. Before: a two-minute drop cost a row at 749 of 15,100
+passes, a crash at 627, a reconnect that kept the tracker at 24. So the
+tracker is kept. When the stream goes offline it is set aside, not closed,
+and carried on with when the same event's board returns (`Resume`: the
+same event, a board it does not disown three passes running, a clock not
+behind what it has filed); it is closed only if the board stays away for
+`ASIDE_GRACE_MS` (15 minutes), when a finish on its last pass is filed. It
+is saved after every pass beside the database (`<db>.marathon.json`, live
+streams only), and a restarted bot carries on from it for up to
+`CHECKPOINT_RESUME_MS` (30 minutes); a SIGTERM on a live stream leaves it
+there and closes nothing. A carried-on tracker judges, rather than takes
+for a baseline, a row at or above the runner showing a time behind the
+clock that it has not filed, and once the total has stood still for 30 s
+away from zero (a race clock runs without pause to the last split) a row
+reading exactly that total is the final split. `audit --disrupt <kind>
+--gap <s> [--only <day>] [--at <pass>]` replays one sweep, and with
+`--at` prints what each replay files; `marathon::replay_disrupted` is the
+model, and the run loop's `MarathonKeep` is the same thing for real.
 
 **The hour carried down.** A cumulative reading as minutes and seconds
 under a recorded row past the hour has lost its hour digit — the column is

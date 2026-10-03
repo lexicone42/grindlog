@@ -7,6 +7,9 @@
 *.db
 *.db-shm
 *.db-wal
+# The race tracker's checkpoint beside a database (app.rs, MarathonKeep)
+*.marathon.json
+*.marathon.json.tmp
 *.jsonl
 /logs/
 /backfill-logs/
