@@ -179,19 +179,59 @@ pub fn ink_box(norm: &GrayImage, expect: Option<u32>) -> Option<InkBox> {
     let full: Vec<bool> = (0..w)
         .map(|x| (0..h).filter(|y| ink(x, *y)).count() as u32 * 10 >= h * 9)
         .collect();
-    let x_lo = full
+    let mut x_lo = full
         .iter()
         .rposition(|f| *f)
         .filter(|x| (*x as u32) < w / 2)
         .map(|x| x as u32 + 1)
         .unwrap_or(0);
-    let x_hi = full
+    let mut x_hi = full
         .iter()
         .position(|f| *f)
         .filter(|x| (*x as u32) >= w / 2)
         .map(|x| x as u32)
         .unwrap_or(w);
-    let ink = |x: u32, y: u32| x >= x_lo && x < x_hi && ink(x, y);
+    loop {
+        let bx = ink_box_within(norm, expect, x_lo, x_hi)?;
+        // A full column with a glyph right behind it, in the band, is not
+        // the border but a glyph touching the text under the timer (a 1
+        // over the segment timer spans the race crop): the border, if any,
+        // is the next full column on, or the crop's edge.
+        let sliver = (bx.height() / 10).max(3);
+        let reach = bx.height() / 2;
+        let glyph_from = |x0: u32, x1: u32| -> bool {
+            let mut run = 0;
+            for x in x0..x1 {
+                if (bx.top..bx.bottom).filter(|y| ink(x, *y)).count() >= 2 {
+                    run += 1;
+                    if run >= sliver {
+                        return true;
+                    }
+                } else {
+                    run = 0;
+                }
+            }
+            false
+        };
+        if x_hi < w && glyph_from(x_hi + 1, (x_hi + 1 + reach).min(w)) {
+            x_hi = (x_hi + 1..w).find(|x| full[*x as usize]).unwrap_or(w);
+            continue;
+        }
+        if x_lo > 0 && glyph_from(x_lo.saturating_sub(1 + reach), x_lo - 1) {
+            x_lo = (0..x_lo - 1)
+                .rev()
+                .find(|x| full[*x as usize])
+                .map_or(0, |x| x + 1);
+            continue;
+        }
+        return Some(bx);
+    }
+}
+
+/// `ink_box` between the pane borders found at `x_lo` and `x_hi`.
+fn ink_box_within(norm: &GrayImage, expect: Option<u32>, x_lo: u32, x_hi: u32) -> Option<InkBox> {
+    let (w, h) = norm.dimensions();
+    let ink = |x: u32, y: u32| x >= x_lo && x < x_hi && norm.get_pixel(x, y).0[0] >= 128;
     let mut rows = vec![0u32; h as usize];
     for y in 0..h {
         rows[y as usize] = (0..w).filter(|x| ink(*x, y)).count() as u32;
@@ -723,5 +763,30 @@ mod tests {
                 "tile {i}: ink {l} from the left, {r} from the right"
             );
         }
+    }
+
+    /// Three glyphs over a second row of text, the middle one touching it
+    /// so its column is inked top to bottom like a border, and the real
+    /// border two columns from the right edge: the glyph stays a glyph and
+    /// the border is still where "cut" is measured from.
+    #[test]
+    fn a_glyph_touching_the_text_below_is_not_the_pane_border() {
+        let mut img = GrayImage::from_pixel(200, 60, Luma([20]));
+        for y in 10..40 {
+            for x in (60..80).chain(100..110).chain(130..150) {
+                img.put_pixel(x, y, Luma([220]));
+            }
+        }
+        for y in 40..60 {
+            for x in 100..110 {
+                img.put_pixel(x, y, Luma([220]));
+            }
+        }
+        for y in 0..60 {
+            img.put_pixel(197, y, Luma([220]));
+        }
+        let bx = ink_box(&normalise(&img).unwrap(), None).unwrap();
+        assert_eq!((bx.left, bx.right, bx.edge_right), (60, 150, 197));
+        assert_eq!((bx.last_left, bx.last_right), (130, 150));
     }
 }

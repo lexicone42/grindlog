@@ -754,13 +754,33 @@ drawn and what colour it is. It stretches the crop so its background is
 black and its ink white (the 25th percentile and the 99th), finds the
 digits' bounding box (the band of consecutive inked rows with the most
 ink, so a separator line or the text row under the timer cannot stretch
-it), and lays fixed slots off that box's right edge leftwards, scaled by
-its height — the timer is right-aligned and grows to the left, so the
-leftmost slots are blank until the minutes need them, and blank is a
-class. Each slot is resized to 24x32 and read; a slot blank between two
+it), and lays fixed slots off that box's right edge leftwards — the timer
+is right-aligned and grows to the left, so the leftmost slots are blank
+until the minutes need them, and blank is a class. The slots' scale comes
+from the ink's width, not the band's height: the glyph count is one of
+five LiveSplit formats (S.hh, SS.hh, M:SS.hh, MM:SS.hh, H:MM:SS.hh), each
+spanning a known number of nominal pixels, and the count whose implied
+scale sits nearest the band's wins. The band is a short lever (33 px on
+the race total), and a pixel or two of it moved the far slot half a
+cell. Dark ink on a light pane is turned over first. A column inked top
+to bottom is the pane's border and the crop ends there, unless a glyph
+sits right behind it in the band: that is a glyph touching the text under
+the timer (a 1 over the race's segment timer), not the border. Each slot is resized to 24x32 and read; a slot blank between two
 that are not, ink against the crop's edge, no digit band, or any slot
 under 50% confidence declines the frame. The countdown's minus is a class
 too, dropped from the reading as tesseract and the glyph reader drop it.
+
+A `[[layouts]]` entry may name its own `cnn_weights`: the same net
+exported with that layout's slot geometry, read wherever that layout is
+active or probed. `assets/timer_ocr_race.json` is the Big 20 race total
+(dark navy on light blue, MM:SS.hh and H:MM:SS.hh, a third the Ninja
+Gaiden timer's size, the segment timer three pixels under it), trained
+on the September 24 and 25 practice days with September 24 held out:
+99.9% of its tiles. Replaying two ten-minute windows of September 24
+through the bot, it reads 89% and 91% of the locked frames with
+hundredths where tesseract read 44% and 73%, mostly without them. The
+Ninja Gaiden reader was retrained alongside (same weights file, both
+geometries carry it) and reads the same frames to the hundredth.
 
 Measured on the two VODs it was built with (2026-08-25 and 2026-08-27,
 1080p60): on a VOD never trained on, every one of grindlog's 50 recorded
