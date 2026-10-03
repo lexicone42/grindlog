@@ -1392,6 +1392,16 @@ impl Marathon {
                         // either the marathon total, or the row's own two
                         // columns against the row above it.
                         && (self.total_agrees(i, *c, total_ms) || self.board_vouches(i, *c))
+                        // And no finish stands ahead of the clock. The board's own
+                        // arithmetic vouches for a comparison as readily as for a
+                        // finish: with the transition row above still unrecorded
+                        // (its passes lost, or its delta moving), the row above's
+                        // baseline anchors it, the comparison's segment is the
+                        // comparison minus the comparison, and the previous run's
+                        // time was filed minutes before the clock reached it
+                        // (2026-09-29 with three passes lost: Parallel World at
+                        // 2:17:45 on a clock at 2:10:55, and Mega Man 6 lost).
+                        && total_ms.is_none_or(|t| *c <= t + AHEAD_OF_TOTAL_MS)
                         // A row the total alone vouches for — nothing recorded
                         // above it to check the arithmetic against — must not
                         // be within a digit of its own comparison: the pinned
@@ -6818,5 +6828,16 @@ mod race_fixtures {
             assert_eq!(key.len(), 20);
             check(day, &passes, &key, None);
         }
+    }
+
+    /// Three pane passes lost (2:10:55 to 2:12:55 on the clock) with the
+    /// transition row above Parallel World unrecorded: its comparison
+    /// 2:17:45 was filed as his finish minutes before the clock reached it,
+    /// and Mega Man 6 was lost behind it.
+    #[test]
+    fn a_comparison_is_not_filed_ahead_of_the_clock() {
+        let (mut passes, key) = load("2026-09-29-live");
+        passes.drain(147..150);
+        check("2026-09-29-live less three passes", &passes, &key, None);
     }
 }
