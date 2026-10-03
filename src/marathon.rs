@@ -2484,7 +2484,10 @@ impl Marathon {
         }
         for w in placed.windows(2) {
             let ((a, ja), (b, jb)) = (w[0], w[1]);
-            if jb - ja == b - a {
+            // Checked: a garbled bracketed row placed on a distant game slot
+            // can sit out of order, and the difference underflowed (a panic in
+            // a debug build on 2026-09-24-live).
+            if jb.checked_sub(ja) == Some(b - a) {
                 for (k, slot) in out[a + 1..b].iter_mut().enumerate() {
                     *slot = Some(ja + 1 + k);
                 }
