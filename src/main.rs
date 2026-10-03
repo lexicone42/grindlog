@@ -139,6 +139,9 @@ enum Command {
         /// One pass only, printing what each replay files
         #[arg(long)]
         at: Option<usize>,
+        /// Write the day named by --only as a tracker fixture instead
+        #[arg(long)]
+        dump_fixture: Option<std::path::PathBuf>,
     },
 }
 
@@ -257,6 +260,16 @@ async fn main() -> Result<()> {
             dump_fixture,
         } => pane::run(cfg, image, thresholds, layout, dump_fixture).await,
         Command::Audit {
+            dir,
+            dump_fixture: Some(out),
+            only,
+            ..
+        } => audit::dump_fixture(
+            &dir,
+            &only.context("--dump-fixture needs --only <day>")?,
+            &out,
+        ),
+        Command::Audit {
             dir, disrupt: None, ..
         } => audit::run(&cfg, &dir).map(|_| ()),
         Command::Audit {
@@ -266,6 +279,7 @@ async fn main() -> Result<()> {
             step,
             only,
             at,
+            ..
         } => {
             let kind = marathon::DisruptKind::parse(&kind).with_context(|| {
                 format!("--disrupt {kind:?}: one of reconnect, offline, crash, sigterm")

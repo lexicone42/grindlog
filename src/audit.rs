@@ -433,6 +433,40 @@ fn compare(
     (notes, counts)
 }
 
+/// One captured day as a tracker fixture (tests/fixtures/race/): every pass
+/// as the tracker is handed it — the time into the broadcast, the total as
+/// `passes_from_logs` settles it, the title and the rows as read — with an
+/// empty answer key for the caller to fill from the runs it verified.
+pub fn dump_fixture(dir: &Path, vod: &str, out: &Path) -> Result<()> {
+    let passes = passes_from_logs(dir, vod)?;
+    let t0 = passes.first().map_or(0, |p| p.at_ms);
+    let passes: Vec<serde_json::Value> = passes
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "t_ms": p.at_ms - t0,
+                "total_ms": p.total_ms,
+                "title": p.board.title,
+                "rows": p.board.rows.iter().map(|r| serde_json::json!({
+                    "name": r.name,
+                    "cells": r.cells,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let mut text = String::from("{\"name\": ");
+    text.push_str(&serde_json::to_string(vod)?);
+    text.push_str(", \"expect\": [], \"passes\": [\n");
+    for (i, p) in passes.iter().enumerate() {
+        text.push_str(&serde_json::to_string(p)?);
+        text.push_str(if i + 1 < passes.len() { ",\n" } else { "\n" });
+    }
+    text.push_str("]}\n");
+    std::fs::write(out, text).with_context(|| format!("writing {}", out.display()))?;
+    println!("{}: {} passes", out.display(), passes.len());
+    Ok(())
+}
+
 fn captured_vods(dir: &Path) -> Result<Vec<String>> {
     let mut vods: Vec<String> = std::fs::read_dir(dir)
         .with_context(|| format!("reading capture directory {}", dir.display()))?

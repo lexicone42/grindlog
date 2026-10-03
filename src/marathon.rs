@@ -6689,3 +6689,134 @@ mod tests {
         assert!(matches!(classify(&untitled, &cfg, None), Verdict::Board(_)));
     }
 }
+
+/// Whole Big 20 practice days (tests/fixtures/race/), pass by pass as the
+/// tracker was handed them live, replayed through the deployed config —
+/// live.toml and the race roster — against the runs verified for that day.
+/// What the race audit (scripts/audit-race.sh) checks over its corpus,
+/// pinned in the repository so CI checks it too, and the ground the
+/// disruption cases below stand on.
+#[cfg(test)]
+mod race_fixtures {
+    use super::*;
+
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        passes: Vec<FPass>,
+        expect: Vec<Key>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FPass {
+        t_ms: i64,
+        total_ms: Option<i64>,
+        title: Option<String>,
+        rows: Vec<FRow>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FRow {
+        name: Option<String>,
+        cells: Vec<String>,
+    }
+
+    #[derive(serde::Deserialize, Debug)]
+    struct Key {
+        game: String,
+        cumulative_ms: i64,
+        segment_ms: i64,
+    }
+
+    fn config() -> Config {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut cfg = Config::load(&root.join("live.toml")).expect("live.toml");
+        // The roster path in live.toml is relative to the repository.
+        for g in &mut cfg.games {
+            if let Some(r) = &g.roster {
+                let p = root.join(r);
+                g.rosters = std::sync::Arc::new(crate::roster::Rosters::load(&p).expect("roster"));
+            }
+        }
+        cfg
+    }
+
+    fn load(day: &str) -> (Vec<Pass>, Vec<Key>) {
+        let path = format!(
+            "{}/tests/fixtures/race/{day}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let fx: Fixture = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let passes = fx
+            .passes
+            .into_iter()
+            .map(|p| Pass {
+                at_ms: p.t_ms,
+                total_ms: p.total_ms,
+                board: Board {
+                    title: p.title,
+                    subtitle: None,
+                    counter: None,
+                    rows: p
+                        .rows
+                        .into_iter()
+                        .map(|r| BoardRow {
+                            name: r.name,
+                            cells: r.cells,
+                            y: 0,
+                        })
+                        .collect(),
+                },
+            })
+            .collect();
+        (passes, fx.expect)
+    }
+
+    /// Every game of the key filed once, at its cumulative and segment to
+    /// within the second the board rounds to, and nothing else filed.
+    fn check(day: &str, passes: &[Pass], key: &[Key], disrupt: Option<Disruption>) {
+        let got = replay_disrupted(&config(), passes, disrupt);
+        let mut bad = Vec::new();
+        for k in key {
+            let filed: Vec<&Completion> = got.out.iter().filter(|c| c.game == k.game).collect();
+            match filed.as_slice() {
+                [] => bad.push(format!("{} not filed", k.game)),
+                [c] => {
+                    if (c.cumulative_ms - k.cumulative_ms).abs() > 1_500
+                        || (c.segment_ms - k.segment_ms).abs() > 1_500
+                    {
+                        bad.push(format!(
+                            "{} filed at {}/{}, not {}/{}",
+                            k.game,
+                            c.cumulative_ms / 1000,
+                            c.segment_ms / 1000,
+                            k.cumulative_ms / 1000,
+                            k.segment_ms / 1000
+                        ));
+                    }
+                }
+                many => bad.push(format!("{} filed {} times", k.game, many.len())),
+            }
+        }
+        for c in &got.out {
+            if !key.iter().any(|k| k.game == c.game) {
+                bad.push(format!("{} filed and not in the key", c.game));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{day} {disrupt:?}: {}\n{}",
+            bad.join("; "),
+            got.summary
+        );
+    }
+
+    #[test]
+    fn a_whole_practice_day_files_every_game() {
+        for day in ["2026-09-29-live", "2026-10-01-live"] {
+            let (passes, key) = load(day);
+            assert_eq!(key.len(), 20);
+            check(day, &passes, &key, None);
+        }
+    }
+}
