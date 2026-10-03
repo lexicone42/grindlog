@@ -187,10 +187,15 @@ fn practice_categories(cfg: &Config) -> Vec<String> {
 ///
 /// A game he has never played carries neither, which is the whole point:
 /// the page is a list of twenty and the empty rows are the news.
+///
+/// `live` is the marathon board in force, if any (`now.marathon`): it says
+/// which full run, if any, is the one being run right now (see `live` in
+/// the block it returns).
 fn big20_prep(
     summaries: &[db::GameSummary],
     runs: &[db::OtherRun],
     cfg: &Config,
+    live: Option<&db::MarathonNow>,
 ) -> serde_json::Value {
     let Some((rosters, event)) = roster::big20() else {
         return serde_json::Value::Null;
@@ -410,15 +415,57 @@ fn big20_prep(
                 // segment and the clock it ended at. What the run-through page
                 // lays out, one column per run.
                 "segments": segments,
+                // Run on the race's own date: the race itself, filed under
+                // the same category as every practice run of it (the board
+                // and the tracker cannot tell the two apart; the calendar
+                // can). The pages label it and keep it out of the practice
+                // count and the best practice run.
+                "race": date.is_some_and(|d| rows[0].day == d),
+                "live": false,
             })
         })
         .collect();
+    let mut run_throughs = run_throughs;
+    // The run being run right now, if any. A marathon board of this race in
+    // force says a run is on; which recorded run it is, is a separate
+    // question, and "the newest" is the wrong answer until the new run has
+    // filed a row: before that the newest is the PREVIOUS run, finished
+    // days ago, and the page called it "in progress, 20 of 20". So the
+    // newest run is the live one only when the live board has filed games
+    // and that run is the board's: it started at or after the board was put
+    // up, or — the bot restarted mid-run, and the newer session's "started"
+    // or "board replaced" event postdates the run's first game — it is
+    // unfinished and ends at the very clock the broadcast's rows reached.
+    let live = live.filter(|m| run_cat(&m.category));
+    let live_run = live.filter(|m| m.games > 0).and_then(|m| {
+        let i = run_throughs.len().checked_sub(1)?;
+        let r = &run_throughs[i];
+        let since = r["started_at_ms"].as_i64().is_some_and(|t| t >= m.since_ms);
+        let same_clock = r["finished"] == false
+            && m.reached_ms.is_some()
+            && r["reached_ms"].as_i64() == m.reached_ms;
+        (since || same_clock).then_some(i)
+    });
+    if let Some(i) = live_run {
+        run_throughs[i]["live"] = serde_json::Value::Bool(true);
+    }
     serde_json::json!({
         "race": rosters.event_name(event),
         "url": url,
         "date": date,
         "games": games,
         "run_throughs": run_throughs,
+        // The race board in force, if any: the games its broadcast has
+        // filed, the clock at the last of them and when it went up, and
+        // whether one of `run_throughs` is that run (`run_live`). False with
+        // the board up means the run is starting and has filed nothing.
+        "live": live.map(|m| serde_json::json!({
+            "category": m.category,
+            "games": m.games,
+            "reached_ms": m.reached_ms,
+            "since_ms": m.since_ms,
+            "run_live": live_run.is_some(),
+        })),
     })
 }
 
@@ -571,7 +618,7 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
             // whatever this database holds for it. Present whether or not he
             // has practised any of them: a prep page's job is to show what
             // is left as much as what is done.
-            "big20": big20_prep(&summaries, &other_runs, &cfg),
+            "big20": big20_prep(&summaries, &other_runs, &cfg, now.marathon.as_ref()),
             // What the pane last saw, whatever game it was. The page leads
             // with this rather than with the tracked game, because on a
             // Big 20 day the tracked game is not what is happening.
@@ -1050,6 +1097,7 @@ mod tests {
                 },
             ],
             &cfg,
+            None,
         );
         let by = |name: &str| {
             out["games"]
@@ -1140,6 +1188,7 @@ mod tests {
                 },
             ],
             &cfg,
+            None,
         );
         let by = |name: &str| {
             out["games"]
@@ -1262,6 +1311,7 @@ mod tests {
                 race("Crisis Force", 30_000, 120_000, Some(462_000)),
             ],
             &cfg,
+            None,
         );
         let rt = out["run_throughs"].as_array().unwrap();
         assert_eq!(rt.len(), 1, "{rt:?}");
@@ -1281,11 +1331,111 @@ mod tests {
                 race("Moon Crystal", 30_000, 782_000, Some(14_684_000)),
             ],
             &cfg,
+            None,
         );
         let rt = out["run_throughs"].as_array().unwrap();
         assert_eq!(rt.len(), 1, "{rt:?}");
         assert_eq!(rt[0]["games"], 3);
         assert_eq!(rt[0]["finished"], true, "{rt:?}");
         assert_eq!(rt[0]["reached_ms"], 14_684_000);
+    }
+
+    /// The race is filed under the same category as every practice run of
+    /// it; the date is what tells them apart. And the run the live board is
+    /// running is the newest one only once that board has filed a game of
+    /// it: before then the newest is last week's finished run, which the
+    /// page called "in progress, 20 of 20".
+    #[test]
+    fn the_race_is_known_by_its_date_and_the_live_run_by_its_board() {
+        let cfg = Config::for_test_with_min_final(660_000);
+        let row =
+            |day: &'static str, game: &'static str, at: i64, seg: i64, cum: i64| db::OtherRun {
+                category: "Big 20 #23 run".into(),
+                started_at_ms: at,
+                final_time_ms: Some(seg),
+                last_timer_ms: Some(cum),
+                tag: None,
+                day: day.into(),
+                ..run(5, game, seg)
+            };
+        let practice = row("2026-10-04", "Die Hard", 1_000_000, 142_000, 142_000);
+        let practice_end = row("2026-10-04", "Moon Crystal", 1_500_000, 782_000, 14_684_000);
+        let race_1 = row("2026-10-10", "Die Hard", 900_000_000, 140_000, 140_000);
+        let race_2 = row("2026-10-10", "Pac-Mania", 900_200_000, 200_000, 352_000);
+        let board = |games: i64, reached: Option<i64>, since: i64| db::MarathonNow {
+            category: "Big 20 #23 run".into(),
+            games,
+            reached_ms: reached,
+            since_ms: since,
+        };
+        let rts = |live: Option<&db::MarathonNow>, rows: &[db::OtherRun]| {
+            big20_prep(&[], rows, &cfg, live)
+        };
+
+        // The race is the run on the race's date, and only that one.
+        let out = rts(
+            None,
+            &[
+                practice.clone(),
+                practice_end.clone(),
+                race_1.clone(),
+                race_2.clone(),
+            ],
+        );
+        let rt = out["run_throughs"].as_array().unwrap();
+        assert_eq!(rt.len(), 2, "{rt:?}");
+        assert_eq!(rt[0]["race"], false);
+        assert_eq!(rt[1]["race"], true);
+        assert!(out["live"].is_null(), "no board, nothing live");
+        assert!(rt.iter().all(|r| r["live"] == false));
+
+        // The board is up for the race and has filed nothing: the newest
+        // run is last week's, finished, and is not the one in progress.
+        let up = board(0, None, 800_000_000);
+        let out = rts(Some(&up), &[practice.clone(), practice_end.clone()]);
+        let rt = out["run_throughs"].as_array().unwrap();
+        assert!(rt.iter().all(|r| r["live"] == false), "{rt:?}");
+        assert_eq!(out["live"]["games"], 0);
+        assert_eq!(out["live"]["run_live"], false);
+
+        // Two games filed, the run started after the board went up: live.
+        let on = board(2, Some(352_000), 800_000_000);
+        let out = rts(
+            Some(&on),
+            &[
+                practice.clone(),
+                practice_end.clone(),
+                race_1.clone(),
+                race_2.clone(),
+            ],
+        );
+        let rt = out["run_throughs"].as_array().unwrap();
+        assert_eq!(rt[0]["live"], false);
+        assert_eq!(rt[1]["live"], true);
+        assert_eq!(out["live"]["run_live"], true);
+
+        // The bot restarted mid-run, and the new session's event postdates
+        // the run's first game: the run is still the board's, by its clock.
+        let restarted = board(2, Some(352_000), 900_100_000);
+        let out = rts(
+            Some(&restarted),
+            &[
+                practice.clone(),
+                practice_end.clone(),
+                race_1.clone(),
+                race_2.clone(),
+            ],
+        );
+        assert_eq!(out["run_throughs"][1]["live"], true);
+
+        // A board that is not this race's (an Arcathlon) is not the race's
+        // live run, however many games it has filed.
+        let other = db::MarathonNow {
+            category: "Arcathlon".into(),
+            ..board(2, Some(352_000), 800_000_000)
+        };
+        let out = rts(Some(&other), &[race_1, race_2]);
+        assert!(out["live"].is_null());
+        assert_eq!(out["run_throughs"][0]["live"], false);
     }
 }

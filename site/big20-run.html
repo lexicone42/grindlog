@@ -138,22 +138,36 @@ const segOf = (r, game) => (r.segments || []).find(s => key(s.game) === key(game
 // Reached the race's last game: complete, however many games carry a time
 // (a skipped split keeps none; the next game's segment spans both).
 const complete = r => (r.finished || r.games >= games.length) && r.reached_ms != null;
-const done = all.filter(complete);
+// The race itself (`race`: run on the race's date) is never his best
+// PRACTICE run, which is what this page measures runs against.
+const done = all.filter(r => complete(r) && !r.race);
 const bestRun = done.length ? done.reduce((m, r) => r.reached_ms < m.reached_ms ? r : m) : null;
 const idx = all.indexOf(run);
 const prev = idx > 0 ? all.slice(0, idx).reverse().find(complete) : null;
 const sob = games.every(g => g.best_ms != null) ? games.reduce((n, g) => n + g.best_ms, 0) : null;
 // His best for each game across every full run, this one included.
 const bestInRuns = new Map(games.map(g => [g.game, Math.min(...all.map(r => segOf(r, g.game)).filter(s => s && s.ms != null).map(s => s.ms).concat([Infinity]))]));
+// A run that stopped short (or is still going) is compared over the games it
+// reached, never with whole-race totals: ten games' clock against twenty
+// games' sum of bests put a half-run hours "ahead". Its last game is the
+// one its clock ended at; the other runs are read at that same game.
+const runComplete = complete(run);
+const lastSeg = (run.segments || []).filter(s => s.cum != null && s.cum === run.reached_ms).pop();
+const lastAt = lastSeg ? games.findIndex(g => key(g.game) === key(lastSeg.game)) : -1;
+const lastGame = lastAt >= 0 ? games[lastAt] : null;
+const cumAt = (r, g) => { const s = r && g ? segOf(r, g.game) : null; return s && s.cum != null ? s.cum : null; };
+const sobTo = lastAt >= 0 && games.slice(0, lastAt + 1).every(g => g.best_ms != null)
+  ? games.slice(0, lastAt + 1).reduce((n, g) => n + g.best_ms, 0) : null;
 
 document.title = D.title;
-document.getElementById('title').textContent = `Full run · ${dshort(run.started_at_ms)}`;
+document.getElementById('title').textContent = `${run.race ? 'The race' : 'Full run'} · ${dshort(run.started_at_ms)}`;
 const isBest = bestRun === run;
 document.getElementById('sub').textContent =
-  `Big 20 ${D.race || ''} · ${run.games} of ${games.length} games` +
+  `Big 20 ${D.race || ''} · ${run.live ? 'in progress · ' : ''}${run.games} of ${games.length} games` +
   (run.reached_ms != null ? ` · ${fmt(run.reached_ms)} on the clock at the last one` : '') +
-  (isBest && done.length > 1 ? ' · his best run' : '') +
-  (D.date ? ` · race on ${D.date}` : '');
+  (isBest && done.length > 1 ? ' · his best practice run' : '') +
+  (run.race ? ' · the race itself, not a practice run' : D.date ? ` · race on ${D.date}` : '');
+if (run.live) document.getElementById('title').insertAdjacentHTML('beforeend', '<span class="tag">in progress</span>');
 const nav = [];
 if (prev) nav.push(`<a href="/big20/runs/${runSlug(prev, all)}/index.html">&larr; previous run, ${esc(dshort(prev.started_at_ms))}</a>`);
 const next = all.slice(idx + 1).find(complete);
@@ -172,13 +186,22 @@ const inGame = played.reduce((n, r) => n + r.s.ms, 0);
 const between = run.reached_ms != null && run.reached_ms >= inGame ? run.reached_ms - inGame : null;
 const vsBests = played.filter(r => r.vsPractice != null).reduce((n, r) => n + r.vsPractice, 0);
 const tile = (v, label, sub, cls) => `<div class="tile"><b class="${cls || ''}">${v}</b><span>${label}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
+// The comparison tiles. A complete run is set against the whole-race totals;
+// a partial one against the same totals at its last game (the sum of bests
+// over the games up to it, the other run's clock at it), or not at all when
+// there is no such figure.
+const prevAt = runComplete ? (prev ? prev.reached_ms : null) : cumAt(prev, lastGame);
+const bestAt = runComplete ? (bestRun ? bestRun.reached_ms : null) : cumAt(bestRun, lastGame);
+const sobAt = runComplete ? sob : sobTo;
+const upTo = runComplete || !lastGame ? '' : ` at game ${lastGame.n}`;
+const prevTile = prevAt != null && run.reached_ms != null ? `${sd(run.reached_ms - prevAt)} vs the run before${upTo}` : '';
 document.getElementById('tiles').innerHTML =
-  tile(fmt(run.reached_ms), 'clock at the last game', prev ? `${sd(run.reached_ms - prev.reached_ms)} vs the run before` : '', isBest ? 'gold' : '') +
-  tile(`${run.games}<span style="display:inline;font-size:13px;color:var(--muted);text-transform:none;letter-spacing:0"> / ${games.length}</span>`, 'games') +
+  tile(fmt(run.reached_ms), 'clock at the last game', prevTile, isBest ? 'gold' : '') +
+  tile(`${run.games}<span style="display:inline;font-size:13px;color:var(--muted);text-transform:none;letter-spacing:0"> / ${games.length}</span>`, run.live ? 'games so far' : 'games') +
   tile(fmt(inGame), 'in the games', between != null ? `${fmt(between)} between them` : '') +
-  (sob != null && run.reached_ms != null ? tile(sd(run.reached_ms - sob), 'over the sum of bests', `his practice bests add to ${fmt(sob)}`, run.reached_ms - sob < 0 ? 'ahead' : '') : '') +
+  (sobAt != null && run.reached_ms != null ? tile(sd(run.reached_ms - sobAt), `over the sum of bests${upTo}`, `his practice bests ${runComplete ? '' : `for games 1–${lastGame.n} `}add to ${fmt(sobAt)}`, run.reached_ms - sobAt < 0 ? 'ahead' : '') : '') +
   (played.some(r => r.vsPractice != null) ? tile(sd(vsBests), 'against practice bests', `over ${played.filter(r => r.vsPractice != null).length} games`, vsBests < 0 ? 'ahead' : '') : '') +
-  (bestRun && bestRun !== run ? tile(sd(run.reached_ms - bestRun.reached_ms), 'vs his best run', `${fmt(bestRun.reached_ms)} on ${dshort(bestRun.started_at_ms)}`) : '');
+  (bestRun && bestRun !== run && bestAt != null && run.reached_ms != null ? tile(sd(run.reached_ms - bestAt), `vs his best practice run${upTo}`, `${fmt(bestAt)}${runComplete ? '' : ` at ${esc(lastGame.game)}`} on ${dshort(bestRun.started_at_ms)}`, run.reached_ms - bestAt < 0 ? 'ahead' : '') : '');
 
 // The clock through the run, as a staircase over the games, against the
 // staircase his practice bests would make and the one his best run made.
@@ -214,7 +237,7 @@ if (played.length) {
   chart.hidden = false;
   chart.innerHTML = svg + `<div class="legend"><span><i class="run"></i>this run, the clock at each game</span>` +
     (bestCum ? `<span><i class="bests"></i>his practice bests, back to back</span>` : '') +
-    (otherCum ? `<span><i class="other"></i>his best run, ${esc(dshort(bestRun.started_at_ms))}</span>` : '') + `</div>`;
+    (otherCum ? `<span><i class="other"></i>his best practice run, ${esc(dshort(bestRun.started_at_ms))}</span>` : '') + `</div>`;
 }
 
 // The table: every game in race order.
