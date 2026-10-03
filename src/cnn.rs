@@ -31,6 +31,43 @@ pub struct Geometry {
     pub tile: [u32; 2],
 }
 
+impl Geometry {
+    /// How many glyphs a LiveSplit timer prints, right-aligned in these
+    /// slots: S.hh and -S.hh, SS.hh, M:SS.hh, MM:SS.hh, H:MM:SS.hh.
+    pub const GLYPH_COUNTS: [usize; 5] = [4, 5, 7, 8, 10];
+
+    /// The horizontal scale from the ink's width. The band is a short lever
+    /// (35 px on the race total): a pixel or two of it moves the far slot
+    /// by half a cell, while the ink is five times as long. The glyph
+    /// count is one of a few formats, each spanning a known number of
+    /// nominal pixels, so each count implies a scale, and the one nearest
+    /// the band's wins. None when no count comes within a fifth of it, or
+    /// the slots are fewer than any format.
+    pub fn width_scale(&self, bx: &InkBox, band_scale: f32) -> Option<(usize, f32)> {
+        let ink_w = (bx.right - bx.left) as f32;
+        let first_w = (bx.first_right - bx.left) as f32;
+        let last_w = (bx.last_right - bx.last_left) as f32;
+        let c_last = self.slots.first()?[1] as f32;
+        let mut best: Option<(usize, f32, f32)> = None;
+        for k in Self::GLYPH_COUNTS
+            .into_iter()
+            .filter(|k| *k <= self.slots.len())
+        {
+            let [from_right, c_first] = self.slots[k - 1];
+            // Each end glyph sits centred in its cell, so the ink is the
+            // cells' span less half the room left in each end cell:
+            // ink = s*span - (s*c_first - first_w)/2 - (s*c_last - last_w)/2.
+            let span = (from_right + c_first) as f32 - (c_first as f32 + c_last) / 2.0;
+            let s = (ink_w - (first_w + last_w) / 2.0) / span.max(1.0);
+            let off = (s / band_scale - 1.0).abs();
+            if s > 0.0 && off < 0.2 && best.is_none_or(|b| off < b.2) {
+                best = Some((k, s, off));
+            }
+        }
+        best.map(|(k, s, _)| (k, s))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Conv {
     pub out: usize,
@@ -73,6 +110,8 @@ pub struct InkBox {
     /// narrower than its cell when it is a 1.
     pub last_left: u32,
     pub last_right: u32,
+    /// Where the leftmost glyph's own columns end (they start at `left`).
+    pub first_right: u32,
     /// Where the crop's usable area ends: the crop's edges, or the pane
     /// border's columns where the crop reaches over them.
     pub edge_left: u32,
@@ -249,6 +288,7 @@ pub fn ink_box(norm: &GrayImage, expect: Option<u32>) -> Option<InkBox> {
         bottom,
         last_left: last.0,
         last_right: last.1,
+        first_right: runs.first().expect("checked").1,
         edge_left: x_lo,
         edge_right: x_hi,
     })
@@ -262,7 +302,10 @@ pub fn tiles_ink(norm: &GrayImage, geo: &Geometry) -> Option<(Vec<GrayImage>, In
     if bx.clipped(w, h) {
         return None;
     }
-    let scale = bx.height() as f32 / geo.band_ref.max(1) as f32;
+    let band_scale = bx.height() as f32 / geo.band_ref.max(1) as f32;
+    let scale = geo
+        .width_scale(&bx, band_scale)
+        .map_or(band_scale, |(_, s)| s);
     // The timer is right-aligned by its cells, not its ink: a last digit
     // narrower than its cell (a 1) leaves the cell's right edge past the
     // ink. The glyph sits centred in the cell, so the cell edge is the
@@ -547,6 +590,7 @@ mod tests {
                     bottom: y + 40,
                     last_left: x,
                     last_right: x + 100,
+                    first_right: x + 100,
                     edge_left: 0,
                     edge_right: 200,
                 },
@@ -627,5 +671,57 @@ mod tests {
         }
         assert!(n >= 10, "only {n} fixture crops");
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// Eight glyphs drawn a tenth wider than the band says, as a timer whose
+    /// reference band was measured a little tall: the ink's width picks the
+    /// eight-glyph format and its scale, and every glyph lands centred in
+    /// its tile instead of drifting half a cell by the far end.
+    #[test]
+    fn the_inks_width_sets_the_horizontal_scale() {
+        let geo = Geometry {
+            slots: vec![
+                [0, 20],
+                [20, 20],
+                [40, 10],
+                [50, 25],
+                [75, 25],
+                [100, 12],
+                [112, 25],
+                [137, 25],
+            ],
+            band_ref: 40,
+            tile: [24, 32],
+        };
+        let sx = 1.1_f32;
+        let right = 300.0_f32;
+        let mut img = GrayImage::from_pixel(320, 80, Luma([20]));
+        for [from_right, width] in &geo.slots {
+            let centre = right - (*from_right as f32 + *width as f32 / 2.0) * sx;
+            let half = (*width as f32 * sx * 0.3).round();
+            for y in 20..60 {
+                for x in (centre - half) as u32..(centre + half) as u32 {
+                    img.put_pixel(x, y, Luma([220]));
+                }
+            }
+        }
+        let n = normalise(&img).unwrap();
+        let bx = ink_box(&n, None).unwrap();
+        let (k, s) = geo.width_scale(&bx, 1.0).expect("a format fits");
+        assert_eq!(k, 8);
+        assert!((s - sx).abs() < 0.03, "scale {s}");
+        let (tiles, _) = tiles_ink(&n, &geo).unwrap();
+        for (i, t) in tiles.iter().enumerate() {
+            let cols: Vec<u32> = (0..t.width())
+                .filter(|x| (0..t.height()).any(|y| t.get_pixel(*x, y).0[0] > 128))
+                .collect();
+            let (l, r) = (cols[0], t.width() - 1 - cols[cols.len() - 1]);
+            // Within a source pixel and a half: an even block cannot sit centred
+            // in an odd slot, and the tile is wider than the slot.
+            assert!(
+                l.abs_diff(r) <= 3,
+                "tile {i}: ink {l} from the left, {r} from the right"
+            );
+        }
     }
 }
