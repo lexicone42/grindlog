@@ -69,8 +69,14 @@ if [ -z "${attempts:-}" ]; then
   say "cannot read $DB"
   attempts=0 finished=0 numbered=0 ls_min="" ls_max=""
 fi
+# Sessions by time only: the table has no game or category (a session is
+# the bot watching the channel, whatever is on it). Filtering it with
+# $in_day was an SQL error q swallowed, so every day read as having none.
 sessions=$(q "SELECT started_at_ms, COALESCE(ended_at_ms,''), source, COALESCE(frames,''), COALESCE(parsed,''), COALESCE(relocks,'')
-              FROM sessions WHERE $in_day ORDER BY started_at_ms")
+              FROM sessions WHERE started_at_ms >= $s_ms AND started_at_ms < $e_ms ORDER BY started_at_ms")
+# With no attempt of the tracked game the headline waits for the race board
+# below: a day spent on the board is not "0 attempts".
+headline=${#out[@]}
 if [ "$attempts" -eq 0 ] && [ -z "$sessions" ]; then
   say "no session and no attempts: offline, or another game (title_filter)"
 else
@@ -110,17 +116,36 @@ while IFS='|' read -r bname broster; do
   fi
   # Rows carrying the previous run's time to the second: the board prints
   # the previous run's times on the rows not yet reached, and a comparison
-  # filed as a finish is exactly that.
+  # filed as a finish is exactly that. "Previous" is the one row the board
+  # printed, the game's most recent earlier finish in the category (as
+  # db::previous_time, started over an hour before as app.rs asks it): an
+  # earlier practice run of the game that happens to share the time to the
+  # second is a coincidence, and with a dozen of them per game it happens
+  # (2026-10-02: Crisis Force and Mini Putt, each matching a run from a
+  # week before, not the day before's).
   echoes=$(q "SELECT COUNT(*) FROM runs r WHERE r.category = '$(esc "$bname")' AND r.started_at_ms >= $s_ms AND r.started_at_ms < $e_ms
               AND r.outcome = 'finished' AND r.final_time_ms IS NOT NULL
-              AND EXISTS (SELECT 1 FROM runs p WHERE p.game = r.game AND p.category = r.category AND p.outcome = 'finished'
-                          AND p.final_time_ms = r.final_time_ms AND p.started_at_ms < r.started_at_ms - 3600000)")
+              AND r.final_time_ms = (SELECT p.final_time_ms FROM runs p WHERE p.game = r.game AND p.category = r.category
+                                     AND p.outcome = 'finished' AND p.final_time_ms IS NOT NULL
+                                     AND p.started_at_ms < r.started_at_ms - 3600000
+                                     ORDER BY p.started_at_ms DESC, p.id DESC LIMIT 1)")
   if [ "${echoes:-0}" -gt 0 ]; then
     line+=" -- ECHO: $echoes game(s) carry the previous run's time to the second (a comparison filed as a finish? docs/big20.md)"
   fi
   say "$line"
+  # The notification's subject, short: on a race day this is the headline.
+  short="$bname: $n/${size:-?} games, reached $(fmt "$reached")"
+  [ "${size:-0}" -gt 0 ] && [ "$n" -lt "$size" ] && short+=", SHORT"
+  [ "${echoes:-0}" -gt 0 ] && short+=", ECHO"
+  board_subject+="${board_subject:+; }$short"
 done < <(awk '/^\[\[/{if(m&&n)print n"|"r; n="";r="";m=0} /^name = /{n=$0} /^roster = /{r=$0} /^mode = "board"/{m=1} END{if(m&&n)print n"|"r}' live.toml \
          | sed 's/^name = "\([^"]*\)"|roster = "\([^"]*\)"$/\1|\2/')
+# A board day with no attempt of the tracked game: the board line, which
+# then follows the date line directly, is the headline, and "attempts: 0"
+# (or "no session") would only mislead.
+if [ "$attempts" -eq 0 ] && [ -n "${board_subject:-}" ]; then
+  unset 'out[headline]'
+fi
 
 # --- resets by act: the same buckets as stats::death_chart, a reset falls in
 # the first act whose end_ms its last timer value is under; the last act (no
@@ -216,6 +241,10 @@ fi
 text=$(printf '%s\n' "${out[@]}")
 printf '%s\n' "$text"
 if [ -n "${NG_ALERT_URL:-}${NG_ALERT_MAIL:-}" ]; then
-  printf '%s\n' "$text" | ./scripts/notify.sh "grindlog $day: $attempts attempts, $finished finished${best_ms:+, best $(fmt "$best_ms")}"
+  subject="grindlog $day: $attempts attempts, $finished finished${best_ms:+, best $(fmt "$best_ms")}"
+  if [ -n "${board_subject:-}" ]; then
+    if [ "$attempts" -eq 0 ]; then subject="grindlog $day: $board_subject"; else subject+="; $board_subject"; fi
+  fi
+  printf '%s\n' "$text" | ./scripts/notify.sh "$subject"
 fi
 exit 0
