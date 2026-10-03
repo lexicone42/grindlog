@@ -274,7 +274,7 @@ twenty-game totals put a half-run hours "ahead".
 The report carries them as `big20.run_throughs[]` — `day`, `started_at_ms`,
 `games`, `reached_ms`, `segments_ms`, `segments[{game, ms, cum}]` in the
 order he reached them, `race` and `live` — and `big20.live` (the race
-board in force: `games`, `reached_ms`, `since_ms`, `run_live`) — grouped
+board in force: `games`, `reached_ms`, `since_ms`, `run_live`, `run_done` once its last game is filed) — grouped
 by one rule (`report.rs`): a run starts
 where the marathon clock had nothing before the row, its cumulative being
 its own segment (the first game of a fresh set of splits), or after two

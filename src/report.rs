@@ -437,15 +437,18 @@ fn big20_prep(
     // or "board replaced" event postdates the run's first game — it is
     // unfinished and ends at the very clock the broadcast's rows reached.
     let live = live.filter(|m| run_cat(&m.category));
-    let live_run = live.filter(|m| m.games > 0).and_then(|m| {
+    // The board's run, whether or not it is still going.
+    let boards_run = live.filter(|m| m.games > 0).and_then(|m| {
         let i = run_throughs.len().checked_sub(1)?;
         let r = &run_throughs[i];
         let since = r["started_at_ms"].as_i64().is_some_and(|t| t >= m.since_ms);
-        let same_clock = r["finished"] == false
-            && m.reached_ms.is_some()
-            && r["reached_ms"].as_i64() == m.reached_ms;
+        let same_clock = m.reached_ms.is_some() && r["reached_ms"].as_i64() == m.reached_ms;
         (since || same_clock).then_some(i)
     });
+    // In progress until its last game is filed: the board stays up after the
+    // final until the stream ends, and the run is done, not in progress.
+    let run_done = boards_run.is_some_and(|i| run_throughs[i]["finished"] == true);
+    let live_run = boards_run.filter(|_| !run_done);
     if let Some(i) = live_run {
         run_throughs[i]["live"] = serde_json::Value::Bool(true);
     }
@@ -465,6 +468,7 @@ fn big20_prep(
             "reached_ms": m.reached_ms,
             "since_ms": m.since_ms,
             "run_live": live_run.is_some(),
+            "run_done": run_done,
         })),
     })
 }
@@ -1427,6 +1431,30 @@ mod tests {
             ],
         );
         assert_eq!(out["run_throughs"][1]["live"], true);
+
+        // The final filed and the board still up: the run is done.
+        let race_end = row(
+            "2026-10-10",
+            "Moon Crystal",
+            900_900_000,
+            782_000,
+            14_600_000,
+        );
+        let done = board(3, Some(14_600_000), 800_000_000);
+        let out = rts(
+            Some(&done),
+            &[
+                practice.clone(),
+                practice_end.clone(),
+                race_1.clone(),
+                race_2.clone(),
+                race_end,
+            ],
+        );
+        assert_eq!(out["run_throughs"][1]["finished"], true);
+        assert_eq!(out["run_throughs"][1]["live"], false);
+        assert_eq!(out["live"]["run_live"], false);
+        assert_eq!(out["live"]["run_done"], true);
 
         // A board that is not this race's (an Arcathlon) is not the race's
         // live run, however many games it has filed.

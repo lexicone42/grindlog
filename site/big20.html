@@ -385,7 +385,9 @@ function practiceRuns() {
   // it. Before that the newest is the last run he finished, and calling it
   // "in progress, 20 of 20" was wrong; the banner says the run is starting.
   const live = rs.find(r => r.live) || null;
-  const starting = D.live && !live ? D.live : null;
+  // And none once the board's run is done: the board stays up after the
+  // final, and the head line already gives the run's time.
+  const starting = D.live && !live && !D.live.run_done ? D.live : null;
   let prevDone = null;
   for (const r of rs) {
     const segs = (r.segments || []).filter(s => s.ms != null);

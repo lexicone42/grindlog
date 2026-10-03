@@ -142,7 +142,7 @@ Everything in `summary.json` plus:
   `race: true` on the run made on the race's `date` (the race itself, not
   practice) and `live: true` on the run the race board in force is running;
   and `live` — that board (`category`, `games`, `reached_ms`, `since_ms`,
-  `run_live`), null when none is up.
+  `run_live`; `run_done` once that run's last game is filed, the board still up), null when none is up.
 
 ## The per-day feed: `manifest.json` and `days/`
 
