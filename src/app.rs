@@ -7100,3 +7100,129 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod keep_tests {
+    use super::*;
+    use crate::board::BoardRow;
+
+    fn board(names: &[&str]) -> Board {
+        Board {
+            title: Some("Big 20 #23".into()),
+            subtitle: None,
+            counter: None,
+            rows: names
+                .iter()
+                .map(|n| BoardRow {
+                    name: Some(n.to_string()),
+                    cells: vec!["1:00".into(), "1:00".into()],
+                    y: 0,
+                })
+                .collect(),
+        }
+    }
+
+    fn cfg_in(dir: &std::path::Path) -> Config {
+        let mut cfg = Config::for_test_with_min_final(0);
+        cfg.database.path = dir.join("live.db").display().to_string();
+        cfg
+    }
+
+    /// A tracker saved by one bot is what the next one starts with, when it
+    /// is recent: the restart that used to rebuild the race from the
+    /// database alone.
+    #[test]
+    fn a_saved_tracker_is_read_back_by_the_next_bot() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(dir.path());
+        let mut keep = MarathonKeep::new(&cfg, true);
+        assert!(keep.checkpoint.is_none());
+        let m = marathon::Marathon::new("Big 20 #23 run".into(), Arc::default());
+        keep.save(&m, util::unix_ms());
+        let path = dir.path().join("live.db.marathon.json");
+        assert!(path.exists(), "saved beside the database");
+
+        let mut next = MarathonKeep::new(&cfg, true);
+        let (resumed, over, waiting) = next.take_up(
+            "Big 20 #23 run",
+            &board(&["Die Hard"]),
+            Some(60_000),
+            util::unix_ms(),
+        );
+        assert!(resumed.is_some() && over.is_none() && !waiting);
+        // Another event's board does not take it.
+        let mut other = MarathonKeep::new(&cfg, true);
+        let (resumed, _, _) = other.take_up(
+            "Arcathlon",
+            &board(&["Die Hard"]),
+            Some(60_000),
+            util::unix_ms(),
+        );
+        assert!(resumed.is_none());
+    }
+
+    /// One left from an earlier broadcast is not carried on with, and a
+    /// recording neither reads nor writes one.
+    #[test]
+    fn an_old_checkpoint_or_a_recording_starts_afresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(dir.path());
+        let mut keep = MarathonKeep::new(&cfg, true);
+        let m = marathon::Marathon::new("Big 20 #23 run".into(), Arc::default());
+        keep.save(
+            &m,
+            util::unix_ms() - marathon::CHECKPOINT_RESUME_MS - 60_000,
+        );
+        assert!(MarathonKeep::new(&cfg, true).checkpoint.is_none());
+
+        let other = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(other.path());
+        let mut replay = MarathonKeep::new(&cfg, false);
+        replay.save(&m, util::unix_ms());
+        assert!(!other.path().join("live.db.marathon.json").exists());
+    }
+
+    /// A tracker set aside at a drop waits out passes that do not match it
+    /// — names damaged, the window mid-scroll — and is let go on the third,
+    /// as any event is; another event's board ends it at once.
+    #[test]
+    fn a_tracker_set_aside_waits_out_a_bad_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(dir.path());
+        let rosters = Arc::default();
+        let mut m = marathon::Marathon::new("Big 20 #23 run".into(), rosters);
+        // A tracker that has settled on three rows' names.
+        let ours = board(&["Die Hard", "Pac-Mania", "Crisis Force"]);
+        for t in 0..4 {
+            m.observe(&ours, t * 60_000, Some(t * 60_000));
+        }
+        let set_aside = |m: &marathon::Marathon| Aside {
+            tracker: m.clone(),
+            since_ms: 0,
+            deadline: tokio::time::Instant::now(),
+            session_id: None,
+        };
+        let theirs = board(&["Zelda", "Metroid", "Kid Icarus"]);
+        let mut keep = MarathonKeep::new(&cfg, false);
+        keep.aside = Some(set_aside(&m));
+        for _ in 0..MARATHON_TAKE_UP - 1 {
+            let (r, o, waiting) = keep.take_up("Big 20 #23 run", &theirs, None, 0);
+            assert!(r.is_none() && o.is_none() && waiting, "waited on");
+        }
+        let (r, o, waiting) = keep.take_up("Big 20 #23 run", &theirs, None, 0);
+        assert!(
+            r.is_none() && o.is_some() && !waiting,
+            "let go on the third"
+        );
+
+        keep.aside = Some(set_aside(&m));
+        let (_, _, waiting) = keep.take_up("Big 20 #23 run", &theirs, None, 0);
+        assert!(waiting);
+        let (r, _, _) = keep.take_up("Big 20 #23 run", &ours, None, 0);
+        assert!(r.is_some(), "and carried on with when its board is back");
+
+        keep.aside = Some(set_aside(&m));
+        let (r, o, _) = keep.take_up("Arcathlon", &ours, None, 0);
+        assert!(r.is_none() && o.is_some(), "another event ends it at once");
+    }
+}
