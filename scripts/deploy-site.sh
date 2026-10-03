@@ -13,8 +13,8 @@
 #
 # It writes to the live database first: fill-run-numbers.sh fills in
 # ls_attempt numbers inferred from neighbouring runs. Normally cron runs this
-# for you: deploy-if-live.sh (every 10 minutes, only while a live session is
-# open) execs it, and a nightly entry runs it directly; the schedule lives in
+# for you: deploy-if-live.sh (every 10 minutes while a live session is open,
+# and once after it closes) runs it, and a nightly entry runs it directly; the schedule lives in
 # the crontab, not in the repo. import-when-done.sh and import-vod.sh
 # --deploy call it too. Run it by hand to publish right away, after an import
 # or a hand edit of the database.
