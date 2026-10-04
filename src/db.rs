@@ -990,9 +990,14 @@ pub async fn now_playing(pool: &SqlitePool) -> Result<NowPlaying> {
         // The rows it has recorded are this session's runs of its category.
         // The tracker writes every completion as a marathon event too
         // ("Hydlide 18:32.0"), so the newest marathon event is not the
-        // state: the newest one that says started, replaced or ended is.
+        // state: the newest one that says started, resumed, replaced or
+        // ended is. "Resumed" is a tracker carried on with after a drop or a
+        // restart (app.rs, MarathonKeep): the new session's only state line.
         let is_state = |d: &str| {
-            d.ends_with(" started") || d.ends_with(" board replaced") || d.ends_with(" ended")
+            d.ends_with(" started")
+                || d.ends_with(" resumed")
+                || d.ends_with(" board replaced")
+                || d.ends_with(" ended")
         };
         let marathon = match events
             .iter()
@@ -1003,6 +1008,7 @@ pub async fn now_playing(pool: &SqlitePool) -> Result<NowPlaying> {
                 let d = e["d"].as_str().unwrap_or_default();
                 let category = d
                     .strip_suffix(" started")
+                    .or_else(|| d.strip_suffix(" resumed"))
                     .or_else(|| d.strip_suffix(" board replaced"))
                     .map(str::to_string);
                 match category {
@@ -1634,6 +1640,18 @@ mod tests {
         h.event(40, "marathon", "Big 20 #23 run ended".to_string());
         update_session_health(&pool, sid2, &h).await.unwrap();
         assert!(now_playing(&pool).await.unwrap().marathon.is_none());
+
+        // A tracker carried on with after a drop: the new session's only
+        // state line says "resumed", and the event is in force.
+        let mut h = SessionHealth::default();
+        h.event(50, "marathon", "Big 20 #23 run resumed".to_string());
+        update_session_health(&pool, sid2, &h).await.unwrap();
+        let m = now_playing(&pool)
+            .await
+            .unwrap()
+            .marathon
+            .expect("resumed, in force");
+        assert_eq!(m.category, "Big 20 #23 run");
     }
 
     /// These are the eight readings session #194 actually recorded of one

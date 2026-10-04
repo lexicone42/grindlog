@@ -126,7 +126,11 @@ Three rules that must not be got wrong:
   corpus under `race-audit/`) and fails on any row that moved against
   `race-audit/expected.txt`; read the diff, and `--update` only when the
   new answer is the better one. Two rules that mended one day's log each
-  cost rows on other days, and only this comparison said so. For a race board (the Big 20),
+  cost rows on other days, and only this comparison said so. And
+  `scripts/audit-disrupt.sh`: the same corpus with a stream drop or a
+  restart at every pass, held to `race-audit/disrupt-expected.txt` (a day
+  that got worse fails); it takes about half an hour.
+  `tests/fixtures/race/` holds two whole practice days that CI replays. For a race board (the Big 20),
   `NG_MARATHON_TRACE=<row name|slot|all> ngtwitchtimer --config live.toml
   audit --dir <dir with boards-<vod>.jsonl and obs-<vod>.jsonl>` replays the
   tracker over a board log in a second and says, per pass, which guard
@@ -203,6 +207,13 @@ client (aws-lc, through rustls) compiles from source once per target dir.
   with ground truth; a change to the reader must keep them passing.
   `build-site.sh` strips only the `title` events from the page's copy of
   the report; `layout` events stay (a handful per session).
+- A board-tracked event (the Big 20) survives a drop or a restart: the
+  tracker is saved after every pass to `ninja-gaiden.db.marathon.json`
+  (ignored by git) and carried on with by the next bot, and a stream that
+  goes offline sets it aside for 15 minutes rather than closing it. So a
+  restart mid-race costs nothing, but a rollout mid-race is still not
+  something to do on purpose. See docs/marathons.md, *Across a drop or a
+  restart*.
 - `pkill -f`/`pgrep -f` patterns must not appear literally in the same
   command line (`ngtwitchtimer --config live.toml ru[n]`), or they match the
   shell running them.

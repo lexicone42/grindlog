@@ -1745,6 +1745,149 @@ pub(crate) const MARATHON_LET_GO: u32 = 3;
 /// real ones.
 pub(crate) const MARATHON_TAKE_UP: u32 = 3;
 
+/// What carries a board-tracked event across a stream drop or a restart of
+/// the bot. Rebuilt from the database alone, a tracker takes whatever a row
+/// shows on its first passes for that row's comparison: a game finished in
+/// the gap, or still settling when it came, was never filed, every row under
+/// it waited behind it, and the close at the drop filed the game in progress
+/// at the time its segment had reached (`audit --disrupt`: a two-minute drop
+/// cost a row at one pass in five, a 30-second reconnect that kept the
+/// tracker at one in six hundred). So the tracker is kept instead: set aside
+/// when the stream goes offline and taken up again when its board returns,
+/// and saved after every pass, so a restarted bot carries on from where the
+/// last one was. `marathon::replay_disrupted` models the same, and the audit
+/// measures it.
+struct MarathonKeep {
+    /// Where the tracker is saved after every pass, on a live stream: beside
+    /// the database. A recording replays from the start and saves nothing.
+    path: Option<std::path::PathBuf>,
+    /// The tracker as of the last pass, and when (broadcast wall-clock ms):
+    /// what a take-up carries on with, when it is this board's and recent.
+    checkpoint: Option<(marathon::Marathon, i64)>,
+    /// The tracker set aside when the stream went offline.
+    aside: Option<Aside>,
+    /// Consecutive passes of this event's board that did not match the
+    /// tracker set aside: three end it, as three start or end any event.
+    aside_refused: u32,
+    /// A failed save is said once, not every pass.
+    save_failed: bool,
+}
+
+struct Aside {
+    tracker: marathon::Marathon,
+    /// When the stream went (broadcast wall-clock ms): the close, if the
+    /// board never returns, is filed as of then.
+    since_ms: i64,
+    /// When the grace runs out.
+    deadline: tokio::time::Instant,
+    session_id: Option<i64>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Checkpoint {
+    saved_at_ms: i64,
+    tracker: marathon::Marathon,
+}
+
+impl MarathonKeep {
+    fn new(cfg: &Config, live: bool) -> Self {
+        let path =
+            live.then(|| std::path::PathBuf::from(format!("{}.marathon.json", cfg.database.path)));
+        // A restarted bot carries on from the last one's tracker, if it is
+        // recent enough to be the same event; the take-up decides whether
+        // it is this board's.
+        let checkpoint = path.as_ref().and_then(|p| {
+            let text = std::fs::read_to_string(p).ok()?;
+            match serde_json::from_str::<Checkpoint>(&text) {
+                Ok(c) if util::unix_ms() - c.saved_at_ms <= marathon::CHECKPOINT_RESUME_MS => {
+                    info!(
+                        "marathon checkpoint from {} s ago ({}): carried on with if its board is up",
+                        (util::unix_ms() - c.saved_at_ms) / 1000,
+                        c.tracker.describe()
+                    );
+                    Some((c.tracker, c.saved_at_ms))
+                }
+                Ok(_) => None,
+                Err(e) => {
+                    warn!("marathon checkpoint {} unreadable, not used: {e}", p.display());
+                    None
+                }
+            }
+        });
+        Self {
+            path,
+            checkpoint,
+            aside: None,
+            aside_refused: 0,
+            save_failed: false,
+        }
+    }
+
+    fn save(&mut self, m: &marathon::Marathon, at_ms: i64) {
+        self.checkpoint = Some((m.clone(), at_ms));
+        let Some(path) = &self.path else { return };
+        let tmp = path.with_extension("json.tmp");
+        let wrote = serde_json::to_vec(&Checkpoint {
+            saved_at_ms: at_ms,
+            tracker: m.clone(),
+        })
+        .map_err(anyhow::Error::from)
+        .and_then(|b| std::fs::write(&tmp, b).map_err(anyhow::Error::from))
+        .and_then(|_| std::fs::rename(&tmp, path).map_err(anyhow::Error::from));
+        match wrote {
+            Ok(()) => self.save_failed = false,
+            Err(e) if !self.save_failed => {
+                warn!(
+                    "could not save the marathon checkpoint to {}: {e:#}",
+                    path.display()
+                );
+                self.save_failed = true;
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// The tracker to carry on with on this board, if any: the one set aside,
+    /// else the last checkpoint when recent. One set aside that is plainly
+    /// not this board's, or did not match three passes running, is over and
+    /// comes back to be closed; one that did not match this pass is waited
+    /// on (`Some(true)` in the last place: no new tracker this pass).
+    fn take_up(
+        &mut self,
+        alias: &str,
+        board: &Board,
+        total_ms: Option<i64>,
+        at_ms: i64,
+    ) -> (Option<marathon::Marathon>, Option<Aside>, bool) {
+        let verdict = self
+            .aside
+            .as_ref()
+            .map(|a| a.tracker.resume_verdict(alias, board, total_ms));
+        if verdict == Some(marathon::Resume::NotYet) {
+            self.aside_refused += 1;
+            if self.aside_refused < MARATHON_TAKE_UP {
+                return (None, None, true);
+            }
+        }
+        self.aside_refused = 0;
+        match self.aside.take() {
+            Some(a) if verdict == Some(marathon::Resume::Carry) => (Some(a.tracker), None, false),
+            Some(a) => (None, Some(a), false),
+            None => (
+                self.checkpoint
+                    .as_ref()
+                    .filter(|(m, saved)| {
+                        at_ms - saved <= marathon::CHECKPOINT_RESUME_MS
+                            && m.resumable(alias, board, total_ms)
+                    })
+                    .map(|(m, _)| m.clone()),
+                None,
+                false,
+            ),
+        }
+    }
+}
+
 /// How far back a restarted bot looks for the completions it already
 /// recorded of the event it is picking up. Longer than his longest marathon
 /// (5h20m) and shorter than the gap to the next day's.
@@ -1768,6 +1911,7 @@ async fn track_marathon(
     health: &mut db::SessionHealth,
     at_ms: i64,
     total_ms: Option<i64>,
+    keep: &mut MarathonKeep,
 ) -> bool {
     match marathon::classify(board, cfg, state.as_ref()) {
         marathon::Verdict::Silent => {}
@@ -1794,6 +1938,37 @@ async fn track_marathon(
         }
         marathon::Verdict::Board(alias) => {
             *misses = 0;
+            if state.is_none() {
+                let (resumed, over, waiting) = keep.take_up(&alias.name, board, total_ms, at_ms);
+                if waiting {
+                    return false;
+                }
+                if let Some(a) = over {
+                    let mut m = a.tracker;
+                    let late = m.close(a.since_ms);
+                    let unmatched = m.unmatched();
+                    file_completions(pool, a.session_id, health, a.since_ms, unmatched, late).await;
+                    info!(
+                        "marathon set aside is over (another board, or a new run): {}",
+                        m.describe()
+                    );
+                }
+                if let Some(mut m) = resumed {
+                    let seen =
+                        db::marathon_totals(pool, &alias.name, at_ms - MARATHON_RECONCILE_MS)
+                            .await
+                            .unwrap_or_default();
+                    m.resume(alias.rosters.clone(), &seen);
+                    info!(
+                        "marathon board: {:?} -> carrying on with the tracker it had: {}",
+                        board.title,
+                        m.describe()
+                    );
+                    health.event(at_ms, "marathon", format!("{} resumed", alias.name));
+                    *state = Some(m);
+                    *hits = 0;
+                }
+            }
             // A tracker is rebuilt when the event changes — and when the
             // BOARD does under it. `disowns` is the second case: the same
             // event by title and configuration, but not one of the rows the
@@ -1894,6 +2069,7 @@ async fn track_marathon(
         return false;
     };
     let completions = m.observe(board, at_ms, total_ms);
+    keep.save(m, at_ms);
     let unmatched = m.unmatched();
     // Name the broadcast after the event it turned out to be.
     if let Some(id) = session_id {
@@ -2564,6 +2740,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     // the state machine is ticked by frame index instead of wall clock —
     // detection becomes deterministic and independent of processing speed.
     let recorded = cfg.stream.source.is_recorded();
+    let mut marathon_keep = MarathonKeep::new(&cfg, !recorded);
     let frame_interval_ms = 1000 / cfg.stream.fps as i64;
     let mut frame_idx: i64 = 0;
 
@@ -2660,7 +2837,29 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .context("installing SIGHUP handler")?;
     loop {
+        let aside_due = marathon_keep.aside.as_ref().map(|a| a.deadline);
         let event = tokio::select! {
+            _ = async move {
+                match aside_due {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                // The board never came back: the event set aside is closed
+                // as the broadcast's end, a finish on its last pass filed.
+                if let Some(a) = marathon_keep.aside.take() {
+                    let mut m = a.tracker;
+                    let late = m.close(a.since_ms);
+                    let unmatched = m.unmatched();
+                    file_completions(&pool, a.session_id, &mut health, a.since_ms, unmatched, late).await;
+                    info!(
+                        "marathon set aside {} min ago and its board never came back: closed ({})",
+                        marathon::ASIDE_GRACE_MS / 60_000,
+                        m.describe()
+                    );
+                }
+                continue;
+            }
             _ = &mut ctrl_c => {
                 info!("shutting down");
                 break;
@@ -2731,14 +2930,24 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // event from `db::marathon_totals` when the board comes back,
                 // which is what that reconcile is for, and the new session
                 // gets its own tag.
-                if let Some(mut m) = marathon.take() {
-                    // A finish in the broadcast's last minute had one pass on
-                    // the board and no second one coming.
-                    let late = m.close(wall_now);
-                    let unmatched = m.unmatched();
-                    file_completions(&pool, session_id, &mut health, wall_now, unmatched, late)
-                        .await;
-                    info!("marathon set aside with the broadcast: {}", m.describe());
+                if let Some(m) = marathon.take() {
+                    // Not closed yet: a stream that only dropped comes back
+                    // to the same board, and the tracker carries on with it
+                    // (`MarathonKeep`). Closed only if the board does not
+                    // return within the grace, when a finish on its last
+                    // pass, with no second one coming, is filed.
+                    info!(
+                        "marathon set aside with the broadcast, for {} min: {}",
+                        marathon::ASIDE_GRACE_MS / 60_000,
+                        m.describe()
+                    );
+                    marathon_keep.aside = Some(Aside {
+                        tracker: m,
+                        since_ms: wall_now,
+                        deadline: tokio::time::Instant::now()
+                            + std::time::Duration::from_millis(marathon::ASIDE_GRACE_MS as u64),
+                        session_id,
+                    });
                 }
                 marathon_tag = None;
                 not_marathon = 0;
@@ -3474,6 +3683,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 &mut health,
                                 at_ms,
                                 marathon_total(last_timer_seen, t),
+                                &mut marathon_keep,
                             )
                             .await;
                             // Reference times printed under the timer.
@@ -4251,6 +4461,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         &mut health,
                         at_ms,
                         marathon_total(last_timer_seen, t),
+                        &mut marathon_keep,
                     )
                     .await;
                     // Tracked game only — see the note at the other reference
@@ -4667,7 +4878,24 @@ pub async fn run(cfg: Config) -> Result<()> {
         // The recording ran out with a marathon in force — a VOD replay,
         // a backfill — and it gets the close the stream-offline path gives
         // one, so a finish on the board's last pass is filed here too.
-        if let Some(mut m) = marathon.take() {
+        // On a live stream it is not closed: the bot is being restarted, the
+        // event goes on, and the next one carries on from the checkpoint.
+        // Closing filed the game in progress at whatever its segment had
+        // reached, and the real finish after the restart as a second run.
+        if let Some(m) = marathon.take().filter(|_| !recorded) {
+            info!("marathon left to its checkpoint: {}", m.describe());
+        }
+        if let Some(a) = marathon_keep.aside.take().filter(|_| !recorded) {
+            info!(
+                "marathon set aside, left to its checkpoint: {}",
+                a.tracker.describe()
+            );
+        }
+        let ended = marathon
+            .take()
+            .into_iter()
+            .chain(marathon_keep.aside.take().map(|a| a.tracker));
+        for mut m in ended {
             let late = m.close(wall_now);
             let unmatched = m.unmatched();
             file_completions(&pool, Some(id), &mut health, wall_now, unmatched, late).await;
@@ -6870,5 +7098,131 @@ mod tests {
             numbered_as(None, Some(&moon), "Moon Crystal", "Big 20 #23"),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod keep_tests {
+    use super::*;
+    use crate::board::BoardRow;
+
+    fn board(names: &[&str]) -> Board {
+        Board {
+            title: Some("Big 20 #23".into()),
+            subtitle: None,
+            counter: None,
+            rows: names
+                .iter()
+                .map(|n| BoardRow {
+                    name: Some(n.to_string()),
+                    cells: vec!["1:00".into(), "1:00".into()],
+                    y: 0,
+                })
+                .collect(),
+        }
+    }
+
+    fn cfg_in(dir: &std::path::Path) -> Config {
+        let mut cfg = Config::for_test_with_min_final(0);
+        cfg.database.path = dir.join("live.db").display().to_string();
+        cfg
+    }
+
+    /// A tracker saved by one bot is what the next one starts with, when it
+    /// is recent: the restart that used to rebuild the race from the
+    /// database alone.
+    #[test]
+    fn a_saved_tracker_is_read_back_by_the_next_bot() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(dir.path());
+        let mut keep = MarathonKeep::new(&cfg, true);
+        assert!(keep.checkpoint.is_none());
+        let m = marathon::Marathon::new("Big 20 #23 run".into(), Arc::default());
+        keep.save(&m, util::unix_ms());
+        let path = dir.path().join("live.db.marathon.json");
+        assert!(path.exists(), "saved beside the database");
+
+        let mut next = MarathonKeep::new(&cfg, true);
+        let (resumed, over, waiting) = next.take_up(
+            "Big 20 #23 run",
+            &board(&["Die Hard"]),
+            Some(60_000),
+            util::unix_ms(),
+        );
+        assert!(resumed.is_some() && over.is_none() && !waiting);
+        // Another event's board does not take it.
+        let mut other = MarathonKeep::new(&cfg, true);
+        let (resumed, _, _) = other.take_up(
+            "Arcathlon",
+            &board(&["Die Hard"]),
+            Some(60_000),
+            util::unix_ms(),
+        );
+        assert!(resumed.is_none());
+    }
+
+    /// One left from an earlier broadcast is not carried on with, and a
+    /// recording neither reads nor writes one.
+    #[test]
+    fn an_old_checkpoint_or_a_recording_starts_afresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(dir.path());
+        let mut keep = MarathonKeep::new(&cfg, true);
+        let m = marathon::Marathon::new("Big 20 #23 run".into(), Arc::default());
+        keep.save(
+            &m,
+            util::unix_ms() - marathon::CHECKPOINT_RESUME_MS - 60_000,
+        );
+        assert!(MarathonKeep::new(&cfg, true).checkpoint.is_none());
+
+        let other = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(other.path());
+        let mut replay = MarathonKeep::new(&cfg, false);
+        replay.save(&m, util::unix_ms());
+        assert!(!other.path().join("live.db.marathon.json").exists());
+    }
+
+    /// A tracker set aside at a drop waits out passes that do not match it
+    /// — names damaged, the window mid-scroll — and is let go on the third,
+    /// as any event is; another event's board ends it at once.
+    #[test]
+    fn a_tracker_set_aside_waits_out_a_bad_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(dir.path());
+        let rosters = Arc::default();
+        let mut m = marathon::Marathon::new("Big 20 #23 run".into(), rosters);
+        // A tracker that has settled on three rows' names.
+        let ours = board(&["Die Hard", "Pac-Mania", "Crisis Force"]);
+        for t in 0..4 {
+            m.observe(&ours, t * 60_000, Some(t * 60_000));
+        }
+        let set_aside = |m: &marathon::Marathon| Aside {
+            tracker: m.clone(),
+            since_ms: 0,
+            deadline: tokio::time::Instant::now(),
+            session_id: None,
+        };
+        let theirs = board(&["Zelda", "Metroid", "Kid Icarus"]);
+        let mut keep = MarathonKeep::new(&cfg, false);
+        keep.aside = Some(set_aside(&m));
+        for _ in 0..MARATHON_TAKE_UP - 1 {
+            let (r, o, waiting) = keep.take_up("Big 20 #23 run", &theirs, None, 0);
+            assert!(r.is_none() && o.is_none() && waiting, "waited on");
+        }
+        let (r, o, waiting) = keep.take_up("Big 20 #23 run", &theirs, None, 0);
+        assert!(
+            r.is_none() && o.is_some() && !waiting,
+            "let go on the third"
+        );
+
+        keep.aside = Some(set_aside(&m));
+        let (_, _, waiting) = keep.take_up("Big 20 #23 run", &theirs, None, 0);
+        assert!(waiting);
+        let (r, _, _) = keep.take_up("Big 20 #23 run", &ours, None, 0);
+        assert!(r.is_some(), "and carried on with when its board is back");
+
+        keep.aside = Some(set_aside(&m));
+        let (r, o, _) = keep.take_up("Arcathlon", &ours, None, 0);
+        assert!(r.is_none() && o.is_some(), "another event ends it at once");
     }
 }
