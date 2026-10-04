@@ -12,7 +12,7 @@
 #
 # Grind Log: the supervisor survives everything but a reboot; this brings it back on its own tmux server.
 @reboot sleep 30 && /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/start-supervisor.sh >> /datar/workspace/claude_code_experiments/ngtwitchtimer/logs/live.log 2>&1
-# Grind Log: deploy the site every ten minutes while a live session is open.
+# Grind Log: deploy the site every ten minutes while a live session is open, and once after it closes.
 */10 * * * * PATH="/home/bryan/.local/bin:/usr/bin:/bin" /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/deploy-if-live.sh >> /datar/workspace/claude_code_experiments/ngtwitchtimer/logs/deploy.log 2>&1
 # Grind Log: nightly deploy, then a backup of the database.
 50 23 * * * PATH="/home/bryan/.local/bin:/usr/bin:/bin" /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/deploy-site.sh >> /datar/workspace/claude_code_experiments/ngtwitchtimer/logs/deploy.log 2>&1
