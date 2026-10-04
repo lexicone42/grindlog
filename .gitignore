@@ -63,3 +63,4 @@ nohup.out
 obs-live.jsonl.*
 # The race-day audit corpus (scripts/audit-race.sh): links to board logs
 race-audit/
+/reanalyse-db/
