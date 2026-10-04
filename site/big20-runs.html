@@ -64,6 +64,7 @@
   .delta.ahead { color: var(--ahead); }
   th.run { text-align: right; padding-right: 18px; }
   th.run small { display: block; font-size: 10px; letter-spacing: 0; text-transform: none; color: var(--muted); font-weight: 400; }
+  th.run .tag { display: block; color: var(--gold); font-size: 10px; letter-spacing: .04em; font-weight: 600; }
   tfoot td { border-top: 2px solid var(--hairline); color: var(--ink2); font-weight: 600; }
   tfoot td.lbl { color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
   .note { color: var(--muted); font-size: 12.5px; margin: 18px 0 0; }
@@ -106,8 +107,12 @@ const games = D.games || [];
 const runs = (D.run_throughs || []).slice().sort((a, b) => b.started_at_ms - a.started_at_ms);
 document.title = D.title;
 document.getElementById('title').textContent = D.title;
+// The race itself (the run on the race's date) is a column like the others,
+// labelled, and not counted among the practice runs.
+const nPractice = runs.filter(r => !r.race).length;
+const raced = runs.some(r => r.race);
 document.getElementById('sub').textContent = runs.length
-  ? `${runs.length} full run${runs.length === 1 ? '' : 's'} of the twenty, newest first · each cell is the game's time inside that run`
+  ? `${nPractice} practice run${nPractice === 1 ? '' : 's'} of the twenty${raced ? ' and the race' : ''}, newest first · each cell is the game's time inside that run`
   : 'No full run recorded yet.';
 
 const segOf = (run, game) => (run.segments || []).find(s => key(s.game) === key(game));
@@ -122,7 +127,7 @@ const runSlug = r => {
   return r.day + (i > 0 ? `-${i + 1}` : '');
 };
 let head = `<tr><th class="n">#</th><th>Game</th>` +
-  runs.map(r => `<th class="run"><a href="/big20/runs/${runSlug(r)}/index.html">${esc(dshort(r.started_at_ms))}</a><small>${r.games} of ${games.length}</small></th>`).join('') +
+  runs.map(r => `<th class="run"><a href="/big20/runs/${runSlug(r)}/index.html">${esc(dshort(r.started_at_ms))}</a>${r.race || r.live ? `<span class="tag">${[r.race ? 'the race' : '', r.live ? 'in progress' : ''].filter(Boolean).join(' · ')}</span>` : ''}<small>${r.games} of ${games.length}</small></th>`).join('') +
   `<th class="num">Practice best</th></tr>`;
 let body = games.map(g => {
   const cells = runs.map(r => segOf(r, g.game));

@@ -138,7 +138,11 @@ Everything in `summary.json` plus:
   runs as one pool; each entry of `runs[]` carries `run: true` when it is
   the game's segment inside a full run), and
   `run_throughs[]` — `day`, `started_at_ms`, `games`, `reached_ms`,
-  `segments_ms`, `segments[{game, ms, cum}]` per full run of the race.
+  `segments_ms`, `segments[{game, ms, cum}]` per full run of the race, with
+  `race: true` on the run made on the race's `date` (the race itself, not
+  practice) and `live: true` on the run the race board in force is running;
+  and `live` — that board (`category`, `games`, `reached_ms`, `since_ms`,
+  `run_live`; `run_done` once that run's last game is filed, the board still up), null when none is up.
 
 ## The per-day feed: `manifest.json` and `days/`
 

@@ -247,13 +247,35 @@ clock at the last game, the time in the games and between them, how the run
 sat against his practice bests over the games it reached, and where that
 went — the two games that cost most and the two where he beat his practice
 best inside the run. A run in progress sits on top with the clock at its
-last game, read from the report's live panel (`now.marathon`). `/big20/runs/`
+last game, tagged "in progress". Which run that is, is decided in
+`report.rs` from the live panel (`now.marathon`), not by taking the newest:
+the newest run is the live one only once the race board in force has filed
+a game of it and the run started at or after the board went up (or, after
+a mid-run restart, is unfinished and ends at the clock the broadcast's rows
+reached). Before the first row the newest run is the last one he
+*finished*, and the page used to call it "in progress, 20 of 20"; now it
+says "Run starting · 0 of 20" and tags nothing. `/big20/runs/`
 (`site/big20-runs.html`) is the twenty games down the side and one column
 per run, the fastest per game marked once he has run it more than once.
 
+**The race itself** is filed by the same tracker under the same category as
+the practice runs ("Big 20 #23 run"); nothing on the board tells them
+apart. The run whose day is the roster's `date` (2026-10-10) is the race
+(`race: true`): the pages label it "the race" and keep it out of the
+practice-run count, "best practice run" and the practice-day count.
+
+A run's own page (`/big20/runs/<day>/`) compares a complete run with
+whole-race figures (sum of bests, the run before, his best practice run). A
+partial run — cut short, or still going — is compared at its last game
+instead: the sum of his practice bests over the games up to it and the
+other runs' clocks at that same game. Comparing a ten-game clock with
+twenty-game totals put a half-run hours "ahead".
+
 The report carries them as `big20.run_throughs[]` — `day`, `started_at_ms`,
-`games`, `reached_ms`, `segments_ms` and `segments[{game, ms, cum}]` in the
-order he reached them — grouped by one rule (`report.rs`): a run starts
+`games`, `reached_ms`, `segments_ms`, `segments[{game, ms, cum}]` in the
+order he reached them, `race` and `live` — and `big20.live` (the race
+board in force: `games`, `reached_ms`, `since_ms`, `run_live`, `run_done` once its last game is filed) — grouped
+by one rule (`report.rs`): a run starts
 where the marathon clock had nothing before the row, its cumulative being
 its own segment (the first game of a fresh set of splits), or after two
 hours away from the board. Not by session — a bot restart mid-run opens a

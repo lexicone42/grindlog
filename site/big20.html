@@ -161,6 +161,7 @@
   .pr-chart .run.best { fill: var(--ahead); }
   .pr-chart .join { fill: none; stroke: var(--series); stroke-width: 1.2; opacity: .7; }
   .pr-chart .live { fill: var(--gold); }
+  .pr-chart .race { stroke: var(--gold); stroke-width: 2; }
   .pr-table td { vertical-align: top; }
   .pr-table .where { font-size: 12px; color: var(--ink2); max-width: 300px; }
   .pr-table .where b { font-family: "Martian Mono", monospace; font-size: 11.5px; font-weight: 500; }
@@ -288,6 +289,9 @@ const attempts = games.reduce((n, g) => n + g.att, 0);
 const finishes = games.reduce((n, g) => n + g.fin, 0);
 const onTimer = games.reduce((n, g) => n + g.log.reduce((m, r) => m + (r.depth || 0), 0), 0);
 const days = [...new Set(games.flatMap(g => g.log.map(r => r.day)))].sort();
+// Practice days, for the tile: the race day is not one of them. (The day
+// log below keeps every day, the race's included: it indexes by `days`.)
+const pdays = days.filter(d => d !== D.date);
 document.getElementById('strip').innerHTML = games.map(g =>
   `<i class="${g.fin > 0 ? 'done' : g.att > 0 ? 'some' : ''}" title="${esc(g.n + '. ' + g.game)}"></i>`
 ).join('');
@@ -296,7 +300,7 @@ document.getElementById('tiles').innerHTML =
   tile(`${finished}<span style="display:inline;font-size:13px;color:var(--muted);text-transform:none;letter-spacing:0"> / ${games.length}</span>`, 'finished') +
   tile(tried, 'practised') +
   tile(attempts, 'attempts', `${finishes} finished`) +
-  tile(days.length, days.length === 1 ? 'practice day' : 'practice days', days.length ? `${dshort(new Date(days[0] + 'T00:00:00Z').getTime() - TZ)} – ${dshort(new Date(days[days.length - 1] + 'T00:00:00Z').getTime() - TZ)}` : '') +
+  tile(pdays.length, pdays.length === 1 ? 'practice day' : 'practice days', pdays.length ? `${dshort(new Date(pdays[0] + 'T00:00:00Z').getTime() - TZ)} – ${dshort(new Date(pdays[pdays.length - 1] + 'T00:00:00Z').getTime() - TZ)}` : '') +
   tile(onTimer ? hm(onTimer) : '—', 'on the timer');
 
 // The time between the games — the transitions, the pauses — inside each
@@ -350,12 +354,15 @@ practiceRuns();
 // got, over how many games. The whole race is the number that matters and
 // this is the nearest thing to it he has run.
 function fullRuns() {
-  const rs = D.run_throughs || [];
-  if (!rs.length) return '';
+  // The race is not a practice run (see practiceRuns): it is named on its own.
+  const rs = (D.run_throughs || []).filter(r => !r.race);
+  const race = (D.run_throughs || []).find(r => r.race);
+  if (!rs.length && !race) return '';
   const done = rs.filter(isComplete);
   const best = done.length ? Math.min(...done.map(r => r.reached_ms)) : null;
   return `<div><div class="lbl">Practice runs</div><div class="runs"><b>${rs.length}</b> run${rs.length === 1 ? '' : 's'} of the twenty` +
-    (best != null ? `, best <b>${fmt(best)}</b>` : `, none over all twenty yet`) + `</div>` +
+    (best != null ? `, best <b>${fmt(best)}</b>` : `, none over all twenty yet`) +
+    (race ? `; the race ${isComplete(race) ? `<b>${fmt(race.reached_ms)}</b>` : `${race.live ? 'in progress, ' : ''}${race.games} of ${games.length}`}` : '') + `</div>` +
     `<div class="miss"><a href="#runs-card">run by run below</a> · <a href="/big20/runs/index.html">game by game</a> · a full run's games are attempts too, drawn as squares</div></div>`;
 }
 
@@ -373,7 +380,14 @@ function practiceRuns() {
   // plus his quickest transitions, since every clock includes its own.
   const sobGames = games.every(g => g.ceilMs != null) ? games.reduce((n, g) => n + g.ceilMs, 0) : null;
   const sob = sobGames != null && bestBetween != null ? sobGames + bestBetween : sobGames;
-  const live = D.live && D.live.category ? rs[rs.length - 1] : null;
+  // The run on the board right now, as the report decided it (`live` on the
+  // run): the newest run only once the board in force has filed a game of
+  // it. Before that the newest is the last run he finished, and calling it
+  // "in progress, 20 of 20" was wrong; the banner says the run is starting.
+  const live = rs.find(r => r.live) || null;
+  // And none once the board's run is done: the board stays up after the
+  // final, and the head line already gives the run's time.
+  const starting = D.live && !live && !D.live.run_done ? D.live : null;
   let prevDone = null;
   for (const r of rs) {
     const segs = (r.segments || []).filter(s => s.ms != null);
@@ -386,17 +400,27 @@ function practiceRuns() {
     r.vsPrev = r.complete && prevDone ? r.reached_ms - prevDone.reached_ms : null;
     if (r.complete) prevDone = r;
   }
-  const done = rs.filter(r => r.complete);
+  // The race itself (run on the race's date) is one of these rows, labelled,
+  // and is not a practice run: it is not counted as one and is never the
+  // best practice run.
+  const practice = rs.filter(r => !r.race);
+  const race = rs.find(r => r.race) || null;
+  const done = practice.filter(r => r.complete);
   const best = done.length ? done.reduce((m, r) => r.reached_ms < m.reached_ms ? r : m) : null;
   document.getElementById('runs-h').hidden = false;
   const card = document.getElementById('runs-card');
   card.hidden = false;
-  const head = `<p class="pr-head"><b>${rs.length}</b> practice run${rs.length === 1 ? '' : 's'} of the twenty` +
+  const head = `<p class="pr-head"><b>${practice.length}</b> practice run${practice.length === 1 ? '' : 's'} of the twenty` +
     (best ? ` · best <b>${fmt(best.reached_ms)}</b> on ${esc(dshort(best.started_at_ms))}` : ` · none over all twenty yet`) +
-    (sob != null && best ? ` · sum of bests <b>${fmt(sob)}</b>, <b>${fmt(best.reached_ms - sob)}</b> above it` : sob != null ? ` · sum of bests <b>${fmt(sob)}</b>` : '') + `</p>`;
+    (sob != null && best ? ` · sum of bests <b>${fmt(sob)}</b>, <b>${fmt(best.reached_ms - sob)}</b> above it` : sob != null ? ` · sum of bests <b>${fmt(sob)}</b>` : '') +
+    (race ? ` · and <b>the race</b>, ${race.complete ? `<b>${fmt(race.reached_ms)}</b>` : `${race.games} of ${games.length} games`}` : '') + `</p>`;
+  const what = r => r && r.race ? 'The race' : 'Run';
   const banner = live
-    ? `<div class="pr-live">Run in progress · <b>${live.games}</b> of ${games.length} games so far` +
+    ? `<div class="pr-live">${what(live)} in progress · <b>${live.games}</b> of ${games.length} games so far` +
       (live.reached_ms != null ? `, <b>${fmt(live.reached_ms)}</b> on the clock at the last one` : '') + ` · the page refreshes every few minutes while he is live</div>`
+    : starting
+    ? `<div class="pr-live">${D.date && today.toISOString().slice(0, 10) === D.date ? 'The race' : 'Run'} ${starting.games ? 'in progress' : 'starting'} · <b>${starting.games || 0}</b> of ${games.length} games so far` +
+      ` · the board is up; the page refreshes every few minutes while he is live</div>`
     : '';
   card.innerHTML = head + banner + chart(rs, sob, best) + table(rs, best) +
     `<p class="pr-note">A run's clock is the marathon timer at the last game recorded. "Between games" is that clock less the games' own times: the transitions, and any pause. "Against his bests" sums, over the games the run reached, how far each was from his best for it, in practice or inside a full run; the games named are where the most went and where the run set a best.</p>`;
@@ -428,7 +452,7 @@ function practiceRuns() {
     for (const p of pts) {
       if (p.cy == null) continue;
       const cls = p.r.live ? 'run live' : p.r === best ? 'run best' : p.r.complete ? 'run' : 'run part';
-      out += `<circle class="${cls}" cx="${p.cx.toFixed(1)}" cy="${p.cy.toFixed(1)}" r="4.5"><title>${esc(dshort(p.r.started_at_ms))}: ${p.r.games} of ${games.length}, ${fmt(p.r.reached_ms)}</title></circle>`;
+      out += `<circle class="${cls}${p.r.race ? ' race' : ''}" cx="${p.cx.toFixed(1)}" cy="${p.cy.toFixed(1)}" r="${p.r.race ? 6 : 4.5}"><title>${p.r.race ? 'the race, ' : ''}${esc(dshort(p.r.started_at_ms))}: ${p.r.games} of ${games.length}, ${fmt(p.r.reached_ms)}</title></circle>`;
       if (!p.r.complete) out += `<text class="tnum" x="${p.cx.toFixed(1)}" y="${(p.cy - 8).toFixed(1)}" text-anchor="middle">${p.r.games}/${games.length}</text>`;
       out += `<text x="${p.cx.toFixed(1)}" y="${H - 8}" text-anchor="middle">${esc(dshort(p.r.started_at_ms))}</text>`;
     }
@@ -451,7 +475,7 @@ function practiceRuns() {
       return r.day + (i > 0 ? `-${i + 1}` : '');
     };
     const row = r => `<tr>` +
-      `<td class="tnum"><a href="/big20/runs/${runSlug(r)}/index.html">${esc(dshort(r.started_at_ms))}</a>${r.live ? '<span class="tag">in progress</span>' : r === best ? '<span class="tag">best</span>' : ''}</td>` +
+      `<td class="tnum"><a href="/big20/runs/${runSlug(r)}/index.html">${esc(dshort(r.started_at_ms))}</a>${r.race ? '<span class="tag">the race</span>' : ''}${r.live ? '<span class="tag">in progress</span>' : r === best ? '<span class="tag">best</span>' : ''}</td>` +
       `<td class="num tnum">${r.games}<span class="delta">of ${games.length}</span></td>` +
       `<td class="num tnum${r === best ? ' best' : ''}">${fmt(r.reached_ms)}${r.vsPrev != null ? `<span class="delta${r.vsPrev < 0 ? ' ahead' : ''}">${sd(r.vsPrev)} vs previous</span>` : ''}</td>` +
       `<td class="num tnum">${fmt(r.inGame)}</td>` +
