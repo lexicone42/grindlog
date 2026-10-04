@@ -349,15 +349,17 @@ fi
 # The board prints the previous run's times on the rows not yet reached, and
 # a comparison filed as a finish is exactly that; the tracker warns as it
 # files one ("is the previous run's time to the second"), and this counts
-# today's rows under every board [[games]] name against the run before —
-# the one run before, as the tracker's own check does: against any earlier
-# run, a dozen practice runs in, chance collisions raised the alarm. One
-# is a repeat that happens; two is a day to replay (docs/big20.md).
+# today's rows under every board [[games]] name against the run before: the
+# game's most recent earlier finish in the category, as db::previous_time
+# (not any earlier one: with a dozen practice runs per game, a time shared
+# to the second with one of them is chance, and 2026-10-02 alerted all
+# afternoon on two such). One is a repeat that happens; two is a day to
+# replay (docs/big20.md).
 boards=$(awk '/^\[\[/{if(m&&n)print n; n="";m=0} /^name = /{n=$0} /^mode = "board"/{m=1} END{if(m&&n)print n}' live.toml 2>/dev/null \
          | sed 's/^name = "\([^"]*\)"$/\1/' | sed "s/'/''/g; s/.*/'&'/" | paste -sd, -)
 if [ -n "$boards" ]; then
   day_ms=$(($(date -d 'today 00:00' +%s) * 1000))
-  echoes=$(sqlite3 -readonly -cmd '.timeout 5000' "$DB" "select count(*) from runs r where r.category in ($boards) and r.started_at_ms >= $day_ms and r.outcome = 'finished' and r.final_time_ms is not null and r.final_time_ms = (select p.final_time_ms from runs p where p.game = r.game and p.category = r.category and p.outcome = 'finished' and p.final_time_ms is not null and p.started_at_ms < r.started_at_ms - 3600000 order by p.started_at_ms desc limit 1)" 2>/dev/null || echo 0)
+  echoes=$(sqlite3 -readonly -cmd '.timeout 5000' "$DB" "select count(*) from runs r where r.category in ($boards) and r.started_at_ms >= $day_ms and r.outcome = 'finished' and r.final_time_ms is not null and r.final_time_ms = (select p.final_time_ms from runs p where p.game = r.game and p.category = r.category and p.outcome = 'finished' and p.final_time_ms is not null and p.started_at_ms < r.started_at_ms - 3600000 order by p.started_at_ms desc, p.id desc limit 1)" 2>/dev/null || echo 0)
   if [ "${echoes:-0}" -ge 2 ]; then
     check tracker-echo 1 "$echoes of today's board rows carry the previous run's time to the second: comparisons filed as finishes? replay the day (docs/big20.md)"
   else
