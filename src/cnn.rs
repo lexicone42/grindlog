@@ -674,9 +674,22 @@ mod tests {
     /// the reader as a whole, tile cutting and all.
     #[test]
     fn the_shipped_weights_read_the_fixture_crops() {
+        fixtures("assets/timer_ocr.json", "tests/fixtures/cnn", 10);
+    }
+
+    /// The Big 20 race total, the bot's own crop of it at 480p in luma, as
+    /// the run loop hands it over: confirmed readings, each one the frames
+    /// either side advance from by a quarter second, six of them read at
+    /// under 80% confidence (the hundredths smearing as they change).
+    #[test]
+    fn the_race_weights_read_the_race_total() {
+        fixtures("assets/timer_ocr_race.json", "tests/fixtures/cnn-race", 12);
+    }
+
+    fn fixtures(weights: &str, fixtures: &str, at_least: usize) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let reader = CnnReader::load(&root.join("assets/timer_ocr.json")).expect("weights");
-        let dir = root.join("tests/fixtures/cnn");
+        let reader = CnnReader::load(&root.join(weights)).expect("weights");
+        let dir = root.join(fixtures);
         let mut n = 0;
         let mut wrong = Vec::new();
         for e in std::fs::read_dir(&dir).expect("fixtures").flatten() {
@@ -709,7 +722,7 @@ mod tests {
                 wrong.push(format!("{}: read {:?}", p.display(), got));
             }
         }
-        assert!(n >= 10, "only {n} fixture crops");
+        assert!(n >= at_least, "only {n} fixture crops");
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
