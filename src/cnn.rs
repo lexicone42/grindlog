@@ -283,14 +283,34 @@ fn ink_box_within(norm: &GrayImage, expect: Option<u32>, x_lo: u32, x_hi: u32) -
     // at its thinnest interior row and the fuller side kept.
     if let Some(e) = expect {
         if (bottom - top) * 20 > e * 23 {
-            let (lo, hi) = (top + (bottom - top) / 5, bottom - (bottom - top) / 5);
-            if let Some(cut) = (lo..hi).min_by_key(|y| rows[*y as usize]) {
+            // The cut is one of the band's thinnest rows, anywhere but its
+            // outer tenths (where the segment timer meets the race total,
+            // the junction sits at four fifths of the merged band, past the
+            // middle three fifths this once searched, and the cut fell
+            // through the digits), and of those the one that leaves the
+            // fuller side nearest the expected height.
+            let h = bottom - top;
+            let (lo, hi) = (top + h / 10, bottom - h / 10);
+            let thinnest = (lo..hi).map(|y| rows[y as usize]).min();
+            let side = |cut: u32| {
                 let above: u64 = (top..cut).map(|y| rows[y as usize] as u64).sum();
                 let below: u64 = (cut + 1..bottom).map(|y| rows[y as usize] as u64).sum();
                 if above >= below {
-                    bottom = cut;
+                    (top, cut)
                 } else {
-                    top = cut + 1;
+                    (cut + 1, bottom)
+                }
+            };
+            if let Some(t) = thinnest {
+                let slack = (t / 2).max(1);
+                if let Some(cut) = (lo..hi)
+                    .filter(|y| rows[*y as usize] <= t + slack)
+                    .min_by_key(|y| {
+                        let (a, b) = side(*y);
+                        ((b - a) as i64 - e as i64).abs()
+                    })
+                {
+                    (top, bottom) = side(cut);
                 }
             }
         }
