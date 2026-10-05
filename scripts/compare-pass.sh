@@ -48,3 +48,16 @@ sqlite3 -readonly "$live" "ATTACH '$pass' AS p;
   SELECT 'finished in pass only: '||datetime(q.started_at_ms/1000,'unixepoch','localtime')||' '||q.category||' '||q.final_time_ms
     FROM p.runs q WHERE $(in_day q) AND q.outcome = 'finished'
      AND NOT EXISTS (SELECT 1 FROM main.runs l WHERE abs(l.started_at_ms - q.started_at_ms) < 30000 AND l.outcome = 'finished');"
+# The verdict, said plainly: import-vod.sh replaces the whole day, so
+# anything only the live database has for these days is deleted by it.
+lost_fin=$(sqlite3 -readonly "$live" "ATTACH '$pass' AS p;
+  SELECT COUNT(*) FROM runs l WHERE $(in_day l) AND l.outcome = 'finished'
+     AND NOT EXISTS (SELECT 1 FROM p.runs q WHERE abs(l.started_at_ms - q.started_at_ms) < 30000 AND q.outcome = 'finished')")
+lost_other=$(( ${lb:-0} - ${pb:-0} ))
+if [ "${lost_fin:-0}" -gt 0 ] || [ "$lost_other" -gt 0 ]; then
+  echo "VERDICT: do not import as is: it would delete ${lost_fin:-0} finished run(s) and $(( lost_other > 0 ? lost_other : 0 )) row(s) of other categories (a marathon or race the same day, from another VOD) that only the live database has"
+elif [ "${pm:-0}" -lt "${lm:-0}" ] || [ "${ps:-0}" -gt "${ls:-0}" ]; then
+  echo "VERDICT: a gain: $(( ${lm:-0} - ${pm:-0} )) fewer resets past Act 1 without a split, $(( ${ps:-0} - ${ls:-0} )) more split(s), nothing lost; rehearse with LIVE=<a copy> first"
+else
+  echo "VERDICT: no gain; nothing to import"
+fi
