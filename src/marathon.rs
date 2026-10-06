@@ -133,6 +133,18 @@ const BACKFILL_PATIENCE_MS: i64 = SEGMENT_PATIENCE as i64 * 60_000;
 /// what this rejects.
 const AHEAD_OF_TOTAL_MS: i64 = 60_000;
 
+/// Passes in a row a total must read behind what a tracker in force filed
+/// before it is a new run of the event (`Marathon::new_run_under`).
+const NEW_RUN_PASSES: usize = 3;
+
+/// The least time those passes must span.
+const NEW_RUN_SPAN_MS: i64 = 120_000;
+
+/// How closely two totals a pass apart must keep time with the wall clock to
+/// be one running timer. The total handed over is the last reading, up to
+/// thirty seconds before its pass, so not tighter than that.
+const KEEPS_TIME_MS: i64 = 40_000;
+
 /// How far ahead of the total a row's FIRST reading may stand and still be
 /// taken for a finish rather than a comparison (`vote`, the empty-baseline
 /// shortcut). A finish is never ahead of the clock by more than the pass
@@ -674,6 +686,15 @@ pub struct Marathon {
     /// the game after the last row recorded, whichever is lower. Every row
     /// under it is unrun, whatever its columns show.
     runner: Option<usize>,
+    /// The last two passes whose total was not behind what this tracker
+    /// filed, as (when, total): the clock it was watching, and whether it
+    /// was running.
+    #[serde(default)]
+    clock_seen: [Option<(i64, i64)>; 2],
+    /// Consecutive passes whose total read behind what this tracker filed
+    /// and kept time with each other: a new run of the event under it.
+    #[serde(default)]
+    behind: Vec<(i64, i64)>,
 }
 
 impl Marathon {
@@ -699,6 +720,8 @@ impl Marathon {
             board_max_ms: None,
             total_refused: 0,
             runner: None,
+            clock_seen: [None; 2],
+            behind: Vec::new(),
         }
     }
 
@@ -785,6 +808,77 @@ impl Marathon {
         } else {
             Resume::Carry
         }
+    }
+
+    /// Has a new run of the event started under this tracker? A tracker in
+    /// force never let one go on its own: every row it filed keeps its
+    /// time, so a second practice run in the same broadcast changed nothing
+    /// it would file, and 2026-10-06's second run went unrecorded until a
+    /// restart judged the saved tracker against the clock (`resume_verdict`).
+    /// This is that judgement for a tracker still in force, made stricter
+    /// because here it ends a live race: the total read behind everything
+    /// filed on `NEW_RUN_PASSES` passes in a row, those readings keeping
+    /// time with the wall clock as a fresh timer does (a misread does not,
+    /// nor does a stopped total read wrong), and none of them the running
+    /// clock with its hour lost ("5:00" for 1:05:00 keeps time too).
+    pub fn new_run_under(&mut self, at_ms: i64, total_ms: Option<i64>) -> bool {
+        // Only where the clock is the event's own total. An Arcathlon's
+        // timer restarts within the event, and read against its filed
+        // cumulatives it would end every one halfway.
+        if !self.ordered() {
+            return false;
+        }
+        let Some(t) = total_ms else { return false };
+        let Some(furthest) = self.slots.iter().filter_map(|s| s.recorded).max() else {
+            return false;
+        };
+        if t + AHEAD_OF_TOTAL_MS >= furthest {
+            self.clock_seen = [Some((at_ms, t)), self.clock_seen[0]];
+            self.behind.clear();
+            return false;
+        }
+        const HOUR: i64 = 3_600_000;
+        if let [Some((a, ta)), Some((pa, pt))] = self.clock_seen {
+            let running = ta > pt && ((ta - pt) - (a - pa)).abs() <= KEEPS_TIME_MS;
+            let projected = ta + (at_ms - a);
+            if running && (1..=9).any(|k| (t + k * HOUR - projected).abs() <= 120_000) {
+                self.behind.clear();
+                return false;
+            }
+        }
+        if let Some(&(pa, pt)) = self.behind.last() {
+            if t < pt || ((t - pt) - (at_ms - pa)).abs() > KEEPS_TIME_MS {
+                self.behind.clear();
+            }
+        }
+        self.behind.push((at_ms, t));
+        // Passes a minute apart on the live bot; the span keeps three
+        // passes close together (a replay's, ten seconds apart) from
+        // deciding it on twenty seconds of readings.
+        // And over the whole span the clock advanced as far as the wall
+        // clock did: a total frozen on another timer's reading passes each
+        // step of ten seconds within the tolerance, and fails this.
+        // Readings from before it began to run (0.00 waiting for him, or
+        // the frozen reading) are dropped from the front until the rest
+        // keep time, so the new run is dated from its own first reading.
+        while self.behind.len() >= NEW_RUN_PASSES {
+            let (a0, t0) = self.behind[0];
+            let span = at_ms - a0;
+            if span < NEW_RUN_SPAN_MS {
+                return false;
+            }
+            if ((t - t0) - span).abs() <= KEEPS_TIME_MS {
+                return true;
+            }
+            self.behind.remove(0);
+        }
+        false
+    }
+
+    /// When the new run was first seen under this tracker: what it is
+    /// closed at, so nothing of the new run is filed as the old one's.
+    pub fn new_run_since(&self) -> Option<i64> {
+        self.behind.first().map(|b| b.0)
     }
 
     /// Carry on with a tracker set aside or read back from a checkpoint:
@@ -3064,6 +3158,19 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
             Verdict::Board(alias) => {
                 verdicts[2] += 1;
                 misses = 0;
+                // A new run of the event under the tracker in force, as the
+                // run loop meets it: closed as of when it was first seen.
+                if let Some(m) = state.as_mut().filter(|m| m.category() == alias.name) {
+                    if m.new_run_under(p.at_ms, p.total_ms) {
+                        let mut m = state.take().expect("checked");
+                        let since = m.new_run_since().unwrap_or(p.at_ms);
+                        for c in m.close(since) {
+                            recorded.push(c.cumulative_ms);
+                            out.push(c);
+                        }
+                        hits = 0;
+                    }
+                }
                 let mut waiting = false;
                 if state.is_none() {
                     let verdict = aside
@@ -7135,6 +7242,90 @@ mod race_fixtures {
     /// transition row above Parallel World unrecorded: its comparison
     /// 2:17:45 was filed as his finish minutes before the clock reached it,
     /// and Mega Man 6 was lost behind it.
+    /// The new-run judge on the races captured whole: no pass of either
+    /// day, misread totals and all, ends the tracker in force.
+    #[test]
+    fn a_race_is_never_taken_for_a_new_run_of_itself() {
+        let cfg = config();
+        let alias = cfg
+            .games
+            .iter()
+            .find(|g| g.name == "Big 20 #23 run")
+            .expect("the race in live.toml");
+        for day in ["2026-09-29-live", "2026-10-01-live"] {
+            let (passes, _) = load(day);
+            let mut m = Marathon::new(alias.name.clone(), alias.rosters.clone());
+            for p in &passes {
+                assert!(
+                    !m.new_run_under(p.at_ms, p.total_ms),
+                    "{day}: a new run at {} on total {:?}",
+                    p.at_ms,
+                    p.total_ms
+                );
+                m.observe(&p.board, p.at_ms, p.total_ms);
+            }
+        }
+    }
+
+    /// 2026-10-06: a second practice run started on the same broadcast and
+    /// the tracker in force filed none of it. The clock starting again from
+    /// zero ends it within three passes; the running clock read without
+    /// its hour, which keeps time just as well, does not.
+    #[test]
+    fn a_second_run_of_the_race_ends_the_tracker_in_force() {
+        let cfg = config();
+        let alias = cfg
+            .games
+            .iter()
+            .find(|g| g.name == "Big 20 #23 run")
+            .expect("the race in live.toml");
+        let (passes, _) = load("2026-10-01-live");
+        let mut m = Marathon::new(alias.name.clone(), alias.rosters.clone());
+        let upto = passes
+            .iter()
+            .rposition(|p| p.total_ms.is_some_and(|t| t > 3_600_000))
+            .expect("a pass past the hour");
+        for p in &passes[..=upto] {
+            m.new_run_under(p.at_ms, p.total_ms);
+            m.observe(&p.board, p.at_ms, p.total_ms);
+        }
+        let last = &passes[upto];
+        let total = last.total_ms.expect("a total on the last pass");
+        assert!(total > 3_600_000, "past the hour: {total}");
+        // Two running passes, then the hour lost for five.
+        let mut at = last.at_ms;
+        for k in 1..=2 {
+            at += 60_000;
+            assert!(!m.new_run_under(at, Some(total + k * 60_000)));
+        }
+        let run = total + 2 * 60_000;
+        for k in 1..=5 {
+            at += 60_000;
+            assert!(
+                !m.new_run_under(at, Some(run + k * 60_000 - 3_600_000)),
+                "the hour lost at pass {k}"
+            );
+        }
+        // A stopped total misread the same way every pass keeps no time.
+        for _ in 0..5 {
+            at += 60_000;
+            assert!(!m.new_run_under(at, Some(9 * 60_000 + 31_000)));
+        }
+        // The clock reset and waiting at zero before he starts it.
+        for _ in 0..3 {
+            at += 60_000;
+            assert!(!m.new_run_under(at, Some(0)));
+        }
+        // A new run: twenty seconds in, then a minute a pass. The reset
+        // clock at zero keeps time with it, so the new run is dated from
+        // the last zero, and known a pass sooner.
+        let fresh: Vec<bool> = (0..4)
+            .map(|k| m.new_run_under(at + (k + 1) * 60_000, Some(20_000 + k * 60_000)))
+            .collect();
+        assert_eq!(fresh, [false, true, true, true]);
+        assert_eq!(m.new_run_since(), Some(at));
+    }
+
     /// A tracker written out as the bot's checkpoint and read back carries
     /// on exactly as the one that never stopped: the same completions, to
     /// the millisecond, from the pass it was saved after.
