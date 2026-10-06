@@ -1938,6 +1938,25 @@ async fn track_marathon(
         }
         marathon::Verdict::Board(alias) => {
             *misses = 0;
+            // A new run of the event under the tracker in force: it is
+            // closed as of the moment the new run was first seen, and the
+            // board is taken up again below the way a restarted bot takes
+            // it up, seeded from what the database has filed.
+            if let Some(m) = state.as_mut().filter(|m| m.category() == alias.name) {
+                if m.new_run_under(at_ms, total_ms) {
+                    let mut m = state.take().expect("checked");
+                    let since = m.new_run_since().unwrap_or(at_ms);
+                    let late = m.close(since);
+                    let unmatched = m.unmatched();
+                    file_completions(pool, session_id, health, since, unmatched, late).await;
+                    info!(
+                        "marathon over: a new run of it has begun (the clock went back behind what it filed): {}",
+                        m.describe()
+                    );
+                    health.event(at_ms, "marathon", format!("{} ended", m.category()));
+                    *hits = 0;
+                }
+            }
             if state.is_none() {
                 let (resumed, over, waiting) = keep.take_up(&alias.name, board, total_ms, at_ms);
                 if waiting {
