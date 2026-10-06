@@ -3034,6 +3034,12 @@ pub async fn run(cfg: Config) -> Result<()> {
                 ocr_skipped += 1;
             } else {
                 let g = image::imageops::crop_imm(&union_bright, r.0, r.1, r.2, r.3).to_image();
+                // The learned reader takes the luma crop, as it was trained
+                // (ffmpeg's gray): the brightest channel, which suits
+                // tesseract on a white timer, flattens the race total's navy
+                // on light blue, and on a September 24 replay left 120-310
+                // frames in ten minutes to tesseract that luma leaves 15-43.
+                let g_luma = image::imageops::crop_imm(&union_img, r.0, r.1, r.2, r.3).to_image();
                 let frame_t0 = std::time::Instant::now();
                 // NG_DUMP_TIMER=1: save the raw timer crop every 25 frames (for
                 // threshold tuning against real pixels) and log what Otsu
@@ -3074,7 +3080,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // declines in turn.
                 let cnn_reader = cnn_readers.get(active_layout).and_then(|r| r.as_ref());
                 let cnn_hit = cnn_reader
-                    .and_then(|r| r.read(&g))
+                    .and_then(|r| r.read(&g_luma))
                     .filter(|rd| parse_timer_text(&rd.text).is_some());
                 if cnn_reader.is_some() {
                     if cnn_hit.is_some() {
@@ -3359,10 +3365,12 @@ pub async fn run(cfg: Config) -> Result<()> {
                 let c = &mut cands[ci];
                 let crop = c.regs.timer;
                 let (png, proc, g) = read_timer(&union_bright, crop)?;
+                let g_luma = image::imageops::crop_imm(&union_img, crop.0, crop.1, crop.2, crop.3)
+                    .to_image();
                 let cnn = cnn_readers
                     .get(c.layout)
                     .and_then(|r| r.as_ref())
-                    .and_then(|r| r.read(&g))
+                    .and_then(|r| r.read(&g_luma))
                     .filter(|rd| parse_time(&rd.text).is_some());
                 let glyph = if cnn.is_some() {
                     None

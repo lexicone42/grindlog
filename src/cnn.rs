@@ -41,14 +41,15 @@ impl Geometry {
     /// by half a cell, while the ink is five times as long. The glyph
     /// count is one of a few formats, each spanning a known number of
     /// nominal pixels, so each count implies a scale, and the one nearest
-    /// the band's wins. None when no count comes within a fifth of it, or
-    /// the slots are fewer than any format.
+    /// the band's wins. None when no count comes within a fifth of it, when
+    /// the best is not clearly better than the next, or when the slots are
+    /// fewer than any format.
     pub fn width_scale(&self, bx: &InkBox, band_scale: f32) -> Option<(usize, f32)> {
         let ink_w = (bx.right - bx.left) as f32;
         let first_w = (bx.first_right - bx.left) as f32;
         let last_w = (bx.last_right - bx.last_left) as f32;
         let c_last = self.slots.first()?[1] as f32;
-        let mut best: Option<(usize, f32, f32)> = None;
+        let mut fits: Vec<(usize, f32, f32)> = Vec::new();
         for k in Self::GLYPH_COUNTS
             .into_iter()
             .filter(|k| *k <= self.slots.len())
@@ -60,11 +61,22 @@ impl Geometry {
             let span = (from_right + c_first) as f32 - (c_first as f32 + c_last) / 2.0;
             let s = (ink_w - (first_w + last_w) / 2.0) / span.max(1.0);
             let off = (s / band_scale - 1.0).abs();
-            if s > 0.0 && off < 0.2 && best.is_none_or(|b| off < b.2) {
-                best = Some((k, s, off));
+            if s > 0.0 {
+                fits.push((k, s, off));
             }
         }
-        best.map(|(k, s, _)| (k, s))
+        // The best fit stands only when it is near the band's scale and clearly
+        // the best: a theme whose proportions are not these slots' fits two
+        // counts about as badly (the default LiveSplit theme, 9.0% and 9.6%
+        // off for eight glyphs and seven), the wrong one could win, and the
+        // grid lands a cell out; there the band's scale is the better guess.
+        fits.sort_by(|a, b| a.2.total_cmp(&b.2));
+        match fits.as_slice() {
+            [b, rest @ ..] if b.2 < 0.2 && rest.first().is_none_or(|n| n.2 - b.2 >= 0.03) => {
+                Some((b.0, b.1))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -271,14 +283,34 @@ fn ink_box_within(norm: &GrayImage, expect: Option<u32>, x_lo: u32, x_hi: u32) -
     // at its thinnest interior row and the fuller side kept.
     if let Some(e) = expect {
         if (bottom - top) * 20 > e * 23 {
-            let (lo, hi) = (top + (bottom - top) / 5, bottom - (bottom - top) / 5);
-            if let Some(cut) = (lo..hi).min_by_key(|y| rows[*y as usize]) {
+            // The cut is one of the band's thinnest rows, anywhere but its
+            // outer tenths (where the segment timer meets the race total,
+            // the junction sits at four fifths of the merged band, past the
+            // middle three fifths this once searched, and the cut fell
+            // through the digits), and of those the one that leaves the
+            // fuller side nearest the expected height.
+            let h = bottom - top;
+            let (lo, hi) = (top + h / 10, bottom - h / 10);
+            let thinnest = (lo..hi).map(|y| rows[y as usize]).min();
+            let side = |cut: u32| {
                 let above: u64 = (top..cut).map(|y| rows[y as usize] as u64).sum();
                 let below: u64 = (cut + 1..bottom).map(|y| rows[y as usize] as u64).sum();
                 if above >= below {
-                    bottom = cut;
+                    (top, cut)
                 } else {
-                    top = cut + 1;
+                    (cut + 1, bottom)
+                }
+            };
+            if let Some(t) = thinnest {
+                let slack = (t / 2).max(1);
+                if let Some(cut) = (lo..hi)
+                    .filter(|y| rows[*y as usize] <= t + slack)
+                    .min_by_key(|y| {
+                        let (a, b) = side(*y);
+                        ((b - a) as i64 - e as i64).abs()
+                    })
+                {
+                    (top, bottom) = side(cut);
                 }
             }
         }
@@ -674,9 +706,22 @@ mod tests {
     /// the reader as a whole, tile cutting and all.
     #[test]
     fn the_shipped_weights_read_the_fixture_crops() {
+        fixtures("assets/timer_ocr.json", "tests/fixtures/cnn", 10);
+    }
+
+    /// The Big 20 race total, the bot's own crop of it at 480p in luma, as
+    /// the run loop hands it over: confirmed readings, each one the frames
+    /// either side advance from by a quarter second, six of them read at
+    /// under 80% confidence (the hundredths smearing as they change).
+    #[test]
+    fn the_race_weights_read_the_race_total() {
+        fixtures("assets/timer_ocr_race.json", "tests/fixtures/cnn-race", 12);
+    }
+
+    fn fixtures(weights: &str, fixtures: &str, at_least: usize) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let reader = CnnReader::load(&root.join("assets/timer_ocr.json")).expect("weights");
-        let dir = root.join("tests/fixtures/cnn");
+        let reader = CnnReader::load(&root.join(weights)).expect("weights");
+        let dir = root.join(fixtures);
         let mut n = 0;
         let mut wrong = Vec::new();
         for e in std::fs::read_dir(&dir).expect("fixtures").flatten() {
@@ -709,7 +754,7 @@ mod tests {
                 wrong.push(format!("{}: read {:?}", p.display(), got));
             }
         }
-        assert!(n >= 10, "only {n} fixture crops");
+        assert!(n >= at_least, "only {n} fixture crops");
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
@@ -788,5 +833,29 @@ mod tests {
         let bx = ink_box(&normalise(&img).unwrap(), None).unwrap();
         assert_eq!((bx.left, bx.right, bx.edge_right), (60, 150, 197));
         assert_eq!((bx.last_left, bx.last_right), (130, 150));
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    /// The default LiveSplit theme (2026-09-04), whose proportions are not
+    /// the Ninja Gaiden theme's slots: eight glyphs and seven fit its width
+    /// about equally badly, and taking the seven laid the grid a cell to the
+    /// left ("11:09.83" read slot by slot as "_1_10_98"). No clear fit, no
+    /// width scale: the band's stands, and the reader declines rather than
+    /// reads a theme it was never trained on.
+    #[test]
+    fn a_width_two_formats_fit_equally_gives_no_scale() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let weights = Weights::load(&root.join("assets/timer_ocr.json")).expect("weights");
+        let img = image::open(root.join("tests/fixtures/cnn/none~default-theme.png"))
+            .unwrap()
+            .to_luma8();
+        let n = normalise(&img).expect("a timer");
+        let bx = ink_box(&n, Some(weights.geometry.band_ref)).expect("digits");
+        let band = bx.height() as f32 / weights.geometry.band_ref as f32;
+        assert_eq!(weights.geometry.width_scale(&bx, band), None);
     }
 }
