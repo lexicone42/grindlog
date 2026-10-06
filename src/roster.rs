@@ -397,9 +397,12 @@ impl Rosters {
         (best >= ROSTER_HITS && best >= second + ROSTER_MARGIN).then_some(event)
     }
 
-    /// The name of the roster at that index, for the log ("#4").
+    /// The name of the roster at that index, for the log ("#4"). A tracker
+    /// read back from its checkpoint carries the index but not the rosters
+    /// (they come from the config when it is resumed), and describing it
+    /// before then panicked here and crash-looped the restarted bot: "?".
     pub fn event_name(&self, event: usize) -> &str {
-        &self.events[event].name
+        self.events.get(event).map_or("?", |e| e.name.as_str())
     }
 
     /// The canonical name for every row of a board at once, in row order.

@@ -7153,6 +7153,14 @@ mod race_fixtures {
         }
         let text = serde_json::to_string(&kept).expect("serialise");
         let mut back: Marathon = serde_json::from_str(&text).expect("read back");
+        // The restarted bot logs the checkpoint before it resumes it, with
+        // no rosters yet: that described a roster by an index into nothing
+        // and panicked, so every restart within the half hour crash-looped.
+        assert!(
+            back.describe().contains(", roster ?"),
+            "{}",
+            back.describe()
+        );
         back.resume(alias.rosters.clone(), &[]);
         let rows = |c: Vec<Completion>| {
             c.into_iter()
