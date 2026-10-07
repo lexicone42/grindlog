@@ -7357,6 +7357,38 @@ mod race_fixtures {
         assert_eq!(filed.len(), bare.len() + 1);
     }
 
+    /// Race day may title the board something no practice day did. The
+    /// rows still say which event it is: today's second run, with its title
+    /// swapped for one `live.toml` matches nothing of (and with none at
+    /// all), is taken up as the race and files what it filed under its own
+    /// title.
+    #[test]
+    fn the_race_is_tracked_whatever_its_title() {
+        let cfg = config();
+        let (passes, _) = load("2026-10-06-second-run");
+        let filed = |title: Option<&str>| {
+            let passes: Vec<Pass> = passes
+                .iter()
+                .map(|p| Pass {
+                    at_ms: p.at_ms,
+                    total_ms: p.total_ms,
+                    board: Board {
+                        title: title.map(str::to_string),
+                        ..p.board.clone()
+                    },
+                })
+                .collect();
+            let (out, _) = replay(&cfg, &passes, None);
+            out.into_iter()
+                .map(|c| (c.game, c.cumulative_ms))
+                .collect::<Vec<_>>()
+        };
+        let as_titled = filed(Some("Practice Run"));
+        assert!(as_titled.len() >= 18, "{}", as_titled.len());
+        assert_eq!(filed(Some("Welcome to the Gauntlet")), as_titled);
+        assert_eq!(filed(None), as_titled);
+    }
+
     /// The new-run judge on the races captured whole: no pass of either
     /// day, misread totals and all, ends the tracker in force.
     #[test]
