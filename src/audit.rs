@@ -270,11 +270,14 @@ pub fn disrupt(cfg: &Config, dir: &Path, spec: &DisruptSpec) -> Result<()> {
             continue;
         }
         let base = replay_disrupted(cfg, &passes, None);
-        let want: std::collections::BTreeMap<usize, (i64, i64)> = base
-            .out
-            .iter()
-            .map(|c| (c.slot, (c.cumulative_ms, c.segment_ms)))
-            .collect();
+        // Every row the undisturbed replay filed, by slot: a broadcast with
+        // two runs of the event (2026-10-06) fills each slot twice.
+        let mut want: std::collections::BTreeMap<usize, Vec<(i64, i64)>> = Default::default();
+        for c in &base.out {
+            want.entry(c.slot)
+                .or_default()
+                .push((c.cumulative_ms, c.segment_ms));
+        }
         let points: Vec<usize> = match spec.at_pass {
             Some(n) => vec![n],
             None => (1..passes.len()).step_by(spec.step.max(1)).collect(),
@@ -364,9 +367,10 @@ pub fn disrupt(cfg: &Config, dir: &Path, spec: &DisruptSpec) -> Result<()> {
 }
 
 /// A disrupted replay against the undisturbed one: the notes, and counts of
-/// lost, wrong, duplicated and extra rows.
+/// lost, wrong, duplicated and extra rows. A slot can be wanted more than
+/// once, once per run of the event the broadcast holds.
 fn compare(
-    want: &std::collections::BTreeMap<usize, (i64, i64)>,
+    want: &std::collections::BTreeMap<usize, Vec<(i64, i64)>>,
     got: &crate::marathon::Replayed,
 ) -> (Vec<String>, [usize; 4]) {
     const OFF_MS: i64 = 1_500;
@@ -381,39 +385,90 @@ fn compare(
     let tag = |closed: bool| if closed { " (close)" } else { "" };
     let mut notes = Vec::new();
     let mut counts = [0usize; 4];
-    for (slot, (cum, seg)) in want {
-        match seen.get(slot) {
-            None => {
+    for (slot, wants) in want {
+        let v = seen.get(slot).map(Vec::as_slice).unwrap_or(&[]);
+        if v.is_empty() {
+            for (cum, seg) in wants {
                 counts[0] += 1;
                 notes.push(format!("LOST {}:{}/{}", slot + 1, cum / 1000, seg / 1000));
             }
-            Some(v) => {
-                for (c, s, closed) in v {
-                    if (c - cum).abs() > OFF_MS || (s - seg).abs() > OFF_MS {
-                        counts[1] += 1;
-                        notes.push(format!(
-                            "WRONG {}:{}/{} want {}/{}{}",
-                            slot + 1,
-                            c / 1000,
-                            s / 1000,
-                            cum / 1000,
-                            seg / 1000,
-                            tag(*closed)
-                        ));
-                    }
-                }
-                if v.len() > 1 {
-                    counts[2] += 1;
+            continue;
+        }
+        if let [(cum, seg)] = wants.as_slice() {
+            // One row wanted in the slot: every row filed there is held to it.
+            for (c, s, closed) in v {
+                if (c - cum).abs() > OFF_MS || (s - seg).abs() > OFF_MS {
+                    counts[1] += 1;
                     notes.push(format!(
-                        "DUP {}:{}",
+                        "WRONG {}:{}/{} want {}/{}{}",
                         slot + 1,
-                        v.iter()
-                            .map(|x| format!("{}{}", x.0 / 1000, tag(x.2)))
-                            .collect::<Vec<_>>()
-                            .join(",")
+                        c / 1000,
+                        s / 1000,
+                        cum / 1000,
+                        seg / 1000,
+                        tag(*closed)
                     ));
                 }
             }
+            if v.len() > 1 {
+                counts[2] += 1;
+                notes.push(format!(
+                    "DUP {}:{}",
+                    slot + 1,
+                    v.iter()
+                        .map(|x| format!("{}{}", x.0 / 1000, tag(x.2)))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ));
+            }
+            continue;
+        }
+        // Several: a broadcast with more than one run of the event fills a
+        // slot once per run. Each row wanted takes the row filed there that
+        // matches it; what is left over is wrong against what is left
+        // wanted, then lost, or a duplicate.
+        let mut used = vec![false; v.len()];
+        let mut left: Vec<(i64, i64)> = Vec::new();
+        for (cum, seg) in wants {
+            match v.iter().enumerate().position(|(j, (c, s, _))| {
+                !used[j] && (c - cum).abs() <= OFF_MS && (s - seg).abs() <= OFF_MS
+            }) {
+                Some(j) => used[j] = true,
+                None => left.push((*cum, *seg)),
+            }
+        }
+        let mut spare = v.iter().zip(&used).filter(|(_, u)| !**u).map(|(x, _)| x);
+        for (cum, seg) in left {
+            match spare.next() {
+                Some((c, s, closed)) => {
+                    counts[1] += 1;
+                    notes.push(format!(
+                        "WRONG {}:{}/{} want {}/{}{}",
+                        slot + 1,
+                        c / 1000,
+                        s / 1000,
+                        cum / 1000,
+                        seg / 1000,
+                        tag(*closed)
+                    ));
+                }
+                None => {
+                    counts[0] += 1;
+                    notes.push(format!("LOST {}:{}/{}", slot + 1, cum / 1000, seg / 1000));
+                }
+            }
+        }
+        let dup: Vec<_> = spare.collect();
+        if !dup.is_empty() {
+            counts[2] += 1;
+            notes.push(format!(
+                "DUP {}:{}",
+                slot + 1,
+                dup.iter()
+                    .map(|x| format!("{}{}", x.0 / 1000, tag(x.2)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
         }
     }
     for (slot, v) in &seen {

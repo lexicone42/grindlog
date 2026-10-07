@@ -864,7 +864,12 @@ impl Marathon {
         let Some(furthest) = self.slots.iter().filter_map(|s| s.recorded).max() else {
             return false;
         };
-        if t + AHEAD_OF_TOTAL_MS >= furthest {
+        // And well behind: a new run is seen within minutes of its start,
+        // while the furthest filed is a whole run or a good part of one.
+        // A row filed AHEAD of the clock (2026-10-01 after an eight-minute
+        // drop: Kid Klown at 1:05:48, the clock near 0:50) leaves a clock
+        // that is behind it, keeps time, and is no new run.
+        if t + AHEAD_OF_TOTAL_MS >= furthest || t * 2 >= furthest {
             self.clock_seen = [Some((at_ms, t)), self.clock_seen[0]];
             self.behind.clear();
             return false;
@@ -7402,8 +7407,26 @@ mod race_fixtures {
         let last = &passes[upto];
         let total = last.total_ms.expect("a total on the last pass");
         assert!(total > 3_600_000, "past the hour: {total}");
-        // Two running passes, then the hour lost for five.
+        // A clock five minutes behind the furthest row filed, keeping time:
+        // a row filed ahead of the clock (10-01 after a drop), no new run.
+        let furthest = m
+            .slots
+            .iter()
+            .filter_map(|s| s.recorded)
+            .max()
+            .expect("rows filed");
         let mut at = last.at_ms;
+        for k in 1..=5 {
+            at += 60_000;
+            assert!(
+                !m.new_run_under(at, Some(furthest - 300_000 + k * 60_000)),
+                "a clock behind a row filed ahead of it, pass {k}"
+            );
+        }
+        // The clock back where it was.
+        assert!(!m.new_run_under(at + 60_000, Some(total + (at + 60_000 - last.at_ms))));
+        at += 60_000;
+        // Two running passes, then the hour lost for five.
         for k in 1..=2 {
             at += 60_000;
             assert!(!m.new_run_under(at, Some(total + k * 60_000)));
