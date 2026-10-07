@@ -624,6 +624,11 @@ pub struct Marathon {
     /// Cumulative times already in the database for this event, so a restart
     /// mid-event does not record a completion twice.
     known: Vec<i64>,
+    /// The game each of those was filed under, where it came from the
+    /// database: a row is taken for one already filed only if it is the
+    /// same game, or its game is not known yet (`already_filed`).
+    #[serde(default)]
+    filed: Vec<(i64, String)>,
     /// The marathon total as of the current pass, where it was read: what
     /// says whether a row's baseline is behind the clock (a finished row)
     /// or ahead of it (a comparison not yet reached).
@@ -704,6 +709,7 @@ impl Marathon {
             slots: Vec::new(),
             numbers: HashMap::new(),
             known: Vec::new(),
+            filed: Vec::new(),
             total_ms: None,
             last_total_ms: None,
             held_total: None,
@@ -752,6 +758,32 @@ impl Marathon {
 
     pub fn seed(&mut self, cumulatives: &[i64]) {
         self.known = cumulatives.to_vec();
+    }
+
+    /// The games the seeded cumulatives were filed under (`db::marathon_filed`).
+    pub fn filed_as(&mut self, filed: &[(i64, String)]) {
+        self.filed = filed.to_vec();
+    }
+
+    /// Was this cumulative, on this slot, filed already? Within `tol` of one
+    /// this tracker or the database knows, and, where the database says what
+    /// game that was, the same game as this slot's. Two runs of the race on
+    /// one broadcast finished Faria and Monster Party on the same 1:54:17,
+    /// and the second run's Monster Party was taken for the first's Faria
+    /// and never filed.
+    fn already_filed(&self, i: usize, cum: i64, tol: i64) -> bool {
+        let game = self.canonical(i);
+        self.known.iter().any(|k| {
+            if (k - cum).abs() > tol {
+                return false;
+            }
+            let mut games = self
+                .filed
+                .iter()
+                .filter(|(f, _)| (f - k).abs() <= tol)
+                .peekable();
+            games.peek().is_none() || game.is_none_or(|g| games.any(|(_, n)| n == g))
+        })
     }
 
     /// Is the row above this one, as the board's arithmetic measures from it,
@@ -1393,7 +1425,7 @@ impl Marathon {
         // Within a second: the close at a drop or a shutdown files what it
         // last settled, which can be a second off what the board prints, and
         // an exact match then met the same game as new and filed it twice.
-        let already = observed.is_some_and(|c| self.known.iter().any(|k| (k - c).abs() <= 1_000));
+        let already = observed.is_some_and(|c| self.already_filed(i, c, 1_000));
         // A row whose first time comes under a row this tracker watched
         // finish, and exceeds it, finished on the tracker's watch: its time
         // is a completion to judge, not a baseline. The race board's "-"
@@ -1740,7 +1772,7 @@ impl Marathon {
             for (cum, _) in cands {
                 // Recorded already, by an earlier run of the bot over this
                 // broadcast.
-                if self.known.contains(&cum) {
+                if self.already_filed(i, cum, 0) {
                     // Recorded, but not WATCHED: the row was finished by the time
                     // an earlier run of the bot recorded it, so it stands for
                     // nothing about the rows under it (no `recorded_at_ms`).
@@ -2086,7 +2118,7 @@ impl Marathon {
             let ended_at_ms = self.slots[i + 1].recorded_at_ms.unwrap_or(at_ms) - below_seg;
             // Within the second: a row this bot recorded before it restarted,
             // derived here from the row below rather than read.
-            if self.known.iter().any(|k| (k - cum).abs() <= 1000) {
+            if self.already_filed(i, cum, 1000) {
                 self.slots[i].recorded = Some(cum);
                 self.slots[i].recorded_at_ms = Some(ended_at_ms);
                 continue;
@@ -2988,7 +3020,7 @@ pub struct Pass {
 /// Feeding `observe` directly validates a path the bot does not run: it
 /// cannot see a marathon that is never started, or one torn down mid-event.
 /// No database is needed; a `Vec<i64>` of the cumulatives recorded so far is
-/// exactly what `db::marathon_totals` returns.
+/// exactly what `db::marathon_filed` returns, game and all.
 ///
 /// `restart_at` drops everything the tracker has learned at that pass and
 /// picks the event up again from the database alone, which is what a crash
@@ -3080,6 +3112,11 @@ pub const ASIDE_GRACE_MS: i64 = 15 * 60 * 1000;
 /// restart.
 pub const CHECKPOINT_RESUME_MS: i64 = 30 * 60 * 1000;
 
+/// The cumulatives of filed completions, as `seed` and `resume` take them.
+fn cums(filed: &[(i64, String)]) -> Vec<i64> {
+    filed.iter().map(|f| f.0).collect()
+}
+
 /// [`replay`] with a disruption, modelled the way the run loop meets it.
 pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruption>) -> Replayed {
     let mut state: Option<Marathon> = None;
@@ -3095,7 +3132,7 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
     let mut misses: u32 = 0;
     let mut hits: u32 = 0;
     // The database: every cumulative recorded for this event so far.
-    let mut recorded: Vec<i64> = Vec::new();
+    let mut recorded: Vec<(i64, String)> = Vec::new();
     let mut out = Vec::new();
     let mut at_disruption = 0..0;
     let mut verdicts = [0u32; 3];
@@ -3133,7 +3170,7 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
             let (mut m, since) = aside.take().expect("checked");
             let from = out.len();
             for c in m.close(since + ASIDE_GRACE_MS) {
-                recorded.push(c.cumulative_ms);
+                recorded.push((c.cumulative_ms, c.game.clone()));
                 out.push(c);
             }
             at_disruption = from..out.len();
@@ -3165,7 +3202,7 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
                         let mut m = state.take().expect("checked");
                         let since = m.new_run_since().unwrap_or(p.at_ms);
                         for c in m.close(since) {
-                            recorded.push(c.cumulative_ms);
+                            recorded.push((c.cumulative_ms, c.game.clone()));
                             out.push(c);
                         }
                         hits = 0;
@@ -3194,7 +3231,7 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
                             // aside is over, and closed as it ended.
                             let from = out.len();
                             for c in m.close(since) {
-                                recorded.push(c.cumulative_ms);
+                                recorded.push((c.cumulative_ms, c.game.clone()));
                                 out.push(c);
                             }
                             at_disruption = from..out.len();
@@ -3214,7 +3251,8 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
                         },
                     };
                     if let Some(mut m) = resumed {
-                        m.resume(alias.rosters.clone(), &recorded);
+                        m.resume(alias.rosters.clone(), &cums(&recorded));
+                        m.filed_as(&recorded);
                         state = Some(m);
                         hits = 0;
                         aside_refused = 0;
@@ -3234,7 +3272,8 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
                         continue;
                     }
                     let mut m = Marathon::new(alias.name.clone(), alias.rosters.clone());
-                    m.seed(&recorded);
+                    m.seed(&cums(&recorded));
+                    m.filed_as(&recorded);
                     state = Some(m);
                 } else {
                     // The board the tracker holds, read again: a pass that
@@ -3248,7 +3287,7 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
         }
         let Some(m) = state.as_mut() else { continue };
         for c in m.observe(&p.board, p.at_ms, p.total_ms) {
-            recorded.push(c.cumulative_ms);
+            recorded.push((c.cumulative_ms, c.game.clone()));
             out.push(c);
         }
         last_at = p.at_ms;
@@ -3257,13 +3296,13 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
     // and so is one on the last pass before a drop it never came back from.
     if let Some((mut m, since)) = aside.take() {
         for c in m.close(since) {
-            recorded.push(c.cumulative_ms);
+            recorded.push((c.cumulative_ms, c.game.clone()));
             out.push(c);
         }
     }
     if let (Some(m), Some(p)) = (state.as_mut(), passes.last()) {
         for c in m.close(p.at_ms) {
-            recorded.push(c.cumulative_ms);
+            recorded.push((c.cumulative_ms, c.game.clone()));
             out.push(c);
         }
     }
@@ -7242,6 +7281,77 @@ mod race_fixtures {
     /// transition row above Parallel World unrecorded: its comparison
     /// 2:17:45 was filed as his finish minutes before the clock reached it,
     /// and Mega Man 6 was lost behind it.
+    /// 2026-10-06's second practice run, as the restarted bot met it: a new
+    /// tracker seeded with the first run's twenty completions. The second
+    /// run's Monster Party finished on 1:54:17, the very cumulative the
+    /// first run's Faria had, and a seed of bare cumulatives took it for
+    /// that and never filed it. With the games the seed came filed under,
+    /// it is filed, and every game of the run once.
+    #[test]
+    fn a_second_run_files_a_game_that_ended_on_the_first_runs_cumulative() {
+        let cfg = config();
+        let alias = cfg
+            .games
+            .iter()
+            .find(|g| g.name == "Big 20 #23 run")
+            .expect("the race in live.toml");
+        let (passes, _) = load("2026-10-06-second-run");
+        let first: Vec<(i64, String)> = [
+            (253_000, "Die Hard"),
+            (714_000, "Pac-Mania"),
+            (2_170_000, "Double Dragon II: The Revenge"),
+            (2_851_000, "Crisis Force"),
+            (4_118_000, "Kid Klown in Night Mayor World"),
+            (4_675_000, "Excitebike"),
+            (5_531_000, "Uninvited"),
+            (6_374_000, "Steel Legion"),
+            (6_857_000, "Faria"),
+            (7_628_000, "Monster Party"),
+            (8_432_000, "Parallel World"),
+            (9_149_000, "Mega Man 6"),
+            (9_989_000, "New Ghostbusters II"),
+            (10_182_000, "Mini Putt"),
+            (11_487_000, "The Flintstones: Surprise at Dinosaur Peak"),
+            (12_483_000, "Hydlide"),
+            (12_910_000, "Yoshi"),
+            (13_678_000, "Celeste Mario's Zap n Dash"),
+            (14_126_000, "Jaws"),
+            (14_971_000, "Moon Crystal"),
+        ]
+        .map(|(c, g)| (c, g.to_string()))
+        .to_vec();
+        let run = |games: bool| {
+            let mut m = Marathon::new(alias.name.clone(), alias.rosters.clone());
+            m.seed(&cums(&first));
+            if games {
+                m.filed_as(&first);
+            }
+            let mut out = Vec::new();
+            for p in &passes {
+                out.extend(m.observe(&p.board, p.at_ms, p.total_ms));
+            }
+            out.extend(m.close(passes.last().expect("passes").at_ms));
+            out
+        };
+        let bare = run(false);
+        assert!(
+            !bare.iter().any(|c| c.game == "Monster Party"),
+            "the live bot's miss, which the test stands on"
+        );
+        let filed = run(true);
+        let mp: Vec<_> = filed.iter().filter(|c| c.game == "Monster Party").collect();
+        assert_eq!(mp.len(), 1, "{mp:?}");
+        assert_eq!(
+            (mp[0].cumulative_ms, mp[0].segment_ms),
+            (6_857_000, 706_000)
+        );
+        let mut games: Vec<&str> = filed.iter().map(|c| c.game.as_str()).collect();
+        games.sort_unstable();
+        games.dedup();
+        assert_eq!(games.len(), filed.len(), "a game filed twice");
+        assert_eq!(filed.len(), bare.len() + 1);
+    }
+
     /// The new-run judge on the races captured whole: no pass of either
     /// day, misread totals and all, ends the tracker in force.
     #[test]

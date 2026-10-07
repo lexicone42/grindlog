@@ -236,14 +236,22 @@ pub async fn set_session_tag(pool: &SqlitePool, id: i64, tag: &str) -> Result<()
 }
 
 /// The cumulative times a marathon event already has runs for, over the
-/// window a broadcast can span. A board completion is recorded with the
-/// marathon total it happened at in `last_timer_ms`, and within one event
-/// that column is strictly increasing, so it identifies a completion exactly
-/// — which is what lets a bot restarted mid-event pick the board up again
-/// without recording the finished games a second time.
-pub async fn marathon_totals(pool: &SqlitePool, category: &str, since_ms: i64) -> Result<Vec<i64>> {
-    let v = sqlx::query_scalar::<_, i64>(
-        "SELECT last_timer_ms FROM runs WHERE category = ? AND ended_at_ms >= ? \
+/// window a broadcast can span, with the game each was filed under. A board
+/// completion is recorded with the marathon total it happened at in
+/// `last_timer_ms`, and within one run of an event that column is strictly
+/// increasing, so it identifies a completion — which is what lets a bot
+/// restarted mid-event pick the board up again without recording the
+/// finished games a second time. Not across runs: two runs of one event on
+/// one broadcast can finish different games on the same cumulative
+/// (2026-10-06: 1:54:17 was the first run's Faria and the second run's
+/// Monster Party), so the game comes with it.
+pub async fn marathon_filed(
+    pool: &SqlitePool,
+    category: &str,
+    since_ms: i64,
+) -> Result<Vec<(i64, String)>> {
+    let v = sqlx::query_as::<_, (i64, String)>(
+        "SELECT last_timer_ms, game FROM runs WHERE category = ? AND ended_at_ms >= ? \
          AND last_timer_ms IS NOT NULL",
     )
     .bind(category)
