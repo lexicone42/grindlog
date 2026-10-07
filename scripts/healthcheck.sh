@@ -9,7 +9,9 @@
 #               over ten minutes without being filed (a lost anchor, a wrong total)
 #   tracker-total the marathon total has not been refused as beyond the board
 #               on five passes (the timer being misread)
-#   tracker-runner a marathon in force has moved the runner's row within 45 min
+#   tracker-runner a marathon in force has moved the runner's row within 45 min,
+#               and once its last game is filed, the race clock is not running
+#               on ten minutes later (a new run nothing has taken up)
 #   tracker-clock a marathon in force reads its running total, advancing with
 #               the wall clock, on at least a third of the last five minutes'
 #               frames (a moved pane reads garbage and files nothing)
@@ -304,11 +306,24 @@ if [ "$open" -gt 0 ] && command -v jq >/dev/null; then
       # row, and every game after it is being held back.
       # Only this event's lines, and not once the runner's own game is
       # filed: that is the last game done, and the runner stays there.
+      clock=$(race_clock "$OBS" unix_ms "$five_min_ago_ms")
       state_iso=$(date -u -d "@$((state_t / 1000))" +%Y-%m-%dT%H:%M:%S)
       runner=$(plain | awk -v since="$state_iso" '$1 >= since && /marathon: runner on row/ {t=$1; l=$0} END {if (l) {sub(/.*runner on row /, "", l); sub(/\): .*/, ")", l); print t " " l}}')
       runner_game=$(sed -n 's/.*(\(.*\))$/\1/p' <<<"$runner")
       runner_done=$(jq -r --argjson since "${state_t:-0}" --arg g "$runner_game" '[.[] | select(.k == "marathon" and .t >= $since and $g != "" and (.d | startswith($g + " ")))] | length' <<<"$events" 2>/dev/null)
-      if [ -n "$runner" ] && [ "${runner_done:-0}" -gt 0 ]; then
+      # Done, but the clock is running: a new run of the event the tracker
+      # has not taken up. 2026-10-06's second run went eleven minutes like
+      # this, reported as done, until a restart. The tracker now takes a new
+      # run up within a few passes (Marathon::new_run_under), so this waits
+      # ten minutes with nothing started or filed before it speaks.
+      running=0
+      case "$clock" in
+        few|zero|held|"") ;;
+        *) read -r cn _ cm <<<"$clock"; [ $((cm * 3)) -ge "$cn" ] && running=1;;
+      esac
+      if [ -n "$runner" ] && [ "${runner_done:-0}" -gt 0 ] && [ "$running" = 1 ] && [ "$since_row" -gt 600 ]; then
+        check tracker-runner 1 "the runner's game ($runner_game) is filed, yet the race clock is running: a new run the tracker has not taken up? (a plain kill restarts it)"
+      elif [ -n "$runner" ] && [ "${runner_done:-0}" -gt 0 ]; then
         check tracker-runner 0 "the runner's game ($runner_game) is filed: the run is done"
       elif [ -n "$runner" ]; then
         rt=$(date -d "${runner%% *}" +%s 2>/dev/null || echo 0)
@@ -329,7 +344,6 @@ if [ "$open" -gt 0 ] && command -v jq >/dev/null; then
       # advances with the wall clock (to two seconds) are the clock being
       # read; zeros before the start and a total standing at the run's end
       # are not faults.
-      clock=$(race_clock "$OBS" unix_ms "$five_min_ago_ms")
       case "$clock" in
         few|"") check tracker-clock 0 "too few frames in the last five minutes to judge";;
         zero) check tracker-clock 0 "the total reads zero: not started";;
