@@ -1973,11 +1973,13 @@ async fn track_marathon(
                     );
                 }
                 if let Some(mut m) = resumed {
-                    let seen =
-                        db::marathon_totals(pool, &alias.name, at_ms - MARATHON_RECONCILE_MS)
+                    let filed =
+                        db::marathon_filed(pool, &alias.name, at_ms - MARATHON_RECONCILE_MS)
                             .await
                             .unwrap_or_default();
+                    let seen: Vec<i64> = filed.iter().map(|f| f.0).collect();
                     m.resume(alias.rosters.clone(), &seen);
+                    m.filed_as(&filed);
                     info!(
                         "marathon board: {:?} -> carrying on with the tracker it had: {}",
                         board.title,
@@ -2025,8 +2027,9 @@ async fn track_marathon(
                 // What a previous run of the bot over this same broadcast
                 // already recorded, so a restart mid-event does not record
                 // the finished games again.
-                match db::marathon_totals(pool, &alias.name, at_ms - MARATHON_RECONCILE_MS).await {
-                    Ok(seen) => {
+                match db::marathon_filed(pool, &alias.name, at_ms - MARATHON_RECONCILE_MS).await {
+                    Ok(filed) => {
+                        let seen: Vec<i64> = filed.iter().map(|f| f.0).collect();
                         if !seen.is_empty() {
                             info!(
                                 "marathon {:?}: {} completion(s) already recorded for this broadcast",
@@ -2035,6 +2038,7 @@ async fn track_marathon(
                             );
                         }
                         m.seed(&seen);
+                        m.filed_as(&filed);
                     }
                     Err(e) => warn!(
                         "could not reconcile {:?} against the database: {e:#}",
@@ -2946,7 +2950,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 // Gaiden morning thrown away, and if the next day is another
                 // marathon its slots, names and baselines are laid over the
                 // new board. A stream that only blipped re-establishes the
-                // event from `db::marathon_totals` when the board comes back,
+                // event from `db::marathon_filed` when the board comes back,
                 // which is what that reconcile is for, and the new session
                 // gets its own tag.
                 if let Some(m) = marathon.take() {
