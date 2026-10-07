@@ -361,12 +361,15 @@ brackets under it (`(Any% Beginner)`), which is the transition into the next
 game. The board **scrolls**: LiveSplit shows a window of nine or so rows
 with the last pinned, and moves it down as he plays.
 
-`scripts/replay-big20-race.sh <vod_id>` is `replay-arcathlon.sh` with the
-race roster (`assets/big20-roster.toml`) and a board entry matching the
-board's title; it writes `big20-race-db/vod-<id>.db`, one row per completed
-game under category `Big 20 #23 run`. Land it with
-`BIG20_OUT=big20-race-db BIG20_TAG=big20-race ./scripts/import-big20.sh`,
-tagged apart from the same VOD's practice import. Three things the tracker
+A race-board broadcast is replayed like any practice day, with
+`scripts/replay-big20.sh <vod_id>` and `live.toml` as deployed: the live
+config carries the race roster (`assets/big20-roster.toml`), the board entry
+matching the title and the race layout with its own timer net, so the replay
+files one row per completed game under category `Big 20 #23 run`, exactly as
+the live bot does. Land it with `scripts/import-big20.sh` (docs/big20.md).
+(`replay-big20-race.sh` baked its own config, as the Arcathlon replay does;
+it fell behind `live.toml` and by 2026-10-06 filed nothing, reading the race
+clock with tesseract on the default layout, so it is gone.) Three things the tracker
 does for this board that an Arcathlon never needed:
 
 - **A bracketed row is a segment, not a game.** It is filed under nothing,
