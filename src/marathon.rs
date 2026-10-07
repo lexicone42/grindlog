@@ -1802,8 +1802,11 @@ impl Marathon {
             }
             for (cum, _) in cands {
                 // Recorded already, by an earlier run of the bot over this
-                // broadcast.
-                if self.already_filed(i, cum, 0) {
+                // broadcast. Within the second, as for a baseline: a close
+                // files what it last settled, a second off what the board
+                // then prints, and the exact match let 2026-10-07's
+                // Uninvited in twice (1:25:50 at a hand-over, 1:25:51 after).
+                if self.already_filed(i, cum, 1_000) {
                     // Recorded, but not WATCHED: the row was finished by the time
                     // an earlier run of the bot recorded it, so it stands for
                     // nothing about the rows under it (no `recorded_at_ms`).
