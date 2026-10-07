@@ -1973,10 +1973,13 @@ async fn track_marathon(
                     );
                 }
                 if let Some(mut m) = resumed {
-                    let filed =
-                        db::marathon_filed(pool, &alias.name, at_ms - MARATHON_RECONCILE_MS)
-                            .await
-                            .unwrap_or_default();
+                    let filed = db::marathon_filed(
+                        pool,
+                        &alias.name,
+                        marathon::run_floor_ms(at_ms, total_ms, MARATHON_RECONCILE_MS),
+                    )
+                    .await
+                    .unwrap_or_default();
                     let seen: Vec<i64> = filed.iter().map(|f| f.0).collect();
                     m.resume(alias.rosters.clone(), &seen);
                     m.filed_as(&filed);
@@ -2027,7 +2030,13 @@ async fn track_marathon(
                 // What a previous run of the bot over this same broadcast
                 // already recorded, so a restart mid-event does not record
                 // the finished games again.
-                match db::marathon_filed(pool, &alias.name, at_ms - MARATHON_RECONCILE_MS).await {
+                match db::marathon_filed(
+                    pool,
+                    &alias.name,
+                    marathon::run_floor_ms(at_ms, total_ms, MARATHON_RECONCILE_MS),
+                )
+                .await
+                {
                     Ok(filed) => {
                         let seen: Vec<i64> = filed.iter().map(|f| f.0).collect();
                         if !seen.is_empty() {
