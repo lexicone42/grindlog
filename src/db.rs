@@ -244,14 +244,15 @@ pub async fn set_session_tag(pool: &SqlitePool, id: i64, tag: &str) -> Result<()
 /// finished games a second time. Not across runs: two runs of one event on
 /// one broadcast can finish different games on the same cumulative
 /// (2026-10-06: 1:54:17 was the first run's Faria and the second run's
-/// Monster Party), so the game comes with it.
+/// Monster Party), so the game comes with it, and when each ended, which
+/// says which run it was (`marathon::this_run`).
 pub async fn marathon_filed(
     pool: &SqlitePool,
     category: &str,
     since_ms: i64,
-) -> Result<Vec<(i64, String)>> {
-    let v = sqlx::query_as::<_, (i64, String)>(
-        "SELECT last_timer_ms, game FROM runs WHERE category = ? AND ended_at_ms >= ? \
+) -> Result<Vec<(i64, String, i64)>> {
+    let v = sqlx::query_as::<_, (i64, String, i64)>(
+        "SELECT last_timer_ms, game, ended_at_ms FROM runs WHERE category = ? AND ended_at_ms >= ? \
          AND last_timer_ms IS NOT NULL",
     )
     .bind(category)
