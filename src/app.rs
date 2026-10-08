@@ -1758,6 +1758,10 @@ pub(crate) const MARATHON_TAKE_UP: u32 = 3;
 /// last one was. `marathon::replay_disrupted` models the same, and the audit
 /// measures it.
 struct MarathonKeep {
+    /// When a new run of the event was last taken to begin under the tracker
+    /// in force: what was filed before it is the previous run's, and a
+    /// tracker taken up after is not seeded with it (`marathon::this_run`).
+    run_floor_ms: i64,
     /// Where the tracker is saved after every pass, on a live stream: beside
     /// the database. A recording replays from the start and saves nothing.
     path: Option<std::path::PathBuf>,
@@ -1819,6 +1823,7 @@ impl MarathonKeep {
             checkpoint,
             aside: None,
             aside_refused: 0,
+            run_floor_ms: i64::MIN,
             save_failed: false,
         }
     }
@@ -1946,6 +1951,7 @@ async fn track_marathon(
                 if m.new_run_under(at_ms, total_ms) {
                     let mut m = state.take().expect("checked");
                     let since = m.new_run_since().unwrap_or(at_ms);
+                    keep.run_floor_ms = since;
                     let late = m.close(since);
                     let unmatched = m.unmatched();
                     file_completions(pool, session_id, health, since, unmatched, late).await;
@@ -1973,10 +1979,14 @@ async fn track_marathon(
                     );
                 }
                 if let Some(mut m) = resumed {
-                    let filed =
-                        db::marathon_filed(pool, &alias.name, at_ms - MARATHON_RECONCILE_MS)
+                    let filed = marathon::this_run(
+                        &db::marathon_filed(pool, &alias.name, at_ms - MARATHON_RECONCILE_MS)
                             .await
-                            .unwrap_or_default();
+                            .unwrap_or_default(),
+                        keep.run_floor_ms,
+                        alias.rosters.any_ordered(),
+                        total_ms,
+                    );
                     let seen: Vec<i64> = filed.iter().map(|f| f.0).collect();
                     m.resume(alias.rosters.clone(), &seen);
                     m.filed_as(&filed);
@@ -2029,6 +2039,12 @@ async fn track_marathon(
                 // the finished games again.
                 match db::marathon_filed(pool, &alias.name, at_ms - MARATHON_RECONCILE_MS).await {
                     Ok(filed) => {
+                        let filed = marathon::this_run(
+                            &filed,
+                            keep.run_floor_ms,
+                            alias.rosters.any_ordered(),
+                            total_ms,
+                        );
                         let seen: Vec<i64> = filed.iter().map(|f| f.0).collect();
                         if !seen.is_empty() {
                             info!(
