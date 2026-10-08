@@ -3171,14 +3171,30 @@ const RUN_START_SLACK_MS: i64 = 30 * 60 * 1000;
 /// saw, whose new run may have filed nothing yet. An unordered board (an
 /// Arcathlon) pauses its total between games and its starts drift: there
 /// everything is kept.
-pub fn this_run(filed: &[(i64, String, i64)], floor_ms: i64, ordered: bool) -> Vec<(i64, String)> {
+pub fn this_run(
+    filed: &[(i64, String, i64)],
+    floor_ms: i64,
+    ordered: bool,
+    total_ms: Option<i64>,
+) -> Vec<(i64, String)> {
     let after: Vec<&(i64, String, i64)> = filed.iter().filter(|f| f.2 >= floor_ms).collect();
+    if !ordered {
+        return after.into_iter().map(|f| (f.0, f.1.clone())).collect();
+    }
     let latest = after.iter().map(|f| f.2 - f.0).max();
-    after
+    let run: Vec<&(i64, String, i64)> = after
         .into_iter()
-        .filter(|f| !ordered || latest.is_some_and(|s| f.2 - f.0 >= s - RUN_START_SLACK_MS))
-        .map(|f| (f.0, f.1.clone()))
-        .collect()
+        .filter(|f| latest.is_some_and(|s| f.2 - f.0 >= s - RUN_START_SLACK_MS))
+        .collect();
+    // A group every completion of which is ahead of the clock on screen is
+    // an earlier run: this run's completions are all behind its clock. It
+    // is what a restart in a run's first minutes, before it has filed
+    // anything, meets. A clock misread low would have to read under this
+    // run's first finish to be fooled, and that finish is all it could cost.
+    if total_ms.is_some_and(|t| run.iter().all(|f| f.0 > t + AHEAD_OF_TOTAL_MS)) {
+        return Vec::new();
+    }
+    run.into_iter().map(|f| (f.0, f.1.clone())).collect()
 }
 
 /// The cumulatives of filed completions, as `seed` and `resume` take them.
@@ -3324,7 +3340,8 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
                         },
                     };
                     if let Some(mut m) = resumed {
-                        let seed = this_run(&recorded, floor_ms, alias.rosters.any_ordered());
+                        let seed =
+                            this_run(&recorded, floor_ms, alias.rosters.any_ordered(), p.total_ms);
                         m.resume(alias.rosters.clone(), &cums(&seed));
                         m.filed_as(&seed);
                         state = Some(m);
@@ -3346,7 +3363,8 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
                         continue;
                     }
                     let mut m = Marathon::new(alias.name.clone(), alias.rosters.clone());
-                    let seed = this_run(&recorded, floor_ms, alias.rosters.any_ordered());
+                    let seed =
+                        this_run(&recorded, floor_ms, alias.rosters.any_ordered(), p.total_ms);
                     m.seed(&cums(&seed));
                     m.filed_as(&seed);
                     state = Some(m);
