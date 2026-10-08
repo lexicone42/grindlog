@@ -1985,7 +1985,6 @@ async fn track_marathon(
                             .unwrap_or_default(),
                         keep.run_floor_ms,
                         alias.rosters.any_ordered(),
-                        total_ms,
                     );
                     let seen: Vec<i64> = filed.iter().map(|f| f.0).collect();
                     m.resume(alias.rosters.clone(), &seen);
@@ -2043,7 +2042,6 @@ async fn track_marathon(
                             &filed,
                             keep.run_floor_ms,
                             alias.rosters.any_ordered(),
-                            total_ms,
                         );
                         let seen: Vec<i64> = filed.iter().map(|f| f.0).collect();
                         if !seen.is_empty() {
