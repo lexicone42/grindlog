@@ -4994,21 +4994,13 @@ pub async fn run(cfg: Config) -> Result<()> {
             ) {
                 (false, Some(f), _) if !cr.orphaned => cr.foreign = Some(f.clone()),
                 (false, None, false) => cr.orphaned = true,
-                // The same game named again with a better spelling or its
-                // category read right: a title vote names a game on its
-                // third pass with whatever spellings those three had
-                // ("rystalis [io Wild Warp]"), and keeps improving while the
-                // run is open. The run carries the game it was named for;
-                // its spelling follows the vote. Never another game: a
-                // target for a different fold is the board he switched to.
+                // A better spelling of the same game, or the vote's game over a
+                // roster's fragment match: see `run_follows_naming`.
                 (true, Some(f), _)
                     if cr
                         .foreign
                         .as_ref()
-                        .is_some_and(|g| g.game != f.game || g.category != f.category)
-                        && cr.foreign.as_ref().is_some_and(|g| {
-                            crate::roster::fold_title(&g.game) == crate::roster::fold_title(&f.game)
-                        }) =>
+                        .is_some_and(|g| run_follows_naming(g, f)) =>
                 {
                     cr.foreign = Some(f.clone())
                 }
@@ -5226,6 +5218,55 @@ struct ForeignRun {
     /// The floor that decides finish from death for THIS run, since the
     /// configured `min_final_ms` belongs to the tracked game.
     min_final_ms: i64,
+}
+
+/// Does an open run named `old` take a later naming `new`?
+///
+/// The same game named again with a better spelling or its category read
+/// right: a title vote names a game on its third pass with whatever
+/// spellings those three had ("rystalis [io Wild Warp]") and keeps
+/// improving while the run is open; the run carries the game it was named
+/// for and its spelling follows. Never another game of the vote's: a target
+/// for a different fold is the board he switched to.
+///
+/// One exception, the other way round. The rosters forgive a fragment: a
+/// Dragon Warrior II header read "Dragon Il" at the start of a run named
+/// Double Dragon II, and the vote could not yet say otherwise because the
+/// pane's rows did not read for the first half hour. A run named by a
+/// roster takes a game the vote names later when the two share a word of
+/// four letters (the fragment the roster matched) and their numerals agree:
+/// three whole readings of a header outrank one fragment of it. The vote
+/// never names a roster game, so this cannot run the other way.
+fn run_follows_naming(old: &ForeignRun, new: &ForeignRun) -> bool {
+    if old.game == new.game && old.category == new.category {
+        return false;
+    }
+    // The vote's own join rule: the stem within a fifth of its length in
+    // edits ("rystalis" to "Crystalis"), the sequel number equal.
+    let (os, oq) = crate::roster::fold_title(&old.game);
+    let (ns, nq) = crate::roster::fold_title(&new.game);
+    if oq == nq && (os == ns || board::edit_close(&os, &ns)) {
+        return true;
+    }
+    let words = |g: &str| -> Vec<String> {
+        board::normalise_title(g)
+            .split(' ')
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let numeral = |w: &str| {
+        w.chars().all(|c| c.is_ascii_digit()) || w.chars().all(|c| matches!(c, 'i' | 'v' | 'x'))
+    };
+    let (ow, nw) = (words(&old.game), words(&new.game));
+    let shared = ow
+        .iter()
+        .any(|w| w.chars().count() >= 4 && !numeral(w) && nw.contains(w));
+    let numerals_agree = ow.iter().find(|w| numeral(w)) == nw.iter().find(|w| numeral(w));
+    shared
+        && numerals_agree
+        && crate::roster::canonical_foreign(&old.game).is_some()
+        && crate::roster::canonical_foreign(&new.game).is_none()
 }
 
 /// One parsed reading of a game's attempt counter, off the counter crop or
@@ -6338,6 +6379,30 @@ mod tests {
             foreign.as_ref().map(|f| f.category.as_str()),
             Some("Big 20 #23")
         );
+    }
+
+    /// A run named Double Dragon II by the roster's reading of "Dragon Il"
+    /// takes Dragon Warrior II when the vote names it later; a run named by
+    /// the vote keeps its game against a later roster name, or another of
+    /// the vote's, and follows a better spelling of its own.
+    #[test]
+    fn a_run_named_by_a_roster_fragment_follows_the_vote() {
+        let f = |game: &str, category: &str| ForeignRun {
+            game: game.into(),
+            category: category.into(),
+            min_final_ms: 1,
+        };
+        let ddii = f("Double Dragon II: The Revenge", "Big 20 #23");
+        let dw2 = f("Dragon Warrior II", "Any%");
+        assert!(run_follows_naming(&ddii, &dw2));
+        assert!(!run_follows_naming(&dw2, &ddii));
+        assert!(!run_follows_naming(&ddii, &f("Dragon Warrior III", "Any%")));
+        assert!(!run_follows_naming(&dw2, &f("Crystalis", "Any%")));
+        assert!(run_follows_naming(
+            &f("rystalis", "io Wild Warp"),
+            &f("Crystalis", "Any% No Wild Warp")
+        ));
+        assert!(!run_follows_naming(&dw2, &dw2));
     }
 
     /// One damaged read of a Dragon Warrior II header, "Dragon Il", names
