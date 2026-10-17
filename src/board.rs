@@ -796,6 +796,25 @@ pub fn names_an_alias(title: &str, cfg: &Config) -> bool {
     })
 }
 
+/// The runs-mode `[[games]]` entry a title names, if any. Under
+/// `follow_title = "any"` it pins a spelling tesseract never reads whole:
+/// `name = "Crystalis", match = ["stalis"]` files "rystalis" and "Cc stalis"
+/// under the one name.
+pub fn runs_alias_for<'a>(title: &str, cfg: &'a Config) -> Option<&'a crate::config::GameAlias> {
+    let norm = normalise_title(title);
+    cfg.games
+        .iter()
+        .filter(|a| a.mode == crate::config::GameMode::Runs)
+        .find(|alias| {
+            alias
+                .r#match
+                .iter()
+                .chain(std::iter::once(&alias.name))
+                .map(|m| normalise_title(m))
+                .any(|m| word_matches(&norm, &m))
+        })
+}
+
 /// The alphabetic words of a name, normalised, when they amount to three
 /// letters or more: "King Kong 2 424" is "king kong", "Act 1" is "act",
 /// and "22?", "a 22?", "ex" are nothing — placeholders and fragments.

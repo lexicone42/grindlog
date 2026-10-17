@@ -1543,6 +1543,22 @@ fn apply_identity(
             reading.named_category = cat.clone();
         }
     }
+    // A runs-mode [[games]] entry the title names pins the spelling: the
+    // pane never reads "Crystalis" whole at 480p ("rystalis", "Cc stalis"),
+    // and an entry `name = "Crystalis", match = ["stalis"]` files every
+    // reading under the one name, with the entry's category or the line read.
+    if matches!(cfg.game.follow_title, crate::config::FollowTitle::Any) {
+        if let Some(a) = title.and_then(|t| board::runs_alias_for(t, cfg)) {
+            if !game_matches(&a.name, &cfg.game.name) {
+                reading.named = Some(a.name.clone());
+                reading.named_category =
+                    a.category.clone().or_else(|| category.map(str::to_string));
+                if !reading.against.contains(&identity::Signal::NamedAnother) {
+                    reading.against.push(identity::Signal::NamedAnother);
+                }
+            }
+        }
+    }
     // The header reads as another game: not this one, and not a fragment of
     // it. Counted over passes running, for `close_would_fabricate`.
     let header_other = reading.against.contains(&identity::Signal::Header)
@@ -6130,6 +6146,51 @@ mod tests {
     /// of it was recorded. The spelling is the one read most, with the
     /// sequel the readings agree on printed as a numeral; the category is
     /// the line under the header.
+    /// A runs-mode `[[games]]` entry pins what a title the pane never reads
+    /// whole is filed as: tesseract read Crystalis's header as "rystalis" and
+    /// "Cc stalis" at 480p, and `name = "Crystalis", match = ["stalis"]` files
+    /// both under Crystalis, with the category read under the header. The
+    /// entry names a game, not the tracked one, so the pass convicts.
+    #[test]
+    fn any_files_a_title_a_runs_alias_names_under_the_alias() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        cfg.game.follow_title = crate::config::FollowTitle::Any;
+        cfg.game.other_category = "Other".into();
+        cfg.games.push(crate::config::GameAlias {
+            name: "Crystalis".into(),
+            category: None,
+            r#match: vec!["stalis".into()],
+            mode: crate::config::GameMode::Runs,
+            roster: None,
+            rosters: Default::default(),
+        });
+        let fp = identity::Fingerprint::of(&cfg, None);
+        let mut id = identity::Identity::new(&cfg);
+        let mut foreign = None;
+        let mut vote = identity::TitleVote::default();
+        let mut feed = |t: &str| {
+            feed_pane_target(
+                Some(t),
+                Some("Any% No Wild Warp"),
+                8,
+                &cfg,
+                &fp,
+                &mut id,
+                &mut foreign,
+                &mut vote,
+            );
+            foreign
+                .as_ref()
+                .map(|f| (f.game.clone(), f.category.clone()))
+        };
+        let cry = Some(("Crystalis".to_string(), "Any% No Wild Warp".to_string()));
+        assert_eq!(feed("rystalis"), None);
+        assert_eq!(feed("Cc stalis"), cry);
+        assert_eq!(feed("rystalis"), cry);
+    }
+
     #[test]
     fn any_files_a_run_under_a_title_read_the_same_way_three_times() {
         let mut cfg = Config::for_test_with_min_final(660_000);
