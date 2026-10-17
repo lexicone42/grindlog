@@ -346,6 +346,18 @@ tracked game's, and nothing has named it yet, is dropped
 tracked game's, so the gate stayed undecided, and a run closing then was
 filed as Ninja Gaiden: a run of a game nobody has named is not invented.
 
+Two levers over the vote. A header that reads as a clipped form of the
+name the vote has settled on is filed under the settled name even where
+the rosters would name another game from the fragment: "Dragon Il" is
+"dragon" within "doubledragon" to the matcher, and a Dragon Warrior II run
+was filed as Double Dragon II until the settled vote outranked it. A
+header that reads as a roster game whole still wins, since that is a
+switch to it. And a runs-mode `[[games]]` entry pins a spelling the pane
+never reads whole: tesseract read "Crystalis" as "rystalis" and "Cc
+stalis" at 480p and never once correctly on some days, and
+`name = "Crystalis", match = ["stalis"]` files every reading under the one
+name, with the entry's category or the line read under the header.
+
 Three details it must get right, each of which was a bug first:
 
 - **The target is resolved when the run CLOSES, not when it starts.**
@@ -858,8 +870,13 @@ to look, and for that there are two uses:
   for the tallest digit band that reads as a time, which is the run timer
   on every LiveSplit layout (a split row's time cell and the segment timer
   under the run's are both smaller). Two looks agreeing on where it is
-  place a crop around it (room for the hours to the left) as the timer
-  crop of one layout more than the config has, named `found`. That is a
+  place a crop around it as the timer crop of one layout more than the
+  config has, named `found`. The crop keeps seven band heights to the left
+  of the ink's right edge whatever the ink's width: LiveSplit right-aligns
+  the timer, so a crop placed around "0.91" at the start of a run has to
+  hold "1:19:59.92" an hour later, and the first cut of this lost the
+  leading digit at ten minutes (19:59 read 9:59, 20:00 read as a reset,
+  every ten minutes of a Dragon Warrior II day). That is a
   candidate like any other: it has to read consistently over the same
   streak as a configured layout before it takes the lock, and it loses the
   lock the same way. `tests/fixtures/pane/` holds the capture's union crop

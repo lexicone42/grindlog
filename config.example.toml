@@ -367,6 +367,12 @@ category = "Any%"
 # one of that event's ten, and counts what it could not place in the
 # session's health events. See assets/arcathlon-rosters.toml (which is the
 # format, and the example) and docs/marathons.md.
+#
+# Under game.follow_title = "any", a runs-mode entry also pins the spelling
+# of a title the pane never reads whole: tesseract reads "Crystalis" as
+# "rystalis" and "Cc stalis" at 480p, and an entry with name = "Crystalis"
+# and match = ["stalis"] files every reading under the one name, with this
+# entry's category or the line read under the header.
 [[games]]
 name = "Arcathlon"
 category = "10 games"
