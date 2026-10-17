@@ -3242,7 +3242,10 @@ pub async fn run(cfg: Config) -> Result<()> {
                             Some((x0 * up, y0 * up, (x1 - x0) * up, (y1 - y0) * up)),
                         ))
                     }
-                    (None, None) => match any_reader.as_ref().and_then(|r| r.read(&g_luma)) {
+                    (None, None) => match any_reader
+                        .as_ref()
+                        .and_then(|r| r.read(&g_luma).or_else(|| r.read(&g)))
+                    {
                         // The geometry-free reader before tesseract: the crop
                         // cut by its own ink, whatever the layout's slots say.
                         Some(rd) => {
@@ -3482,7 +3485,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                 let any = if cnn.is_some() {
                     None
                 } else {
-                    any_reader.as_ref().and_then(|r| r.read(&g_luma))
+                    any_reader
+                        .as_ref()
+                        .and_then(|r| r.read(&g_luma).or_else(|| r.read(&g)))
                 };
                 let glyph = if cnn.is_some() || any.is_some() {
                     None
@@ -3514,6 +3519,16 @@ pub async fn run(cfg: Config) -> Result<()> {
                         // stream. (Light digits on dark only: on an inverted
                         // theme the reader sees the background as ink.)
                         Some(Err(crate::glyph::Decline::Segmentation(_))) if pre.invert => {
+                            (String::new(), None)
+                        }
+                        // Nor where the geometry-free reader finds no digit band
+                        // in the crop, in either channel: it was trained on six
+                        // channels' timers, and tesseract at every candidate
+                        // position is what makes a probing replay crawl.
+                        _ if any_reader
+                            .as_ref()
+                            .is_some_and(|r| !r.has_band(&g_luma) && !r.has_band(&g)) =>
+                        {
                             (String::new(), None)
                         }
                         _ => {
@@ -3552,7 +3567,11 @@ pub async fn run(cfg: Config) -> Result<()> {
             // candidate like any other: it has to read consistently over the
             // same streak before it takes the lock.
             if winner.is_none() && !lock.locked() && probe_rr.is_multiple_of(4) {
-                if let Some(f) = any_reader.as_ref().and_then(|r| r.find(&union_img)) {
+                // On the brightest channel, not luma: LiveSplit colours the
+                // timer red behind pace and green ahead, and a red timer has
+                // almost no luma against the pane (Crystalis at 2:10:27, red,
+                // was found only when the next run's white 0.91 appeared).
+                if let Some(f) = any_reader.as_ref().and_then(|r| r.find(&union_bright)) {
                     let centre = (f.ink.0 + f.ink.2 / 2, f.ink.1 + f.ink.3 / 2);
                     let near = |c: (u32, u32)| {
                         (c.0 as i32 - centre.0 as i32).abs() <= 12
@@ -4893,6 +4912,24 @@ pub async fn run(cfg: Config) -> Result<()> {
             ) {
                 (false, Some(f), _) if !cr.orphaned => cr.foreign = Some(f.clone()),
                 (false, None, false) => cr.orphaned = true,
+                // The same game named again with a better spelling or its
+                // category read right: a title vote names a game on its
+                // third pass with whatever spellings those three had
+                // ("rystalis [io Wild Warp]"), and keeps improving while the
+                // run is open. The run carries the game it was named for;
+                // its spelling follows the vote. Never another game: a
+                // target for a different fold is the board he switched to.
+                (true, Some(f), _)
+                    if cr
+                        .foreign
+                        .as_ref()
+                        .is_some_and(|g| g.game != f.game || g.category != f.category)
+                        && cr.foreign.as_ref().is_some_and(|g| {
+                            crate::roster::fold_title(&g.game) == crate::roster::fold_title(&f.game)
+                        }) =>
+                {
+                    cr.foreign = Some(f.clone())
+                }
                 _ => {}
             }
         }

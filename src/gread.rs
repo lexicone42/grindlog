@@ -298,6 +298,12 @@ impl AnyReader {
         })
     }
 
+    /// Is there a digit band in this crop at all? What tesseract is spared
+    /// where there is not.
+    pub fn has_band(&self, crop: &GrayImage) -> bool {
+        tiles(crop, self.tile()).is_some_and(|(_, bx)| (MIN_BAND..=MAX_BAND).contains(&bx.height()))
+    }
+
     /// Find the run timer in a region: the tallest digit band that reads
     /// as a time. The region is scanned in strips a little over the
     /// tallest band high, half a strip apart, so a band sits whole in one
