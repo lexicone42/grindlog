@@ -600,17 +600,25 @@ pub fn classify<'a>(board: &Board, cfg: &'a Config, current: Option<&Marathon>) 
             // "tant", the title read as its category line) was locked on
             // as the race board, a race tracker started on it, and under a
             // board lock the timer feeds nothing, so a day of runs went
-            // unrecorded. The rows have to say so: one row naming a game of
-            // the alias's rosters (any event of them: which event is the
-            // tracker's question, not this one's). An alias with no roster
-            // has nothing to name and keeps the old answer.
+            // unrecorded. The rows have to say so: two rows naming two games
+            // of the alias's rosters (any event of them: which event is the
+            // tracker's question, not this one's). Two, because the roster
+            // matcher forgives a fragment: Crystalis's "Bow of Moon" row read
+            // as "Moon" and named Moon Crystal. An alias with no roster has
+            // nothing to name and keeps the old answer.
             let rows_name_its_games = |a: &GameAlias| {
-                a.rosters.is_empty()
-                    || board
-                        .rows
-                        .iter()
-                        .filter_map(|r| r.name.as_deref())
-                        .any(|n| a.rosters.canonical(n).is_some())
+                if a.rosters.is_empty() {
+                    return true;
+                }
+                let mut named: Vec<&str> = board
+                    .rows
+                    .iter()
+                    .filter_map(|r| r.name.as_deref())
+                    .filter_map(|n| a.rosters.canonical(n))
+                    .collect();
+                named.sort_unstable();
+                named.dedup();
+                named.len() >= 2
             };
             match boards.as_slice() {
                 [only] if names_a_game(only) => somebody_else(),
@@ -7553,6 +7561,25 @@ mod race_fixtures {
             ],
         };
         assert!(!is_board(&crystalis), "Crystalis taken for the race board");
+        // The same pane on another pass: "Bow of Moon" read as "Moon", which
+        // the roster matcher forgives as Moon Crystal. One such row is not
+        // the race.
+        let crystalis_later = Board {
+            title: Some("Any% Warp".into()),
+            subtitle: None,
+            counter: None,
+            rows: vec![
+                row("tant", &["6:42.0", "52:28.0"]),
+                row("np", &["5:01.0", "57:29.0"]),
+                row("", &["8:57.1", "1:06:26.1"]),
+                row("Moon", &["3:01.5", "1:09:27.7"]),
+                row("of Thunder", &["13:07.1", "1:22:34.8"]),
+                row("", &["15:25.5", "1:10:48.0"]),
+                row("ting", &["1:11.4", "1:11:59.4"]),
+                row("", &["16:22.3", "1:28:21.8"]),
+            ],
+        };
+        assert!(!is_board(&crystalis_later), "Crystalis, a row read as Moon, taken for the race board");
         let dragon_warrior = Board {
             title: Some("Dragon Warrior Il".into()),
             subtitle: None,
