@@ -694,8 +694,15 @@ impl Cluster {
     fn name(&self) -> String {
         most_read(&self.spellings).unwrap_or_else(|| self.stem.clone())
     }
+    /// The line under the header, read most — when it is there to read:
+    /// a pane with no category line (Dragon Warrior II's) still yields a
+    /// stray word on a pass in ten ("ce", "ice"), and a category read on
+    /// fewer than half the votes is noise over nothing, not a category.
     fn category(&self) -> Option<String> {
-        most_read(&self.categories)
+        let read: u32 = self.categories.values().sum();
+        (read * 2 >= self.votes)
+            .then(|| most_read(&self.categories))
+            .flatten()
     }
 }
 
@@ -805,6 +812,29 @@ mod tests {
             })
             .collect();
         c
+    }
+
+    /// A pane with no category line reads a stray word under its header now
+    /// and then; the vote names the game with no category unless the line
+    /// is read on at least half its passes.
+    #[test]
+    fn a_category_read_on_few_passes_is_no_category() {
+        let mut cfg = Config::for_test_with_min_final(1);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        let mut v = TitleVote::default();
+        let t = Some("Dragon Warrior II");
+        assert_eq!(v.observe(t, Some("Glitchless"), 8, &cfg, 0), None);
+        assert_eq!(v.observe(t, None, 8, &cfg, 60_000), None);
+        assert_eq!(
+            v.observe(t, None, 8, &cfg, 120_000),
+            Some(("Dragon Warrior II".into(), None))
+        );
+        // Read on half the passes, it is the category.
+        assert_eq!(
+            v.observe(t, Some("Glitchless"), 8, &cfg, 180_000),
+            Some(("Dragon Warrior II".into(), Some("Glitchless".into())))
+        );
     }
 
     /// The vote spells a game as the longest reading read often enough: at
