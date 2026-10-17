@@ -662,6 +662,23 @@ impl TitleVote {
         Some((known.cloned().unwrap_or(name), c.category()))
     }
 
+    /// The game the latest cluster with enough votes names, if any, whether
+    /// or not this pass voted: what a clipped read of it is measured against.
+    pub fn settled(&self) -> Option<(String, Option<String>)> {
+        let c = self
+            .clusters
+            .iter()
+            .filter(|c| c.votes >= TITLE_VOTES)
+            .max_by_key(|c| c.last_ms)?;
+        let name = c.name();
+        let (stem, sequel) = crate::roster::fold_title(&name);
+        let known = self.known.iter().find(|k| {
+            let (ks, kq) = crate::roster::fold_title(k);
+            kq == sequel && (ks == stem || board::edit_close(&ks, &stem))
+        });
+        Some((known.cloned().unwrap_or(name), c.category()))
+    }
+
     /// The games the database already holds under free titles.
     pub fn know(&mut self, names: Vec<String>) {
         self.known = names;

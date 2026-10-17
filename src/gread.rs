@@ -346,9 +346,13 @@ impl AnyReader {
 /// above and below, clamped to the region.
 pub fn crop_around(ink: (u32, u32, u32, u32), region: (u32, u32)) -> (u32, u32, u32, u32) {
     let (x, y, w, h) = ink;
-    let x0 = x.saturating_sub(2 * h);
-    let y0 = y.saturating_sub(h / 2);
     let x1 = (x + w + h / 4).min(region.0);
+    // LiveSplit right-aligns the timer, so it grows to the left: a crop placed
+    // around "0.91" at the start of a run has to hold "1:19:59.92" an hour
+    // later (ten glyphs, about 5.5 band heights in its font), or the leading
+    // digit falls outside it and 19:59 reads as 9:59 and 20:00 as a reset.
+    let x0 = x.saturating_sub(2 * h).min(x1.saturating_sub(7 * h));
+    let y0 = y.saturating_sub(h / 2);
     let y1 = (y + h + h / 2).min(region.1);
     (
         x0,
@@ -445,6 +449,11 @@ mod tests {
             (220, 480, 290, 80)
         );
         assert_eq!(crop_around((10, 10, 100, 40), (800, 700)), (0, 0, 120, 70));
+        // A narrow timer at the start of a run: room for ten glyphs to its left.
+        assert_eq!(
+            crop_around((400, 500, 60, 40), (800, 700)),
+            (190, 480, 280, 80)
+        );
     }
 }
 

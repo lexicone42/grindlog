@@ -1517,7 +1517,32 @@ fn apply_identity(
         }
         _ => None,
     };
-    let reading = fp.read_voted(title, category, board_read, voted.as_ref());
+    let mut reading = fp.read_voted(title, category, board_read, voted.as_ref());
+    // The roster's answer against the vote's: the roster matcher forgives a
+    // clipped header ("ible Dragon Il" is Double Dragon II), and it forgave
+    // "Dragon Il", one damaged read of a Dragon Warrior II header that had
+    // read as that on every other pass, the same way. A header the vote has
+    // settled on names that game; a roster match for a game of another fold
+    // on one pass is a clipped read of it, and the vote's name stands.
+    // Only where this read is a clipped form of the settled name (its stem
+    // within the settled one, the sequel equal): a header that reads as a
+    // roster game whole is a switch to that game, and the roster wins.
+    let settled = match cfg.game.follow_title {
+        crate::config::FollowTitle::Any => voted.clone().or_else(|| vote.settled()),
+        _ => None,
+    };
+    if let (Some((g, cat)), Some(named), Some(t)) =
+        (settled.as_ref(), reading.named.as_deref(), title)
+    {
+        let (ts, tq) = crate::roster::fold_title(t);
+        let (gs, gq) = crate::roster::fold_title(g);
+        let clipped =
+            tq == gq && !ts.is_empty() && (gs.contains(&ts) || board::edit_close(&gs, &ts));
+        if clipped && crate::roster::fold_title(named) != (gs, gq) {
+            reading.named = Some(g.clone());
+            reading.named_category = cat.clone();
+        }
+    }
     // The header reads as another game: not this one, and not a fragment of
     // it. Counted over passes running, for `close_would_fabricate`.
     let header_other = reading.against.contains(&identity::Signal::Header)
@@ -6244,6 +6269,59 @@ mod tests {
         assert_eq!(
             foreign.as_ref().map(|f| f.category.as_str()),
             Some("Big 20 #23")
+        );
+    }
+
+    /// One damaged read of a Dragon Warrior II header, "Dragon Il", names
+    /// Double Dragon II through the roster's forgiveness of clipped headers,
+    /// and under `track` a run closing then was filed under the race. With
+    /// the vote settled on Dragon Warrior II, the vote's name stands over a
+    /// roster match for a game of another fold.
+    #[test]
+    fn a_settled_vote_outranks_a_roster_match_for_another_game() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        cfg.game.follow_title = crate::config::FollowTitle::Any;
+        let fp = identity::Fingerprint::of(&cfg, None);
+        let mut id = identity::Identity::new(&cfg);
+        let mut foreign = None;
+        let mut vote = identity::TitleVote::default();
+        for t in [
+            "Dragon Warrior II",
+            "Dragon Warrior Il",
+            "Dragon Warrior II",
+            "Dragon Warnor II",
+        ] {
+            feed_pane_target(
+                Some(t),
+                Some("Any%"),
+                8,
+                &cfg,
+                &fp,
+                &mut id,
+                &mut foreign,
+                &mut vote,
+            );
+        }
+        assert_eq!(
+            foreign.as_ref().map(|f| f.game.as_str()),
+            Some("Dragon Warrior II")
+        );
+        let got = feed_pane_target(
+            Some("Dragon Il"),
+            Some("Any%"),
+            8,
+            &cfg,
+            &fp,
+            &mut id,
+            &mut foreign,
+            &mut vote,
+        );
+        assert_eq!(
+            got.as_deref(),
+            Some("Dragon Warrior II"),
+            "a clipped read named the race's game"
         );
     }
 
