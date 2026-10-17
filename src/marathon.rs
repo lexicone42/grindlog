@@ -592,9 +592,29 @@ pub fn classify<'a>(board: &Board, cfg: &'a Config, current: Option<&Marathon>) 
                     .as_deref()
                     .is_some_and(|t| a.rosters.identify(&[t]).is_some())
             };
+            // And a pane whose rows name none of the event's games is not
+            // its board, whatever its shape. With one board-mode alias
+            // configured, every marathon-shaped pane with a title nothing
+            // knew used to become it: on 2026-10-16 a Crystalis practice
+            // pane (eight split rows, names damaged to "of Water" and
+            // "tant", the title read as its category line) was locked on
+            // as the race board, a race tracker started on it, and under a
+            // board lock the timer feeds nothing, so a day of runs went
+            // unrecorded. The rows have to say so: one row naming a game of
+            // the alias's rosters (any event of them: which event is the
+            // tracker's question, not this one's). An alias with no roster
+            // has nothing to name and keeps the old answer.
+            let rows_name_its_games = |a: &GameAlias| {
+                a.rosters.is_empty()
+                    || board
+                        .rows
+                        .iter()
+                        .filter_map(|r| r.name.as_deref())
+                        .any(|n| a.rosters.canonical(n).is_some())
+            };
             match boards.as_slice() {
                 [only] if names_a_game(only) => somebody_else(),
-                [only] => Verdict::Board(only),
+                [only] if rows_name_its_games(only) => Verdict::Board(only),
                 _ => Verdict::Silent,
             }
         }
@@ -7499,6 +7519,68 @@ mod race_fixtures {
                 "Pac-Mania"
             ],
             "{second:?}"
+        );
+    }
+
+    /// A one-game practice pane is not the race board, however it is
+    /// shaped. 2026-10-16: Crystalis, eight split rows with their names
+    /// damaged to "of Water" and "tant" and the title read as its category
+    /// line, was locked on as the race board; 2026-10-14: Dragon Warrior
+    /// II, eight rows with no names at all. Neither names a game of the
+    /// race, so neither is its board; a race board does, by its rows.
+    #[test]
+    fn a_practice_pane_whose_rows_name_no_game_of_the_race_is_not_its_board() {
+        let cfg = config();
+        let row = |name: &str, cells: &[&str]| BoardRow {
+            name: (!name.is_empty()).then(|| name.to_string()),
+            cells: cells.iter().map(|c| c.to_string()).collect(),
+            y: 0,
+        };
+        let is_board = |b: &Board| matches!(classify(b, &cfg, None), Verdict::Board(_));
+        let crystalis = Board {
+            title: Some("Any% Warp".into()),
+            subtitle: None,
+            counter: Some("14".into()),
+            rows: vec![
+                row("", &["3:03.8", "3:03.8"]),
+                row("", &["2:19.7", "3:23.5"]),
+                row("", &["6:31.7", "11:55.3"]),
+                row("", &["7:57.4", "19:52.8"]),
+                row("", &["8:43.3", "28:36.1"]),
+                row("of Water", &["2:06.0", "30:42.2"]),
+                row("tant", &["4:29.6", "35:11.8"]),
+                row("", &["16:22.3", "1:28:21.8"]),
+            ],
+        };
+        assert!(!is_board(&crystalis), "Crystalis taken for the race board");
+        let dragon_warrior = Board {
+            title: Some("Dragon Warrior Il".into()),
+            subtitle: None,
+            counter: None,
+            rows: vec![
+                row("", &["-6:57", "12:19.6", "12:19.6"]),
+                row("S", &["16:22.7", "35:39.8"]),
+                row("", &["45:51.4", "1:21:31.2"]),
+                row("", &["17:34.0", "1:39:05.3"]),
+                row("", &["21:23.5", "2:00:28.9"]),
+                row("", &["26:04.9", "2:26:33.8"]),
+                row("", &["1:10:31.5", "3:37:05.4"]),
+                row("", &["1:56:07.0", "7:29:56.9"]),
+            ],
+        };
+        assert!(
+            !is_board(&dragon_warrior),
+            "Dragon Warrior II taken for the race board"
+        );
+        // The race board under a title nothing knows, its rows naming its
+        // games: still the race.
+        let (passes, _) = load("2026-10-07-two-runs");
+        let race = Board {
+            title: Some("Game Total".into()),
+            ..passes[40].board.clone()
+        };
+        assert!(
+            matches!(classify(&race, &cfg, None), Verdict::Board(a) if a.name == "Big 20 #23 run")
         );
     }
 
