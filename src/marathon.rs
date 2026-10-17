@@ -7579,7 +7579,10 @@ mod race_fixtures {
                 row("", &["16:22.3", "1:28:21.8"]),
             ],
         };
-        assert!(!is_board(&crystalis_later), "Crystalis, a row read as Moon, taken for the race board");
+        assert!(
+            !is_board(&crystalis_later),
+            "Crystalis, a row read as Moon, taken for the race board"
+        );
         let dragon_warrior = Board {
             title: Some("Dragon Warrior Il".into()),
             subtitle: None,
