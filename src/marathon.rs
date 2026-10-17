@@ -3293,7 +3293,10 @@ pub fn replay_disrupted(cfg: &Config, passes: &[Pass], disrupt: Option<Disruptio
             }
             at_disruption = from..out.len();
         }
-        match classify(&p.board, cfg, state.as_ref()) {
+        // As `app::track_marathon`: the tracker set aside for the drop counts
+        // as the one in force for recognising its board back.
+        let held = state.as_ref().or_else(|| aside.as_ref().map(|(m, _)| m));
+        match classify(&p.board, cfg, held) {
             // Not evidence of anything: a marathon in force keeps reading the
             // board, and none is started.
             Verdict::Silent => verdicts[0] += 1,

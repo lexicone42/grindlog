@@ -5002,6 +5002,20 @@ pub async fn run(cfg: Config) -> Result<()> {
                         .as_ref()
                         .is_some_and(|g| run_follows_naming(g, f)) =>
                 {
+                    // The attempt counter read so far was read off THIS pane,
+                    // whatever the pane was called then: it goes with the run
+                    // (Dragon Warrior II's counter read once, early, under
+                    // the roster's Double Dragon II, and the pane never showed
+                    // it again).
+                    if let Some(g) = cr.foreign.as_ref() {
+                        let old = (g.game.clone(), g.category.clone());
+                        let new = (f.game.clone(), f.category.clone());
+                        if old != new {
+                            if let Some(t) = counters.remove(&old) {
+                                counters.entry(new).or_insert(t);
+                            }
+                        }
+                    }
                     cr.foreign = Some(f.clone())
                 }
                 _ => {}
