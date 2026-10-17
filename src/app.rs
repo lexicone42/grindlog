@@ -5012,7 +5012,14 @@ pub async fn run(cfg: Config) -> Result<()> {
                         let new = (f.game.clone(), f.category.clone());
                         if old != new {
                             if let Some(t) = counters.remove(&old) {
-                                counters.entry(new).or_insert(t);
+                                counters.entry(new.clone()).or_insert(t);
+                            }
+                            // And the number already read is this pane's
+                            // too: it stays with the run under its new name
+                            // rather than being dropped at close as read
+                            // off another game's counter.
+                            if cr.ls_attempt_for.as_ref() == Some(&old) {
+                                cr.ls_attempt_for = Some(new);
                             }
                         }
                     }
