@@ -6267,7 +6267,9 @@ mod tests {
         cfg.game.category = "Any%".into();
         cfg.game.follow_title = crate::config::FollowTitle::Any;
         cfg.games.push(
-            toml::from_str("name = \"Big 20 #23 run\"\nmatch = [\"practice run\", \"race\"]\n")
+            toml::from_str(
+                "name = \"Big 20 #23 run\"\nmatch = [\"practice run\", \"race\"]\nmode = \"board\"\n",
+            )
                 .expect("an alias"),
         );
         let fp = identity::Fingerprint::of(&cfg, None);

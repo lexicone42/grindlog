@@ -604,8 +604,14 @@ pub fn classify<'a>(board: &Board, cfg: &'a Config, current: Option<&Marathon>) 
             // of the alias's rosters (any event of them: which event is the
             // tracker's question, not this one's). Two, because the roster
             // matcher forgives a fragment: Crystalis's "Bow of Moon" row read
-            // as "Moon" and named Moon Crystal. An alias with no roster has
-            // nothing to name and keeps the old answer.
+            // as "Moon" and named Moon Crystal, and three-letter fragments of
+            // its rows named two more on the same day ("ter" Monster Party,
+            // "int" The Flintstones, "oon" Moon Crystal), on which a race
+            // tracker started again and filed a Crystalis split as a race
+            // run. The matcher's leniency is for a row of a board already
+            // known to be the race's; to RECOGNISE the board a row has to
+            // carry a name, five letters at least. An alias with no roster
+            // has nothing to name and keeps the old answer.
             let rows_name_its_games = |a: &GameAlias| {
                 if a.rosters.is_empty() {
                     return true;
@@ -614,6 +620,7 @@ pub fn classify<'a>(board: &Board, cfg: &'a Config, current: Option<&Marathon>) 
                     .rows
                     .iter()
                     .filter_map(|r| r.name.as_deref())
+                    .filter(|n| n.chars().filter(|c| c.is_alphabetic()).count() >= 5)
                     .filter_map(|n| a.rosters.canonical(n))
                     .collect();
                 named.sort_unstable();
@@ -7582,6 +7589,28 @@ mod race_fixtures {
         assert!(
             !is_board(&crystalis_later),
             "Crystalis, a row read as Moon, taken for the race board"
+        );
+        // The same pane late in the run, its row names damaged to three
+        // letters, which the matcher forgives as games of the race: "ter"
+        // as Monster Party, "int" as The Flintstones, "oon" as Moon Crystal.
+        // A race tracker started on this pass on 2026-10-16 and filed the
+        // Moon split as a race run. Fragments that short name nothing here.
+        let crystalis_fragments = Board {
+            title: Some("Crystalis".into()),
+            subtitle: Some("Any% No Wild Warp".into()),
+            counter: None,
+            rows: vec![
+                row("Water", &["2:06.0", "30:42.2"]),
+                row("int", &["4:29.6", "35:11.8"]),
+                row("ter", &["3:52.6", "39:04.4"]),
+                row("oon", &["8:41.0", "47:21.9"]),
+                row("Thunder", &["1:37.6", "48:59.5"]),
+                row("ng", &["6:58.7", "55:58.2"]),
+            ],
+        };
+        assert!(
+            !is_board(&crystalis_fragments),
+            "Crystalis, rows read as fragments, taken for the race board"
         );
         let dragon_warrior = Board {
             title: Some("Dragon Warrior Il".into()),
