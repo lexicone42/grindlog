@@ -840,6 +840,16 @@ pub fn canonical_any(read: &str) -> Option<String> {
     canonical_foreign(read).map(|(g, _)| g)
 }
 
+/// A title reduced to what two readings of it share, for callers outside
+/// this module: the stem (every alphanumeric but the sequel number, in
+/// lowercase) and the sequel number, normalised through the ways OCR writes
+/// a numeral ("II", "Il", "ll", "2"). "Dragon Warrior Il" and "Dragon
+/// Warnor II" fold to stems two edits apart with the same sequel.
+pub fn fold_title(name: &str) -> (String, Option<u32>) {
+    let k = Key::of(name);
+    (k.stem, k.sequel)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

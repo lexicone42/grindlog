@@ -280,6 +280,14 @@ category = "Any%"
                                 #   can be named; this game's own records, its
                                 #   Sum of Best and its attempt counter are
                                 #   never read off one
+                                #   "any": as "track", and also games no roster
+                                #   lists: a header that reads the same way on
+                                #   three passes names the game, spelled as it
+                                #   read most, and the line under it names the
+                                #   category. A header that matches this game or
+                                #   a fragment of it, names a [[games]] alias,
+                                #   reads as a category, or stands over fewer
+                                #   than two split rows never becomes a game
 # other_category = "Other"      # the category a "track" run is filed under when
                                 #   the roster that named the game gives none.
                                 #   An event may carry its own (`category` in

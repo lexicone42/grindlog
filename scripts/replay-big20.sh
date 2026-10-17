@@ -75,7 +75,7 @@ for id in "$@"; do
   if grep -qE '^path = .*(ninja-gaiden|live)\.db' "$cfg"; then
     echo "!!! $cfg still points at the live database; refusing" >&2; exit 1
   fi
-  if ! grep -q '^follow_title = "track"' "$cfg"; then
+  if ! grep -qE '^follow_title = "(track|any)"' "$cfg"; then
     echo "!!! $src does not set follow_title = \"track\"; this replay would" >&2
     echo "    record nothing on a practice day (the gate suspends instead)" >&2
     exit 1

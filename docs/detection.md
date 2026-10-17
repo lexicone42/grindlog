@@ -307,6 +307,30 @@ that can be identified, never to "something is wrong here", and a misread
 of the tracked game's own header names no game and so cannot produce a
 foreign run.
 
+**Recording any titled game (`game.follow_title = "any"`).** `track` is only
+as wide as the rosters, and the week after the Big 20 he ran Dragon Warrior
+II and Crystalis, on no list: five broadcasts, nothing recorded. `any` is
+`track` plus a vote (`identity::TitleVote`): a header the rosters cannot
+place, read the same way on three passes, names its game, and the line
+under it names the category. "The same way" is the roster's own fold, the
+stem within a fifth of its length in edits and the sequel number equal, so
+"Dragon Warrior Il", "Dragon Warnor II" and "Dragon Warrior II" are one game,
+spelled as it read most with the sequel printed as a numeral. A voted name
+counts as "names another game" at the gate, so the header convicts with it
+where Dragon Warrior II's "Any%" category line alone never would.
+
+The safety argument is the list of what the vote refuses, each a way a
+misread would otherwise have become a game: a title that matches the
+tracked game or is a fragment of it ("Nin Gaid"); one that names a
+`[[games]]` alias (the race board, an Arcathlon); one the rosters name
+(the roster's spelling and category win); one under five letters or
+without a three-letter word; one that reads as a category ("Traditional"
+over Mini Putt's one-row pane, anything with a percent sign); and any
+header over fewer than two split rows. Clusters not seen for fifteen
+minutes are forgotten, so an earlier game's name cannot be revived by a
+stray misread of a later one, and the vote is cleared when the tracked
+game returns.
+
 Three details it must get right, each of which was a bug first:
 
 - **The target is resolved when the run CLOSES, not when it starts.**

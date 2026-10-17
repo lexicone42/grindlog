@@ -1491,6 +1491,7 @@ fn apply_identity(
     board_read: &Board,
     cfg: &Config,
     fp: &identity::Fingerprint,
+    vote: &mut identity::TitleVote,
     pane_game: &mut Option<String>,
     id: &mut identity::Identity,
     foreign: &mut Option<ForeignRun>,
@@ -1507,7 +1508,15 @@ fn apply_identity(
     // Read the pane BEFORE recording the title, so the title event can carry
     // the canonical name the reading worked out. Nothing below depends on
     // the order the other way round.
-    let reading = fp.read(title, category, board_read);
+    // Under `any`, a header the rosters cannot place names its game once it
+    // has read the same way on enough passes (`identity::TitleVote`).
+    let voted = match cfg.game.follow_title {
+        crate::config::FollowTitle::Any => {
+            vote.observe(title, category, board_read.rows.len(), cfg, at_ms)
+        }
+        _ => None,
+    };
+    let reading = fp.read_voted(title, category, board_read, voted.as_ref());
     // A change of title is a change of what it says, not of how tesseract
     // spelled it this minute: "(NES" and "(NES)" flipping every read filled
     // the session's event list (thousands of "title" events a day against
@@ -1604,20 +1613,24 @@ fn apply_identity(
     // would still be filed as Ninja Gaiden, which is the exact defect this
     // exists to remove. Its own test caught that.
     *foreign = match (cfg.game.follow_title, reading.named.as_deref()) {
-        (crate::config::FollowTitle::Track, Some(g)) if !id.ok() => Some(ForeignRun {
-            game: g.to_string(),
-            // The roster that named the game says what its runs are filed
-            // under — "Big 20 #23" for the race he is practising for — so
-            // that the twenty games of a race and an Arcathlon game he is
-            // grinding on his own do not land in one undifferentiated
-            // bucket. `game.other_category` is the fallback for a rostered
-            // game whose event names none.
-            category: reading
-                .named_category
-                .clone()
-                .unwrap_or_else(|| cfg.game.other_category.clone()),
-            min_final_ms: cfg.game.other_min_final_ms,
-        }),
+        (crate::config::FollowTitle::Track | crate::config::FollowTitle::Any, Some(g))
+            if !id.ok() =>
+        {
+            Some(ForeignRun {
+                game: g.to_string(),
+                // The roster that named the game says what its runs are filed
+                // under — "Big 20 #23" for the race he is practising for — so
+                // that the twenty games of a race and an Arcathlon game he is
+                // grinding on his own do not land in one undifferentiated
+                // bucket. `game.other_category` is the fallback for a rostered
+                // game whose event names none.
+                category: reading
+                    .named_category
+                    .clone()
+                    .unwrap_or_else(|| cfg.game.other_category.clone()),
+                min_final_ms: cfg.game.other_min_final_ms,
+            })
+        }
         _ => None,
     };
     let Some(ok) = changed else {
@@ -1630,6 +1643,7 @@ fn apply_identity(
             cfg.game.name
         );
         health.event(at_ms, "resumed", what.to_string());
+        vote.clear();
     } else {
         warn!(
             "layout is timing {what:?}, not {:?} ({} disagree); recording suspended",
@@ -2735,6 +2749,9 @@ pub async fn run(cfg: Config) -> Result<()> {
     // board said last rather than whatever it said 1.5 s after the timer
     // started moving.
     let mut foreign_target: Option<ForeignRun> = None;
+    // The header readings a game no roster lists is named from, under
+    // `follow_title = "any"`.
+    let mut title_vote = identity::TitleVote::default();
     // The last identity reading logged, so a verdict is reported when it
     // changes rather than once a minute for hours.
     let mut pane_identity_shape: Option<String> = None;
@@ -3700,6 +3717,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 &board,
                                 &cfg,
                                 &fingerprint,
+                                &mut title_vote,
                                 &mut pane_game,
                                 &mut pane_identity,
                                 &mut foreign_target,
@@ -4484,6 +4502,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         &board,
                         &cfg,
                         &fingerprint,
+                        &mut title_vote,
                         &mut pane_game,
                         &mut pane_identity,
                         &mut foreign_target,
@@ -5821,6 +5840,7 @@ mod tests {
             &Board::default(),
             cfg,
             fp,
+            &mut identity::TitleVote::default(),
             game,
             id,
             &mut None,
@@ -5842,16 +5862,55 @@ mod tests {
         id: &mut identity::Identity,
         foreign: &mut Option<ForeignRun>,
     ) -> Option<String> {
+        feed_pane_target(
+            title,
+            None,
+            0,
+            cfg,
+            fp,
+            id,
+            foreign,
+            &mut identity::TitleVote::default(),
+        )
+    }
+
+    /// The same with the header's second line, the pane's row count and a
+    /// title vote carried across passes: what `follow_title = "any"` files
+    /// a run under.
+    #[allow(clippy::too_many_arguments)]
+    fn feed_pane_target(
+        title: Option<&str>,
+        subtitle: Option<&str>,
+        rows: usize,
+        cfg: &Config,
+        fp: &identity::Fingerprint,
+        id: &mut identity::Identity,
+        foreign: &mut Option<ForeignRun>,
+        vote: &mut identity::TitleVote,
+    ) -> Option<String> {
         let readings = PaneReadings {
             game: title.map(str::to_string),
-            category: None,
+            category: subtitle.map(str::to_string),
             refs: Vec::new(),
+        };
+        let board = Board {
+            title: title.map(str::to_string),
+            subtitle: subtitle.map(str::to_string),
+            counter: None,
+            rows: (0..rows)
+                .map(|i| board::BoardRow {
+                    name: Some(format!("Split {i}")),
+                    cells: vec!["1:00".into()],
+                    y: 0,
+                })
+                .collect(),
         };
         apply_identity(
             &readings,
-            &Board::default(),
+            &board,
             cfg,
             fp,
+            vote,
             &mut None,
             id,
             foreign,
@@ -5861,6 +5920,154 @@ mod tests {
             0,
         );
         foreign.as_ref().map(|f| f.game.clone())
+    }
+
+    /// `follow_title = "any"` files a run under a game no roster lists, once
+    /// its header has read as that game on three passes: the week after
+    /// the Big 20 was Dragon Warrior II and Crystalis, on no list, and none
+    /// of it was recorded. The spelling is the one read most, with the
+    /// sequel the readings agree on printed as a numeral; the category is
+    /// the line under the header.
+    #[test]
+    fn any_files_a_run_under_a_title_read_the_same_way_three_times() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        cfg.game.follow_title = crate::config::FollowTitle::Any;
+        cfg.game.other_category = "Other".into();
+        let fp = identity::Fingerprint::of(&cfg, None);
+        let mut id = identity::Identity::new(&cfg);
+        let mut foreign = None;
+        let mut vote = identity::TitleVote::default();
+        let mut feed = |t: &str, sub: Option<&str>| {
+            feed_pane_target(Some(t), sub, 8, &cfg, &fp, &mut id, &mut foreign, &mut vote);
+            foreign
+                .as_ref()
+                .map(|f| (f.game.clone(), f.category.clone()))
+        };
+        let dw2 = Some(("Dragon Warrior II".to_string(), "Any%".to_string()));
+        // Two readings name nothing yet; the gate has only the header.
+        assert_eq!(feed("Dragon Warrior Il", Some("Any%")), None);
+        assert_eq!(feed("Dragon Warnor II", Some("Any%")), None);
+        // The third names it: header plus name convict this pass, and the
+        // gate wants two convicting passes in a row before it suspends.
+        assert_eq!(feed("Dragon Warrior II", Some("Any%")), None);
+        // The fourth, misread differently, is the same game and files under
+        // it, spelled as read most ("Dragon Warrior" two of four, the
+        // numeral II) with the line under the header as its category.
+        assert_eq!(feed("ragon Warrtor Il", Some("Any%")), dw2);
+        // Crystalis, with its own category line.
+        let mut vote2 = identity::TitleVote::default();
+        let mut id2 = identity::Identity::new(&cfg);
+        let mut foreign2 = None;
+        for _ in 0..2 {
+            feed_pane_target(
+                Some("Crystalis"),
+                Some("Any% No Wild Warp"),
+                8,
+                &cfg,
+                &fp,
+                &mut id2,
+                &mut foreign2,
+                &mut vote2,
+            );
+        }
+        assert_eq!(
+            feed_pane_target(
+                Some("Crystalis"),
+                Some("Any% No Wild Warp"),
+                8,
+                &cfg,
+                &fp,
+                &mut id2,
+                &mut foreign2,
+                &mut vote2
+            )
+            .as_deref(),
+            Some("Crystalis")
+        );
+        assert_eq!(
+            foreign2.as_ref().map(|f| f.category.as_str()),
+            Some("Any% No Wild Warp")
+        );
+    }
+
+    /// What `any` must never name: a damaged reading of the tracked game,
+    /// a fragment of it, a category read as a title over a one-row pane
+    /// (Mini Putt's "Traditional"), the race board, a game a roster names
+    /// (that goes the roster path, under the roster's spelling and
+    /// category). None of these becomes a game however often it reads.
+    #[test]
+    fn any_never_names_the_tracked_game_a_category_or_a_board() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        cfg.game.follow_title = crate::config::FollowTitle::Any;
+        cfg.games.push(
+            toml::from_str("name = \"Big 20 #23 run\"\nmatch = [\"practice run\", \"race\"]\n")
+                .expect("an alias"),
+        );
+        let fp = identity::Fingerprint::of(&cfg, None);
+        for (title, sub, rows) in [
+            ("Nlnja Galden (NE5)", Some("Any%"), 6),
+            ("Ninja Gasden (NES)", None, 6),
+            ("Nin Gaid", None, 6),
+            ("Traditional", None, 1),
+            ("Any% No Wild Warp", None, 8),
+            ("Practice Run", Some("Game Total"), 9),
+            ("Warp", Some("Any%"), 8),
+        ] {
+            let mut id = identity::Identity::new(&cfg);
+            let mut foreign = None;
+            let mut vote = identity::TitleVote::default();
+            for _ in 0..5 {
+                feed_pane_target(
+                    Some(title),
+                    sub,
+                    rows,
+                    &cfg,
+                    &fp,
+                    &mut id,
+                    &mut foreign,
+                    &mut vote,
+                );
+            }
+            assert_eq!(
+                foreign.as_ref().map(|f| f.game.clone()),
+                None,
+                "{title:?} became a game"
+            );
+        }
+        // A rostered game is named by the roster, from the first convicting
+        // passes and under its category, not by the vote.
+        let mut id = identity::Identity::new(&cfg);
+        let mut foreign = None;
+        let mut vote = identity::TitleVote::default();
+        feed_pane_target(
+            Some("Double Dragon II: The Revenge"),
+            Some("Beat Game Normal"),
+            8,
+            &cfg,
+            &fp,
+            &mut id,
+            &mut foreign,
+            &mut vote,
+        );
+        let got = feed_pane_target(
+            Some("Double Dragon II: The Revenge"),
+            Some("Beat Game Normal"),
+            8,
+            &cfg,
+            &fp,
+            &mut id,
+            &mut foreign,
+            &mut vote,
+        );
+        assert_eq!(got.as_deref(), Some("Double Dragon II: The Revenge"));
+        assert_eq!(
+            foreign.as_ref().map(|f| f.category.as_str()),
+            Some("Big 20 #23")
+        );
     }
 
     /// The timer keeps feeding a run filed under a named game through a pass

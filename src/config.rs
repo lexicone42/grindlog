@@ -91,6 +91,14 @@ pub enum FollowTitle {
     /// tracked game), splits (the acts are the tracked game's), or any
     /// influence on records (its board's reference rows are gated out).
     Track,
+    /// `track`, and also games no roster names: a header that reads the
+    /// same way (to the spelling the pane damages it into) on three passes
+    /// names the game, and the line under it names the category. The week
+    /// after the Big 20 he ran Dragon Warrior II and Crystalis, on no list,
+    /// and nothing was recorded. The guards that keep a damaged reading of
+    /// the tracked game's own header from becoming a game are in
+    /// `identity::TitleVote`.
+    Any,
 }
 
 /// How a board this entry names is tracked.
@@ -1094,6 +1102,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.game.follow_title, FollowTitle::Log);
+        let any: Config =
+            toml::from_str("[stream]\nchannel = \"x\"\n[game]\nfollow_title = \"any\"\n")
+                .expect("any parses");
+        assert_eq!(any.game.follow_title, FollowTitle::Any);
         assert_eq!(cfg.games.len(), 2);
         assert_eq!(cfg.games[0].category.as_deref(), Some("10 games"));
         assert_eq!(cfg.games[1].r#match, ["mega man 2", "mm2"]);
