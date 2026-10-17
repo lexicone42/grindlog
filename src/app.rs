@@ -3615,8 +3615,16 @@ pub async fn run(cfg: Config) -> Result<()> {
                             crop, f.text
                         );
                         regs[found_layout].timer = crop;
+                        // The pane to read the header and rows from is
+                        // everything above the timer: a found pane sits where
+                        // no configured splits crop does, and the Ninja Gaiden
+                        // layout's inherited rectangles clipped Crystalis's header
+                        // to "rystalis" on most passes.
+                        let above = (0, 0, uw, crop.1.max(1));
+                        regs[found_layout].splits = Some(above);
                         if let Some(c) = cands.iter_mut().find(|c| c.layout == found_layout) {
                             c.regs.timer = crop;
+                            c.regs.splits = Some(above);
                             c.streak = 0;
                             c.last = None;
                         }
