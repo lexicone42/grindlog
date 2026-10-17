@@ -592,8 +592,19 @@ impl TitleVote {
             return None;
         }
         let spelling = display_spelling(title, sequel);
+        // The category as it will be filed: letters, digits and the percent
+        // sign, single spaces. OCR's damage to a category is its punctuation
+        // ("Any% No 'Wild Warp"), and a stray mark must not make a spelling
+        // of its own that wins a tie by being longer.
         let category = subtitle
-            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .map(|s| {
+                s.chars()
+                    .map(|c| if c.is_alphanumeric() || c == '%' { c } else { ' ' })
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
             .filter(|s| s.chars().filter(|c| c.is_alphabetic()).count() >= 3);
         let i = match self.clusters.iter().position(|c| {
             c.sequel == sequel && (c.stem == stem || board::edit_close(&c.stem, &stem))
