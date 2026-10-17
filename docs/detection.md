@@ -314,8 +314,16 @@ II and Crystalis, on no list: five broadcasts, nothing recorded. `any` is
 place, read the same way on three passes, names its game, and the line
 under it names the category. "The same way" is the roster's own fold, the
 stem within a fifth of its length in edits and the sequel number equal, so
-"Dragon Warrior Il", "Dragon Warnor II" and "Dragon Warrior II" are one game,
-spelled as it read most with the sequel printed as a numeral. A voted name
+"Dragon Warrior Il", "Dragon Warnor II" and "Dragon Warrior II" are one game.
+It is spelled as the longest reading read often enough (a third of the
+most-read one), because the pane's damage to a header is to clip it:
+at 480p "Crystalis" read "rystalis" on most passes. A reading joins a
+cluster when it is within a fifth of its length of any spelling the cluster
+has seen, since the clipped readings drift from the first. A name the
+database already holds within that distance is used as the database has
+it, so one game keeps one history across days. An open run follows the
+vote while it improves, as long as the better spelling is the same game by
+the roster's fold. A voted name
 counts as "names another game" at the gate, so the header convicts with it
 where Dragon Warrior II's "Any%" category line alone never would.
 
@@ -330,6 +338,13 @@ header over fewer than two split rows. Clusters not seen for fifteen
 minutes are forgotten, so an earlier game's name cannot be revived by a
 stray misread of a later one, and the vote is cleared when the tracked
 game returns.
+
+And one rule that is not about naming: a run that closes while the header
+has read as another game on two passes running, not a fragment of the
+tracked game's, and nothing has named it yet, is dropped
+(`close_would_fabricate`). Dragon Warrior II's "Any%" line matches the
+tracked game's, so the gate stayed undecided, and a run closing then was
+filed as Ninja Gaiden: a run of a game nobody has named is not invented.
 
 Three details it must get right, each of which was a bug first:
 

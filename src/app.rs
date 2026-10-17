@@ -1492,6 +1492,7 @@ fn apply_identity(
     cfg: &Config,
     fp: &identity::Fingerprint,
     vote: &mut identity::TitleVote,
+    other_passes: &mut u32,
     pane_game: &mut Option<String>,
     id: &mut identity::Identity,
     foreign: &mut Option<ForeignRun>,
@@ -1517,6 +1518,15 @@ fn apply_identity(
         _ => None,
     };
     let reading = fp.read_voted(title, category, board_read, voted.as_ref());
+    // The header reads as another game: not this one, and not a fragment of
+    // it. Counted over passes running, for `close_would_fabricate`.
+    let header_other = reading.against.contains(&identity::Signal::Header)
+        && title.is_some_and(|t| !board::title_is_fragment_of(t, &cfg.game.name));
+    if header_other {
+        *other_passes += 1;
+    } else if reading.for_it.contains(&identity::Signal::Header) {
+        *other_passes = 0;
+    }
     // A change of title is a change of what it says, not of how tesseract
     // spelled it this minute: "(NES" and "(NES)" flipping every read filled
     // the session's event list (thousands of "title" events a day against
@@ -2788,9 +2798,18 @@ pub async fn run(cfg: Config) -> Result<()> {
     // board said last rather than whatever it said 1.5 s after the timer
     // started moving.
     let mut foreign_target: Option<ForeignRun> = None;
+    // Passes running on which the header read as another game (not this
+    // one, nor a fragment of it): what keeps a run closing under such a
+    // header from being filed as the tracked game.
+    let mut pane_other_passes: u32 = 0;
     // The header readings a game no roster lists is named from, under
     // `follow_title = "any"`.
     let mut title_vote = identity::TitleVote::default();
+    title_vote.know(
+        db::other_game_names(&pool, &cfg.game.name, &cfg.game.category)
+            .await
+            .unwrap_or_default(),
+    );
     // The last identity reading logged, so a verdict is reported when it
     // changes rather than once a minute for hours.
     let mut pane_identity_shape: Option<String> = None;
@@ -2983,6 +3002,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     };
                     if close_would_fabricate(
                         pane_identity.ok(),
+                        pane_other_passes >= 2,
                         current.as_ref().is_some_and(|c| c.orphaned),
                         current.as_ref().and_then(|c| c.foreign.as_ref()),
                         &ev,
@@ -3182,7 +3202,18 @@ pub async fn run(cfg: Config) -> Result<()> {
                         cnn_declines += 1;
                     }
                 }
-                let glyph_hit = if cnn_hit.is_some() {
+                // The geometry-free reader before the glyph templates: the
+                // templates are this streamer's two Ninja Gaiden themes, and on
+                // Dragon Warrior II's font they read resets that never were.
+                let any_hit = if cnn_hit.is_some() {
+                    None
+                } else {
+                    any_reader
+                        .as_ref()
+                        .and_then(|r| r.read(&g_luma).or_else(|| r.read(&g)))
+                        .filter(|rd| parse_timer_text(&rd.text).is_some())
+                };
+                let glyph_hit = if cnn_hit.is_some() || any_hit.is_some() {
                     None
                 } else {
                     glyph_reader
@@ -3190,7 +3221,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         .and_then(|gr| gr.read(&g))
                         .filter(|rd| parse_timer_text(&rd.text).is_some())
                 };
-                if glyph_reader.is_some() && cnn_hit.is_none() {
+                if glyph_reader.is_some() && cnn_hit.is_none() && any_hit.is_none() {
                     if glyph_hit.is_some() {
                         glyph_hits += 1;
                         glyph_win_hits += 1;
@@ -3223,14 +3254,20 @@ pub async fn run(cfg: Config) -> Result<()> {
                         glyph_win_declines = 0;
                     }
                 }
-                let ocr_result = match (&cnn_hit, &glyph_hit) {
-                    (Some(rd), _) => {
+                let ocr_result = match (&cnn_hit, &any_hit, &glyph_hit) {
+                    (Some(rd), _, _) => {
                         reader_used = "cnn";
                         let up = pre.upscale.max(1);
                         let (x, y, w, h) = rd.ink;
                         Ok((rd.text.clone(), Some((x * up, y * up, w * up, h * up))))
                     }
-                    (None, Some(rd)) => {
+                    (None, Some(rd), _) => {
+                        reader_used = "any";
+                        let up = pre.upscale.max(1);
+                        let (x, y, w, h) = rd.ink;
+                        Ok((rd.text.clone(), Some((x * up, y * up, w * up, h * up))))
+                    }
+                    (None, None, Some(rd)) => {
                         reader_used = "glyph";
                         let up = pre.upscale.max(1);
                         let x0 = rd.boxes.iter().map(|b| b.x).min().unwrap_or(0);
@@ -3242,19 +3279,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                             Some((x0 * up, y0 * up, (x1 - x0) * up, (y1 - y0) * up)),
                         ))
                     }
-                    (None, None) => match any_reader
-                        .as_ref()
-                        .and_then(|r| r.read(&g_luma).or_else(|| r.read(&g)))
-                    {
-                        // The geometry-free reader before tesseract: the crop
-                        // cut by its own ink, whatever the layout's slots say.
-                        Some(rd) => {
-                            reader_used = "any";
-                            let up = pre.upscale.max(1);
-                            let (x, y, w, h) = rd.ink;
-                            Ok((rd.text, Some((x * up, y * up, w * up, h * up))))
-                        }
-                        None => {
+                    (None, None, None) => {
+                        {
                             reader_used = "tess";
                             // The upscaled, thresholded image is tesseract's, and
                             // is built only when tesseract reads: the glyph reader
@@ -3264,7 +3290,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 .recognize_boxed(&ocr::to_png(&ocr::preprocess(&g, &pre))?)
                                 .await
                         }
-                    },
+                    }
                 };
                 match ocr_result {
                     Ok((t, bbox)) => {
@@ -3832,6 +3858,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 &cfg,
                                 &fingerprint,
                                 &mut title_vote,
+                                &mut pane_other_passes,
                                 &mut pane_game,
                                 &mut pane_identity,
                                 &mut foreign_target,
@@ -4617,6 +4644,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         &cfg,
                         &fingerprint,
                         &mut title_vote,
+                        &mut pane_other_passes,
                         &mut pane_game,
                         &mut pane_identity,
                         &mut foreign_target,
@@ -4957,6 +4985,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             // See `close_would_fabricate`.
             if close_would_fabricate(
                 pane_identity.ok(),
+                pane_other_passes >= 2,
                 current.as_ref().is_some_and(|c| c.orphaned),
                 current
                     .as_ref()
@@ -5292,12 +5321,18 @@ fn with_counter(mut board: Board, seen: Option<(i64, i64)>, t: i64) -> Board {
 
 fn close_would_fabricate(
     gate_ok: bool,
+    foreign_pane: bool,
     orphaned: bool,
     target: Option<&ForeignRun>,
     ev: &Event,
 ) -> bool {
     let closing = matches!(ev, Event::Reset { .. } | Event::Finished { .. });
-    closing && (orphaned || (!gate_ok && target.is_none()))
+    // `foreign_pane`: the header has read as another game, not a fragment of
+    // this one, on two passes running, whether or not the gate has convicted.
+    // Dragon Warrior II's "Any%" line matches the tracked game's, so the gate
+    // stayed undecided for a day, and a run closing then was filed as Ninja
+    // Gaiden: a run of a game nobody has named yet is dropped, not invented.
+    closing && (orphaned || ((!gate_ok || foreign_pane) && target.is_none()))
 }
 
 /// The log line for a finish of another game. Not the tracked game's
@@ -5973,6 +6008,7 @@ mod tests {
             cfg,
             fp,
             &mut identity::TitleVote::default(),
+            &mut 0,
             game,
             id,
             &mut None,
@@ -6043,6 +6079,7 @@ mod tests {
             cfg,
             fp,
             vote,
+            &mut 0,
             &mut None,
             id,
             foreign,
@@ -6671,25 +6708,41 @@ mod tests {
             category: "Big 20 #23".into(),
             min_final_ms: 30_000,
         };
-        assert!(close_would_fabricate(false, false, None, &reset));
-        assert!(close_would_fabricate(false, false, None, &finish));
+        assert!(close_would_fabricate(false, false, false, None, &reset));
+        // A header reading as another game on two passes, nothing naming it
+        // yet, the gate undecided: a close is dropped, not filed as this game.
+        assert!(close_would_fabricate(true, true, false, None, &reset));
+        assert!(!close_would_fabricate(
+            true,
+            true,
+            false,
+            Some(&target),
+            &reset
+        ));
+        assert!(close_would_fabricate(false, false, false, None, &finish));
         assert!(
-            !close_would_fabricate(false, false, Some(&target), &reset),
+            !close_would_fabricate(false, false, false, Some(&target), &reset),
             "named: filed under it"
         );
         assert!(
-            !close_would_fabricate(true, false, None, &reset),
+            !close_would_fabricate(true, false, false, None, &reset),
             "the tracked game's own run"
         );
         assert!(
-            !close_would_fabricate(false, false, None, &start),
+            !close_would_fabricate(false, false, false, None, &start),
             "a start writes nothing"
         );
         // Orphaned: convicted while open with nothing naming the board. A name
         // that turns up afterwards is the next game, and does not adopt it.
-        assert!(close_would_fabricate(false, true, Some(&target), &reset));
+        assert!(close_would_fabricate(
+            false,
+            false,
+            true,
+            Some(&target),
+            &reset
+        ));
         assert!(
-            close_would_fabricate(true, true, None, &finish),
+            close_would_fabricate(true, false, true, None, &finish),
             "even if the gate has since cleared"
         );
     }

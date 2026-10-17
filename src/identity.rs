@@ -558,6 +558,11 @@ const CATEGORY_WORDS: [&str; 10] = [
 #[derive(Debug, Default)]
 pub struct TitleVote {
     clusters: Vec<Cluster>,
+    /// Games already in the database under a free title: a name the vote
+    /// settles on within a fifth of its length of one of these (the fold)
+    /// is filed under that spelling, so one game keeps one history across
+    /// days however the pane damaged its header today.
+    known: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -599,15 +604,31 @@ impl TitleVote {
         let category = subtitle
             .map(|s| {
                 s.chars()
-                    .map(|c| if c.is_alphanumeric() || c == '%' { c } else { ' ' })
+                    .map(|c| {
+                        if c.is_alphanumeric() || c == '%' {
+                            c
+                        } else {
+                            ' '
+                        }
+                    })
                     .collect::<String>()
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ")
             })
             .filter(|s| s.chars().filter(|c| c.is_alphabetic()).count() >= 3);
+        // Within a fifth of its length of any spelling the cluster has seen:
+        // a header clipped at the left ("rystalis", "ystalis", "ystalls")
+        // drifts two edits from the first reading and one from the last, and
+        // compared with the first alone the clipped readings of one game made
+        // three games of it.
         let i = match self.clusters.iter().position(|c| {
-            c.sequel == sequel && (c.stem == stem || board::edit_close(&c.stem, &stem))
+            c.sequel == sequel
+                && (c.stem == stem
+                    || board::edit_close(&c.stem, &stem)
+                    || c.spellings
+                        .keys()
+                        .any(|s| board::edit_close(&crate::roster::fold_title(s).0, &stem)))
         }) {
             Some(i) => i,
             None => {
@@ -629,7 +650,21 @@ impl TitleVote {
         }
         c.votes += 1;
         c.last_ms = at_ms;
-        (c.votes >= TITLE_VOTES).then(|| (c.name(), c.category()))
+        if c.votes < TITLE_VOTES {
+            return None;
+        }
+        let name = c.name();
+        let (stem, sequel) = crate::roster::fold_title(&name);
+        let known = self.known.iter().find(|k| {
+            let (ks, kq) = crate::roster::fold_title(k);
+            kq == sequel && (ks == stem || board::edit_close(&ks, &stem))
+        });
+        Some((known.cloned().unwrap_or(name), c.category()))
+    }
+
+    /// The games the database already holds under free titles.
+    pub fn know(&mut self, names: Vec<String>) {
+        self.known = names;
     }
 
     /// The tracked game is back: whatever was being voted on is over.
@@ -647,14 +682,21 @@ impl Cluster {
     }
 }
 
-/// The reading with the most votes; on a tie the longer, then the first
-/// alphabetically, so two replays of one log agree.
+/// The longest reading among those read often enough (a third of the most
+/// read), then the most read, then the first alphabetically, so two replays
+/// of one log agree. Longest, because the pane's damage to a header is to
+/// clip it: at 480p "Crystalis" read "rystalis" on most passes, and the
+/// most-read spelling is the clipped one.
 fn most_read(votes: &std::collections::HashMap<String, u32>) -> Option<String> {
+    let max = votes.values().copied().max()?;
     votes
         .iter()
+        .filter(|(_, n)| **n * 3 >= max)
         .max_by(|(a, na), (b, nb)| {
-            na.cmp(nb)
-                .then_with(|| a.chars().count().cmp(&b.chars().count()))
+            a.chars()
+                .count()
+                .cmp(&b.chars().count())
+                .then_with(|| na.cmp(nb))
                 .then_with(|| b.cmp(a))
         })
         .map(|(s, _)| s.clone())
@@ -746,6 +788,50 @@ mod tests {
             })
             .collect();
         c
+    }
+
+    /// The vote spells a game as the longest reading read often enough: at
+    /// 480p the pane clips the header's first letters on most passes, and
+    /// the most-read spelling is the clipped one. A reading two edits from
+    /// the first stem but none from the best joins the cluster, and a name
+    /// the database already holds is spelled as the database has it.
+    #[test]
+    fn the_vote_spells_a_clipped_header_as_its_longest_reading() {
+        let mut cfg = Config::for_test_with_min_final(1);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        let mut v = TitleVote::default();
+        let sub = Some("Any% No Wild Warp");
+        assert_eq!(v.observe(Some("rystalis"), sub, 8, &cfg, 0), None);
+        assert_eq!(v.observe(Some("rystalis"), sub, 8, &cfg, 60_000), None);
+        assert_eq!(
+            v.observe(Some("Crystalis"), sub, 8, &cfg, 120_000),
+            Some(("Crystalis".into(), Some("Any% No Wild Warp".into())))
+        );
+        // "ystalis" is one edit from "rystalis"; "ystalls" is two from it and
+        // three from "Crystalis", but one from "ystalis": the same game by
+        // the chain of its readings, still spelled Crystalis.
+        assert_eq!(
+            v.observe(Some("ystalis"), sub, 8, &cfg, 180_000)
+                .map(|x| x.0),
+            Some("Crystalis".into())
+        );
+        assert_eq!(
+            v.observe(Some("ystalls"), sub, 8, &cfg, 240_000)
+                .map(|x| x.0),
+            Some("Crystalis".into())
+        );
+        // Known to the database as "Crystalis (NES)": filed under that.
+        let mut v = TitleVote::default();
+        v.know(vec!["Crystalis (NES)".into()]);
+        for t in 0..3 {
+            v.observe(Some("rystalis"), sub, 8, &cfg, t * 60_000);
+        }
+        assert_eq!(
+            v.observe(Some("rystalis"), sub, 8, &cfg, 240_000)
+                .map(|x| x.0),
+            Some("Crystalis (NES)".into())
+        );
     }
 
     fn row(name: Option<&str>) -> BoardRow {
