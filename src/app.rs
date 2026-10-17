@@ -1983,7 +1983,12 @@ async fn track_marathon(
     total_ms: Option<i64>,
     keep: &mut MarathonKeep,
 ) -> bool {
-    match marathon::classify(board, cfg, state.as_ref()) {
+    // The tracker set aside for a drop counts as the one in force for
+    // recognising its board back: see the verdict.
+    let held = state
+        .as_ref()
+        .or_else(|| keep.aside.as_ref().map(|a| &a.tracker));
+    match marathon::classify(board, cfg, held) {
         marathon::Verdict::Silent => {}
         marathon::Verdict::Other => {
             *misses += 1;

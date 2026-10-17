@@ -627,9 +627,15 @@ pub fn classify<'a>(board: &Board, cfg: &'a Config, current: Option<&Marathon>) 
                 named.dedup();
                 named.len() >= 2
             };
+            // A board the tracker in force, or the one set aside for a drop,
+            // recognises a row of is its board back whatever the rows name
+            // this pass: after an eight-minute drop the title read nothing
+            // and the rows too little, the tracker set aside was not taken
+            // up, and the rows that finished meanwhile were lost.
+            let claimed = || current.is_some_and(|m| m.claims(board));
             match boards.as_slice() {
                 [only] if names_a_game(only) => somebody_else(),
-                [only] if rows_name_its_games(only) => Verdict::Board(only),
+                [only] if rows_name_its_games(only) || claimed() => Verdict::Board(only),
                 _ => Verdict::Silent,
             }
         }
@@ -7640,6 +7646,44 @@ mod race_fixtures {
         };
         assert!(
             matches!(classify(&race, &cfg, None), Verdict::Board(a) if a.name == "Big 20 #23 run")
+        );
+    }
+
+    /// After a drop the title may read nothing and the rows too little for
+    /// the verdict to recognise the race board on its own; a tracker set
+    /// aside that recognises one of its rows is enough to take it back up.
+    /// With no tracker held, the same pass says nothing.
+    #[test]
+    fn a_held_tracker_recognises_its_board_by_one_row() {
+        let cfg = config();
+        let alias = cfg
+            .games
+            .iter()
+            .find(|g| g.name == "Big 20 #23 run")
+            .expect("the race in live.toml");
+        let (passes, _) = load("2026-10-07-two-runs");
+        let mut m = Marathon::new(alias.name.clone(), alias.rosters.clone());
+        for p in &passes[..40] {
+            m.observe(&p.board, p.at_ms, p.total_ms);
+        }
+        let known = m
+            .slots
+            .iter()
+            .filter_map(Slot::name)
+            .next()
+            .expect("a settled name")
+            .to_string();
+        let mut board = Board {
+            title: Some("Game Total".into()),
+            ..passes[40].board.clone()
+        };
+        for r in board.rows.iter_mut() {
+            r.name = None;
+        }
+        board.rows[2].name = Some(known);
+        assert!(matches!(classify(&board, &cfg, None), Verdict::Silent));
+        assert!(
+            matches!(classify(&board, &cfg, Some(&m)), Verdict::Board(a) if a.name == alias.name)
         );
     }
 
