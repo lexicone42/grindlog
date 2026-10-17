@@ -2547,8 +2547,41 @@ pub async fn run(cfg: Config) -> Result<()> {
     // Layouts: probe every layout's timer until one parses consistently, lock
     // to it, and re-probe if the locked layout's timer goes dark for a while
     // (scene switch mid-stream). Lock immediately if there's only one.
-    let regs = regions(&cfg);
-    let layout_names = layout_names(&cfg);
+    // The geometry-free reader, when its weights are shipped: it finds a
+    // timer in a pane no layout fits and reads crops the slot reader
+    // declines. Without the file there is neither, as before.
+    let any_reader = {
+        let p = std::path::Path::new(&cfg.timer.any_weights);
+        if p.exists() {
+            match crate::gread::AnyReader::load(p) {
+                Ok(r) => {
+                    info!(
+                        "timer reader: geometry-free net from {} (finds a timer no layout fits; reads what the slot reader declines)",
+                        p.display()
+                    );
+                    Some(r)
+                }
+                Err(e) => {
+                    warn!("geometry-free reader {} not loaded: {e:#}", p.display());
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+    let mut regs = regions(&cfg);
+    let mut layout_names = layout_names(&cfg);
+    // One layout more than the config has: "found", whose timer crop the
+    // geometry-free finder places at run time on a pane no configured
+    // layout fits (the week after the Big 20: Dragon Warrior II, Crystalis).
+    // Until it is placed its crop is empty and it competes for nothing.
+    let found_layout = regs.len();
+    regs.push(Regions {
+        timer: (0, 0, 0, 0),
+        ..regs[0].clone()
+    });
+    layout_names.push("found".to_string());
     let (uw, uh) = (regs[0].union.2, regs[0].union.3);
     // Probe candidates: each layout at its configured position, then at every
     // drift offset. Configured positions are read on every probe frame; the
@@ -2564,6 +2597,10 @@ pub async fn run(cfg: Config) -> Result<()> {
             streak: 0,
             last: None,
         });
+        // The found layout sits where the finder puts it and nowhere else.
+        if i == found_layout {
+            continue;
+        }
         for &off in &offsets {
             if let Some(sr) = shifted(r, off) {
                 cands.push(Candidate {
@@ -2576,6 +2613,8 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
         }
     }
+    // Where the finder last saw a timer, and on how many looks running.
+    let mut found_last: Option<((u32, u32), u32)> = None;
     let mut active_layout: usize = 0;
     let mut active_regs: Regions = regs[0].clone();
     let mut active_off: (i32, i32) = (0, 0);
@@ -3203,16 +3242,26 @@ pub async fn run(cfg: Config) -> Result<()> {
                             Some((x0 * up, y0 * up, (x1 - x0) * up, (y1 - y0) * up)),
                         ))
                     }
-                    (None, None) => {
-                        reader_used = "tess";
-                        // The upscaled, thresholded image is tesseract's, and
-                        // is built only when tesseract reads: the glyph reader
-                        // took the raw crop, and the ink edge below is measured
-                        // at the crop's own scale.
-                        ocr_engine
-                            .recognize_boxed(&ocr::to_png(&ocr::preprocess(&g, &pre))?)
-                            .await
-                    }
+                    (None, None) => match any_reader.as_ref().and_then(|r| r.read(&g_luma)) {
+                        // The geometry-free reader before tesseract: the crop
+                        // cut by its own ink, whatever the layout's slots say.
+                        Some(rd) => {
+                            reader_used = "any";
+                            let up = pre.upscale.max(1);
+                            let (x, y, w, h) = rd.ink;
+                            Ok((rd.text, Some((x * up, y * up, w * up, h * up))))
+                        }
+                        None => {
+                            reader_used = "tess";
+                            // The upscaled, thresholded image is tesseract's, and
+                            // is built only when tesseract reads: the glyph reader
+                            // took the raw crop, and the ink edge below is measured
+                            // at the crop's own scale.
+                            ocr_engine
+                                .recognize_boxed(&ocr::to_png(&ocr::preprocess(&g, &pre))?)
+                                .await
+                        }
+                    },
                 };
                 match ocr_result {
                     Ok((t, bbox)) => {
@@ -3313,8 +3362,8 @@ pub async fn run(cfg: Config) -> Result<()> {
             static_probe_skips = 0;
             let mut to_read: Vec<usize> = Vec::new();
             for (ci, c) in cands.iter().enumerate() {
-                let base = c.off == (0, 0);
-                let active = c.layout == active_layout && c.off == active_off;
+                let base = c.off == (0, 0) && c.regs.timer.2 > 0;
+                let active = c.layout == active_layout && c.off == active_off && c.regs.timer.2 > 0;
                 let hot = !base && c.streak > 0;
                 if base || active || hot {
                     to_read.push(ci);
@@ -3426,13 +3475,25 @@ pub async fn run(cfg: Config) -> Result<()> {
                     .and_then(|r| r.as_ref())
                     .and_then(|r| r.read(&g_luma))
                     .filter(|rd| parse_time(&rd.text).is_some());
-                let glyph = if cnn.is_some() {
+                // The geometry-free reader after the slot net: it cuts the
+                // crop by its own ink, so it reads a crop the finder placed
+                // (which has no slots) and one of a layout's whose digits sit
+                // where the slots do not expect them.
+                let any = if cnn.is_some() {
+                    None
+                } else {
+                    any_reader.as_ref().and_then(|r| r.read(&g_luma))
+                };
+                let glyph = if cnn.is_some() || any.is_some() {
                     None
                 } else {
                     glyph_reader.as_ref().map(|gr| gr.read_diag(&g))
                 };
                 let (rd, bbox) = if let Some(rd) = cnn {
                     reader_used = "cnn";
+                    (rd.text, Some((rd.ink.0 * pre.upscale.max(1), 0, 0, 0)))
+                } else if let Some(rd) = any {
+                    reader_used = "any";
                     (rd.text, Some((rd.ink.0 * pre.upscale.max(1), 0, 0, 0)))
                 } else {
                     match glyph {
@@ -3481,6 +3542,40 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
                 if c.layout == active_layout && c.off == active_off {
                     text = rd;
+                }
+            }
+            // No configured crop read a timer on this probe, and nothing holds
+            // the lock: look for one anywhere in the capture, geometry-free.
+            // Every fourth probe frame, and placed only once two looks agree
+            // on where it is, so a time cell in a split row read once does
+            // not become the timer. What it places is layout "found", a
+            // candidate like any other: it has to read consistently over the
+            // same streak before it takes the lock.
+            if winner.is_none() && !lock.locked() && probe_rr.is_multiple_of(4) {
+                if let Some(f) = any_reader.as_ref().and_then(|r| r.find(&union_img)) {
+                    let centre = (f.ink.0 + f.ink.2 / 2, f.ink.1 + f.ink.3 / 2);
+                    let near = |c: (u32, u32)| {
+                        (c.0 as i32 - centre.0 as i32).abs() <= 12
+                            && (c.1 as i32 - centre.1 as i32).abs() <= 12
+                    };
+                    let looks = match found_last {
+                        Some((c, k)) if near(c) => k + 1,
+                        _ => 1,
+                    };
+                    found_last = Some((centre, looks));
+                    let crop = crate::gread::crop_around(f.ink, (uw, uh));
+                    if looks >= 2 && regs[found_layout].timer != crop {
+                        info!(
+                            "timer found by the geometry-free reader at {:?} in the capture, reading {:?}: offered as layout \"found\"",
+                            crop, f.text
+                        );
+                        regs[found_layout].timer = crop;
+                        if let Some(c) = cands.iter_mut().find(|c| c.layout == found_layout) {
+                            c.regs.timer = crop;
+                            c.streak = 0;
+                            c.last = None;
+                        }
+                    }
                 }
             }
             if let Some((ci, winner_text)) = winner {

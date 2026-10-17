@@ -492,6 +492,12 @@ pub struct TimerCfg {
     /// its slicing geometry.
     #[serde(default = "d_cnn_weights")]
     pub cnn_weights: String,
+    /// Weights for the geometry-free reader (`gread`), which reads a crop
+    /// the slot reader declined and finds the timer in a pane no layout
+    /// fits. Read when the file exists; a deployment without it has no
+    /// finder and no fallback, as before.
+    #[serde(default = "d_any_weights")]
+    pub any_weights: String,
     /// true when the timer is light text on a dark background (the usual
     /// LiveSplit look); produces black digits on white for tesseract.
     #[serde(default = "d_true")]
@@ -510,6 +516,7 @@ impl Default for TimerCfg {
             reader: d_reader(),
             glyph_templates: d_glyph_templates(),
             cnn_weights: d_cnn_weights(),
+            any_weights: d_any_weights(),
             auto_threshold: false,
             retry_thresholds: Vec::new(),
             invert: true,
@@ -964,6 +971,9 @@ fn d_glyph_templates() -> String {
 }
 fn d_cnn_weights() -> String {
     "assets/timer_ocr.json".into()
+}
+fn d_any_weights() -> String {
+    "assets/timer_ocr_any.json".into()
 }
 fn d_threshold() -> u8 {
     140
