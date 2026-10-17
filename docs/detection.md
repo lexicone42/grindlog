@@ -358,6 +358,14 @@ stalis" at 480p and never once correctly on some days, and
 `name = "Crystalis", match = ["stalis"]` files every reading under the one
 name, with the entry's category or the line read under the header.
 
+And the run itself follows a later naming (`run_follows_naming`): a
+better spelling of its own game within the vote's join distance, or a
+vote-named game over a roster-named one when the two share a word of four
+letters and their numerals agree. The whole Dragon Warrior II day once
+replayed as one 7:29:56 run of Double Dragon II: the pane's split rows
+did not read for the first half hour, the vote could not settle, and the
+roster's reading of "Dragon Il" at the start of the run stood.
+
 Three details it must get right, each of which was a bug first:
 
 - **The target is resolved when the run CLOSES, not when it starts.**
