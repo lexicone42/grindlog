@@ -814,6 +814,49 @@ three finished runs where its final time differed from grindlog's by
 hundredths again. `tests/fixtures/cnn/` holds real crops named by their
 reading, and a test reads them with the shipped weights.
 
+### Finding the timer geometry-free
+
+The slot net reads a crop whose geometry it was trained on: where the
+digits sit in it and how wide each slot is. A pane no `[[layouts]]` entry
+fits defeats it twice over, because no crop covers the digits and the
+slots would not fit them if one did. The week after the Big 20 he ran
+Dragon Warrior II and Crystalis, whose one-game pane put the run timer
+lower than every configured crop, and five broadcasts recorded nothing.
+
+`src/gread.rs` is the geometry-free reader from the sibling `timer-ocr`
+project, with its net in `assets/timer_ocr_any.json` (`[timer]
+any_weights`), trained on glyph tiles cut from six channels' footage. A
+timer is cut into its glyphs by their own ink: each glyph is a run of
+inked columns in the digit band, a run as wide as two digits is split
+where the ink is faintest, and each glyph becomes a tile centred on it,
+three quarters of the band high. What it needs from a layout is only where
+to look, and for that there are two uses:
+
+- **A fallback reader.** After the slot net and the glyph reader decline
+  a crop, the geometry-free reader reads it before tesseract (`"any"` in
+  the observation log's `reader` field), in the probe and the locked
+  path alike. The print is parsed strictly (`gread::parse_print`:
+  LiveSplit's forms and nothing else), because a glyph reading that lost
+  its point must not become a time.
+- **A finder.** When no configured crop reads a timer on a probe frame and
+  nothing holds the lock, every fourth probe scans the capture in strips
+  for the tallest digit band that reads as a time, which is the run timer
+  on every LiveSplit layout (a split row's time cell and the segment timer
+  under the run's are both smaller). Two looks agreeing on where it is
+  place a crop around it (room for the hours to the left) as the timer
+  crop of one layout more than the config has, named `found`. That is a
+  candidate like any other: it has to read consistently over the same
+  streak as a configured layout before it takes the lock, and it loses the
+  lock the same way. `tests/fixtures/pane/` holds the capture's union crop
+  of both panes; the finder reads 1:28:47.83 off one and 1:29:26.63 off
+  the other.
+
+What the finder does not do: read splits or the counter for a found pane
+(`found` inherits the base layout's rectangles for those), or move the lock
+off a configured layout that is reading. Where it finds a timer, the pane
+is also one `follow_title = "any"` can name, and the two together are what
+would have recorded that week.
+
 ### Finding the LiveSplit pane automatically
 
 `ngtwitchtimer locate` OCRs a whole frame (from the configured source, or

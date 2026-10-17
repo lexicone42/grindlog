@@ -86,6 +86,11 @@ crop_h = 90
                                 #   position or size); frames it declines go to the
                                 #   glyph reader when its templates exist, then
                                 #   tesseract
+# any_weights = "assets/timer_ocr_any.json"  # the geometry-free reader, when
+                                #   the file exists: it finds a timer in a pane no
+                                #   layout fits (one layout more than configured,
+                                #   "found") and reads a crop the slot reader
+                                #   declined, before tesseract
 # glyph_templates = "assets/glyphs.json"  # templates for the glyph reader (from
                                 #   `glyphs train`; the shipped file is trained on
                                 #   the reference channel's two themes). A relative
