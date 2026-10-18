@@ -5,7 +5,10 @@ is. The README is the overview; this is the reasoning behind it.
 
 
 Frames at `stream.fps` (1 by default; the live config runs 2) → the union
-crop, decoded in colour, the timer taken from its brightest channel → the
+crop, decoded in colour, the timer taken from its brightest channel (the
+attempt counter and the Sum of Best off luma: the brightest channel is for
+a timer LiveSplit colours by pace, and the counter is small grey text that
+read on six of thirteen attempts off it at 480p) → the
 glyph reader when `[timer] reader = "glyph"` (see *Reading the timer with
 templates*), and for the frames it declines, or always with
 `reader = "tesseract"`, 4x upscale + threshold → tesseract with a
@@ -332,16 +335,24 @@ misread would otherwise have become a game: a title that matches the
 tracked game or is a fragment of it ("Nin Gaid"); one that names a
 `[[games]]` alias (the race board, an Arcathlon); one the rosters name
 (the roster's spelling and category win); one under five letters or
-without a three-letter word; one that reads as a category ("Traditional"
-over Mini Putt's one-row pane, anything with a percent sign); and any
-header over fewer than two split rows. Clusters not seen for fifteen
+without a three-letter word, or with fewer than four distinct letters
+("eae ee", read three times off a pane cut short); one with a word of four
+letters equal or edit-close to a word of the tracked game's name ("Ninja
+(NCO", "Gaiden (NEO)", "Ninja Gaigen (NTO": a 480p pane reads its own
+game's header that way on a third of its passes, and three of a kind once
+suspended recording of the tracked game by its own name); one that reads
+as a category ("Traditional" over Mini Putt's one-row pane, anything with
+a percent sign); and any header over fewer than two split rows. Clusters not seen for fifteen
 minutes are forgotten, so an earlier game's name cannot be revived by a
 stray misread of a later one, and the vote is cleared when the tracked
 game returns.
 
 And one rule that is not about naming: a run that closes while the header
-has read as another game on two passes running, not a fragment of the
-tracked game's, and nothing has named it yet, is dropped
+has read as another game on two passes running — not a fragment of the
+tracked game's, and not a damaged read of its name by the same test the
+vote uses, which at 480p once dropped eight of thirteen Ninja Gaiden
+attempts, every one under thirty seconds, as fabrications — and nothing
+has named it yet, is dropped
 (`close_would_fabricate`). Dragon Warrior II's "Any%" line matches the
 tracked game's, so the gate stayed undecided, and a run closing then was
 filed as Ninja Gaiden: a run of a game nobody has named is not invented.
