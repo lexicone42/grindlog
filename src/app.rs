@@ -1491,6 +1491,8 @@ fn apply_identity(
     board_read: &Board,
     cfg: &Config,
     fp: &identity::Fingerprint,
+    vote: &mut identity::TitleVote,
+    other_passes: &mut u32,
     pane_game: &mut Option<String>,
     id: &mut identity::Identity,
     foreign: &mut Option<ForeignRun>,
@@ -1507,7 +1509,65 @@ fn apply_identity(
     // Read the pane BEFORE recording the title, so the title event can carry
     // the canonical name the reading worked out. Nothing below depends on
     // the order the other way round.
-    let reading = fp.read(title, category, board_read);
+    // Under `any`, a header the rosters cannot place names its game once it
+    // has read the same way on enough passes (`identity::TitleVote`).
+    let voted = match cfg.game.follow_title {
+        crate::config::FollowTitle::Any => {
+            vote.observe(title, category, board_read.rows.len(), cfg, at_ms)
+        }
+        _ => None,
+    };
+    let mut reading = fp.read_voted(title, category, board_read, voted.as_ref());
+    // The roster's answer against the vote's: the roster matcher forgives a
+    // clipped header ("ible Dragon Il" is Double Dragon II), and it forgave
+    // "Dragon Il", one damaged read of a Dragon Warrior II header that had
+    // read as that on every other pass, the same way. A header the vote has
+    // settled on names that game; a roster match for a game of another fold
+    // on one pass is a clipped read of it, and the vote's name stands.
+    // Only where this read is a clipped form of the settled name (its stem
+    // within the settled one, the sequel equal): a header that reads as a
+    // roster game whole is a switch to that game, and the roster wins.
+    let settled = match cfg.game.follow_title {
+        crate::config::FollowTitle::Any => voted.clone().or_else(|| vote.settled()),
+        _ => None,
+    };
+    if let (Some((g, cat)), Some(named), Some(t)) =
+        (settled.as_ref(), reading.named.as_deref(), title)
+    {
+        let (ts, tq) = crate::roster::fold_title(t);
+        let (gs, gq) = crate::roster::fold_title(g);
+        let clipped =
+            tq == gq && !ts.is_empty() && (gs.contains(&ts) || board::edit_close(&gs, &ts));
+        if clipped && crate::roster::fold_title(named) != (gs, gq) {
+            reading.named = Some(g.clone());
+            reading.named_category = cat.clone();
+        }
+    }
+    // A runs-mode [[games]] entry the title names pins the spelling: the
+    // pane never reads "Crystalis" whole at 480p ("rystalis", "Cc stalis"),
+    // and an entry `name = "Crystalis", match = ["stalis"]` files every
+    // reading under the one name, with the entry's category or the line read.
+    if matches!(cfg.game.follow_title, crate::config::FollowTitle::Any) {
+        if let Some(a) = title.and_then(|t| board::runs_alias_for(t, cfg)) {
+            if !game_matches(&a.name, &cfg.game.name) {
+                reading.named = Some(a.name.clone());
+                reading.named_category =
+                    a.category.clone().or_else(|| category.map(str::to_string));
+                if !reading.against.contains(&identity::Signal::NamedAnother) {
+                    reading.against.push(identity::Signal::NamedAnother);
+                }
+            }
+        }
+    }
+    // The header reads as another game: not this one, and not a fragment of
+    // it. Counted over passes running, for `close_would_fabricate`.
+    let header_other = reading.against.contains(&identity::Signal::Header)
+        && title.is_some_and(|t| !board::title_is_fragment_of(t, &cfg.game.name));
+    if header_other {
+        *other_passes += 1;
+    } else if reading.for_it.contains(&identity::Signal::Header) {
+        *other_passes = 0;
+    }
     // A change of title is a change of what it says, not of how tesseract
     // spelled it this minute: "(NES" and "(NES)" flipping every read filled
     // the session's event list (thousands of "title" events a day against
@@ -1604,20 +1664,24 @@ fn apply_identity(
     // would still be filed as Ninja Gaiden, which is the exact defect this
     // exists to remove. Its own test caught that.
     *foreign = match (cfg.game.follow_title, reading.named.as_deref()) {
-        (crate::config::FollowTitle::Track, Some(g)) if !id.ok() => Some(ForeignRun {
-            game: g.to_string(),
-            // The roster that named the game says what its runs are filed
-            // under — "Big 20 #23" for the race he is practising for — so
-            // that the twenty games of a race and an Arcathlon game he is
-            // grinding on his own do not land in one undifferentiated
-            // bucket. `game.other_category` is the fallback for a rostered
-            // game whose event names none.
-            category: reading
-                .named_category
-                .clone()
-                .unwrap_or_else(|| cfg.game.other_category.clone()),
-            min_final_ms: cfg.game.other_min_final_ms,
-        }),
+        (crate::config::FollowTitle::Track | crate::config::FollowTitle::Any, Some(g))
+            if !id.ok() =>
+        {
+            Some(ForeignRun {
+                game: g.to_string(),
+                // The roster that named the game says what its runs are filed
+                // under — "Big 20 #23" for the race he is practising for — so
+                // that the twenty games of a race and an Arcathlon game he is
+                // grinding on his own do not land in one undifferentiated
+                // bucket. `game.other_category` is the fallback for a rostered
+                // game whose event names none.
+                category: reading
+                    .named_category
+                    .clone()
+                    .unwrap_or_else(|| cfg.game.other_category.clone()),
+                min_final_ms: cfg.game.other_min_final_ms,
+            })
+        }
         _ => None,
     };
     let Some(ok) = changed else {
@@ -1630,6 +1694,7 @@ fn apply_identity(
             cfg.game.name
         );
         health.event(at_ms, "resumed", what.to_string());
+        vote.clear();
     } else {
         warn!(
             "layout is timing {what:?}, not {:?} ({} disagree); recording suspended",
@@ -1918,7 +1983,12 @@ async fn track_marathon(
     total_ms: Option<i64>,
     keep: &mut MarathonKeep,
 ) -> bool {
-    match marathon::classify(board, cfg, state.as_ref()) {
+    // The tracker set aside for a drop counts as the one in force for
+    // recognising its board back: see the verdict.
+    let held = state
+        .as_ref()
+        .or_else(|| keep.aside.as_ref().map(|a| &a.tracker));
+    match marathon::classify(board, cfg, held) {
         marathon::Verdict::Silent => {}
         marathon::Verdict::Other => {
             *misses += 1;
@@ -2533,8 +2603,41 @@ pub async fn run(cfg: Config) -> Result<()> {
     // Layouts: probe every layout's timer until one parses consistently, lock
     // to it, and re-probe if the locked layout's timer goes dark for a while
     // (scene switch mid-stream). Lock immediately if there's only one.
-    let regs = regions(&cfg);
-    let layout_names = layout_names(&cfg);
+    // The geometry-free reader, when its weights are shipped: it finds a
+    // timer in a pane no layout fits and reads crops the slot reader
+    // declines. Without the file there is neither, as before.
+    let any_reader = {
+        let p = std::path::Path::new(&cfg.timer.any_weights);
+        if p.exists() {
+            match crate::gread::AnyReader::load(p) {
+                Ok(r) => {
+                    info!(
+                        "timer reader: geometry-free net from {} (finds a timer no layout fits; reads what the slot reader declines)",
+                        p.display()
+                    );
+                    Some(r)
+                }
+                Err(e) => {
+                    warn!("geometry-free reader {} not loaded: {e:#}", p.display());
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+    let mut regs = regions(&cfg);
+    let mut layout_names = layout_names(&cfg);
+    // One layout more than the config has: "found", whose timer crop the
+    // geometry-free finder places at run time on a pane no configured
+    // layout fits (the week after the Big 20: Dragon Warrior II, Crystalis).
+    // Until it is placed its crop is empty and it competes for nothing.
+    let found_layout = regs.len();
+    regs.push(Regions {
+        timer: (0, 0, 0, 0),
+        ..regs[0].clone()
+    });
+    layout_names.push("found".to_string());
     let (uw, uh) = (regs[0].union.2, regs[0].union.3);
     // Probe candidates: each layout at its configured position, then at every
     // drift offset. Configured positions are read on every probe frame; the
@@ -2550,6 +2653,10 @@ pub async fn run(cfg: Config) -> Result<()> {
             streak: 0,
             last: None,
         });
+        // The found layout sits where the finder puts it and nowhere else.
+        if i == found_layout {
+            continue;
+        }
         for &off in &offsets {
             if let Some(sr) = shifted(r, off) {
                 cands.push(Candidate {
@@ -2562,6 +2669,8 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
         }
     }
+    // Where the finder last saw a timer, and on how many looks running.
+    let mut found_last: Option<((u32, u32), u32)> = None;
     let mut active_layout: usize = 0;
     let mut active_regs: Regions = regs[0].clone();
     let mut active_off: (i32, i32) = (0, 0);
@@ -2735,6 +2844,18 @@ pub async fn run(cfg: Config) -> Result<()> {
     // board said last rather than whatever it said 1.5 s after the timer
     // started moving.
     let mut foreign_target: Option<ForeignRun> = None;
+    // Passes running on which the header read as another game (not this
+    // one, nor a fragment of it): what keeps a run closing under such a
+    // header from being filed as the tracked game.
+    let mut pane_other_passes: u32 = 0;
+    // The header readings a game no roster lists is named from, under
+    // `follow_title = "any"`.
+    let mut title_vote = identity::TitleVote::default();
+    title_vote.know(
+        db::other_game_names(&pool, &cfg.game.name, &cfg.game.category)
+            .await
+            .unwrap_or_default(),
+    );
     // The last identity reading logged, so a verdict is reported when it
     // changes rather than once a minute for hours.
     let mut pane_identity_shape: Option<String> = None;
@@ -2927,6 +3048,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     };
                     if close_would_fabricate(
                         pane_identity.ok(),
+                        pane_other_passes >= 2,
                         current.as_ref().is_some_and(|c| c.orphaned),
                         current.as_ref().and_then(|c| c.foreign.as_ref()),
                         &ev,
@@ -3126,7 +3248,18 @@ pub async fn run(cfg: Config) -> Result<()> {
                         cnn_declines += 1;
                     }
                 }
-                let glyph_hit = if cnn_hit.is_some() {
+                // The geometry-free reader before the glyph templates: the
+                // templates are this streamer's two Ninja Gaiden themes, and on
+                // Dragon Warrior II's font they read resets that never were.
+                let any_hit = if cnn_hit.is_some() {
+                    None
+                } else {
+                    any_reader
+                        .as_ref()
+                        .and_then(|r| r.read(&g_luma).or_else(|| r.read(&g)))
+                        .filter(|rd| parse_timer_text(&rd.text).is_some())
+                };
+                let glyph_hit = if cnn_hit.is_some() || any_hit.is_some() {
                     None
                 } else {
                     glyph_reader
@@ -3134,7 +3267,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         .and_then(|gr| gr.read(&g))
                         .filter(|rd| parse_timer_text(&rd.text).is_some())
                 };
-                if glyph_reader.is_some() && cnn_hit.is_none() {
+                if glyph_reader.is_some() && cnn_hit.is_none() && any_hit.is_none() {
                     if glyph_hit.is_some() {
                         glyph_hits += 1;
                         glyph_win_hits += 1;
@@ -3167,14 +3300,20 @@ pub async fn run(cfg: Config) -> Result<()> {
                         glyph_win_declines = 0;
                     }
                 }
-                let ocr_result = match (&cnn_hit, &glyph_hit) {
-                    (Some(rd), _) => {
+                let ocr_result = match (&cnn_hit, &any_hit, &glyph_hit) {
+                    (Some(rd), _, _) => {
                         reader_used = "cnn";
                         let up = pre.upscale.max(1);
                         let (x, y, w, h) = rd.ink;
                         Ok((rd.text.clone(), Some((x * up, y * up, w * up, h * up))))
                     }
-                    (None, Some(rd)) => {
+                    (None, Some(rd), _) => {
+                        reader_used = "any";
+                        let up = pre.upscale.max(1);
+                        let (x, y, w, h) = rd.ink;
+                        Ok((rd.text.clone(), Some((x * up, y * up, w * up, h * up))))
+                    }
+                    (None, None, Some(rd)) => {
                         reader_used = "glyph";
                         let up = pre.upscale.max(1);
                         let x0 = rd.boxes.iter().map(|b| b.x).min().unwrap_or(0);
@@ -3186,15 +3325,17 @@ pub async fn run(cfg: Config) -> Result<()> {
                             Some((x0 * up, y0 * up, (x1 - x0) * up, (y1 - y0) * up)),
                         ))
                     }
-                    (None, None) => {
-                        reader_used = "tess";
-                        // The upscaled, thresholded image is tesseract's, and
-                        // is built only when tesseract reads: the glyph reader
-                        // took the raw crop, and the ink edge below is measured
-                        // at the crop's own scale.
-                        ocr_engine
-                            .recognize_boxed(&ocr::to_png(&ocr::preprocess(&g, &pre))?)
-                            .await
+                    (None, None, None) => {
+                        {
+                            reader_used = "tess";
+                            // The upscaled, thresholded image is tesseract's, and
+                            // is built only when tesseract reads: the glyph reader
+                            // took the raw crop, and the ink edge below is measured
+                            // at the crop's own scale.
+                            ocr_engine
+                                .recognize_boxed(&ocr::to_png(&ocr::preprocess(&g, &pre))?)
+                                .await
+                        }
                     }
                 };
                 match ocr_result {
@@ -3296,8 +3437,8 @@ pub async fn run(cfg: Config) -> Result<()> {
             static_probe_skips = 0;
             let mut to_read: Vec<usize> = Vec::new();
             for (ci, c) in cands.iter().enumerate() {
-                let base = c.off == (0, 0);
-                let active = c.layout == active_layout && c.off == active_off;
+                let base = c.off == (0, 0) && c.regs.timer.2 > 0;
+                let active = c.layout == active_layout && c.off == active_off && c.regs.timer.2 > 0;
                 let hot = !base && c.streak > 0;
                 if base || active || hot {
                     to_read.push(ci);
@@ -3409,13 +3550,27 @@ pub async fn run(cfg: Config) -> Result<()> {
                     .and_then(|r| r.as_ref())
                     .and_then(|r| r.read(&g_luma))
                     .filter(|rd| parse_time(&rd.text).is_some());
-                let glyph = if cnn.is_some() {
+                // The geometry-free reader after the slot net: it cuts the
+                // crop by its own ink, so it reads a crop the finder placed
+                // (which has no slots) and one of a layout's whose digits sit
+                // where the slots do not expect them.
+                let any = if cnn.is_some() {
+                    None
+                } else {
+                    any_reader
+                        .as_ref()
+                        .and_then(|r| r.read(&g_luma).or_else(|| r.read(&g)))
+                };
+                let glyph = if cnn.is_some() || any.is_some() {
                     None
                 } else {
                     glyph_reader.as_ref().map(|gr| gr.read_diag(&g))
                 };
                 let (rd, bbox) = if let Some(rd) = cnn {
                     reader_used = "cnn";
+                    (rd.text, Some((rd.ink.0 * pre.upscale.max(1), 0, 0, 0)))
+                } else if let Some(rd) = any {
+                    reader_used = "any";
                     (rd.text, Some((rd.ink.0 * pre.upscale.max(1), 0, 0, 0)))
                 } else {
                     match glyph {
@@ -3436,6 +3591,16 @@ pub async fn run(cfg: Config) -> Result<()> {
                         // stream. (Light digits on dark only: on an inverted
                         // theme the reader sees the background as ink.)
                         Some(Err(crate::glyph::Decline::Segmentation(_))) if pre.invert => {
+                            (String::new(), None)
+                        }
+                        // Nor where the geometry-free reader finds no digit band
+                        // in the crop, in either channel: it was trained on six
+                        // channels' timers, and tesseract at every candidate
+                        // position is what makes a probing replay crawl.
+                        _ if any_reader
+                            .as_ref()
+                            .is_some_and(|r| !r.has_band(&g_luma) && !r.has_band(&g)) =>
+                        {
                             (String::new(), None)
                         }
                         _ => {
@@ -3464,6 +3629,52 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
                 if c.layout == active_layout && c.off == active_off {
                     text = rd;
+                }
+            }
+            // No configured crop read a timer on this probe, and nothing holds
+            // the lock: look for one anywhere in the capture, geometry-free.
+            // Every fourth probe frame, and placed only once two looks agree
+            // on where it is, so a time cell in a split row read once does
+            // not become the timer. What it places is layout "found", a
+            // candidate like any other: it has to read consistently over the
+            // same streak before it takes the lock.
+            if winner.is_none() && !lock.locked() && probe_rr.is_multiple_of(4) {
+                // On the brightest channel, not luma: LiveSplit colours the
+                // timer red behind pace and green ahead, and a red timer has
+                // almost no luma against the pane (Crystalis at 2:10:27, red,
+                // was found only when the next run's white 0.91 appeared).
+                if let Some(f) = any_reader.as_ref().and_then(|r| r.find(&union_bright)) {
+                    let centre = (f.ink.0 + f.ink.2 / 2, f.ink.1 + f.ink.3 / 2);
+                    let near = |c: (u32, u32)| {
+                        (c.0 as i32 - centre.0 as i32).abs() <= 12
+                            && (c.1 as i32 - centre.1 as i32).abs() <= 12
+                    };
+                    let looks = match found_last {
+                        Some((c, k)) if near(c) => k + 1,
+                        _ => 1,
+                    };
+                    found_last = Some((centre, looks));
+                    let crop = crate::gread::crop_around(f.ink, (uw, uh));
+                    if looks >= 2 && regs[found_layout].timer != crop {
+                        info!(
+                            "timer found by the geometry-free reader at {:?} in the capture, reading {:?}: offered as layout \"found\"",
+                            crop, f.text
+                        );
+                        regs[found_layout].timer = crop;
+                        // The pane to read the header and rows from is
+                        // everything above the timer: a found pane sits where
+                        // no configured splits crop does, and the Ninja Gaiden
+                        // layout's inherited rectangles clipped Crystalis's header
+                        // to "rystalis" on most passes.
+                        let above = (0, 0, uw, crop.1.max(1));
+                        regs[found_layout].splits = Some(above);
+                        if let Some(c) = cands.iter_mut().find(|c| c.layout == found_layout) {
+                            c.regs.timer = crop;
+                            c.regs.splits = Some(above);
+                            c.streak = 0;
+                            c.last = None;
+                        }
+                    }
                 }
             }
             if let Some((ci, winner_text)) = winner {
@@ -3700,6 +3911,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 &board,
                                 &cfg,
                                 &fingerprint,
+                                &mut title_vote,
+                                &mut pane_other_passes,
                                 &mut pane_game,
                                 &mut pane_identity,
                                 &mut foreign_target,
@@ -4484,6 +4697,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                         &board,
                         &cfg,
                         &fingerprint,
+                        &mut title_vote,
+                        &mut pane_other_passes,
                         &mut pane_game,
                         &mut pane_identity,
                         &mut foreign_target,
@@ -4779,6 +4994,37 @@ pub async fn run(cfg: Config) -> Result<()> {
             ) {
                 (false, Some(f), _) if !cr.orphaned => cr.foreign = Some(f.clone()),
                 (false, None, false) => cr.orphaned = true,
+                // A better spelling of the same game, or the vote's game over a
+                // roster's fragment match: see `run_follows_naming`.
+                (true, Some(f), _)
+                    if cr
+                        .foreign
+                        .as_ref()
+                        .is_some_and(|g| run_follows_naming(g, f)) =>
+                {
+                    // The attempt counter read so far was read off THIS pane,
+                    // whatever the pane was called then: it goes with the run
+                    // (Dragon Warrior II's counter read once, early, under
+                    // the roster's Double Dragon II, and the pane never showed
+                    // it again).
+                    if let Some(g) = cr.foreign.as_ref() {
+                        let old = (g.game.clone(), g.category.clone());
+                        let new = (f.game.clone(), f.category.clone());
+                        if old != new {
+                            if let Some(t) = counters.remove(&old) {
+                                counters.entry(new.clone()).or_insert(t);
+                            }
+                            // And the number already read is this pane's
+                            // too: it stays with the run under its new name
+                            // rather than being dropped at close as read
+                            // off another game's counter.
+                            if cr.ls_attempt_for.as_ref() == Some(&old) {
+                                cr.ls_attempt_for = Some(new);
+                            }
+                        }
+                    }
+                    cr.foreign = Some(f.clone())
+                }
                 _ => {}
             }
         }
@@ -4806,6 +5052,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             // See `close_would_fabricate`.
             if close_would_fabricate(
                 pane_identity.ok(),
+                pane_other_passes >= 2,
                 current.as_ref().is_some_and(|c| c.orphaned),
                 current
                     .as_ref()
@@ -4994,6 +5241,55 @@ struct ForeignRun {
     min_final_ms: i64,
 }
 
+/// Does an open run named `old` take a later naming `new`?
+///
+/// The same game named again with a better spelling or its category read
+/// right: a title vote names a game on its third pass with whatever
+/// spellings those three had ("rystalis [io Wild Warp]") and keeps
+/// improving while the run is open; the run carries the game it was named
+/// for and its spelling follows. Never another game of the vote's: a target
+/// for a different fold is the board he switched to.
+///
+/// One exception, the other way round. The rosters forgive a fragment: a
+/// Dragon Warrior II header read "Dragon Il" at the start of a run named
+/// Double Dragon II, and the vote could not yet say otherwise because the
+/// pane's rows did not read for the first half hour. A run named by a
+/// roster takes a game the vote names later when the two share a word of
+/// four letters (the fragment the roster matched) and their numerals agree:
+/// three whole readings of a header outrank one fragment of it. The vote
+/// never names a roster game, so this cannot run the other way.
+fn run_follows_naming(old: &ForeignRun, new: &ForeignRun) -> bool {
+    if old.game == new.game && old.category == new.category {
+        return false;
+    }
+    // The vote's own join rule: the stem within a fifth of its length in
+    // edits ("rystalis" to "Crystalis"), the sequel number equal.
+    let (os, oq) = crate::roster::fold_title(&old.game);
+    let (ns, nq) = crate::roster::fold_title(&new.game);
+    if oq == nq && (os == ns || board::edit_close(&os, &ns)) {
+        return true;
+    }
+    let words = |g: &str| -> Vec<String> {
+        board::normalise_title(g)
+            .split(' ')
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let numeral = |w: &str| {
+        w.chars().all(|c| c.is_ascii_digit()) || w.chars().all(|c| matches!(c, 'i' | 'v' | 'x'))
+    };
+    let (ow, nw) = (words(&old.game), words(&new.game));
+    let shared = ow
+        .iter()
+        .any(|w| w.chars().count() >= 4 && !numeral(w) && nw.contains(w));
+    let numerals_agree = ow.iter().find(|w| numeral(w)) == nw.iter().find(|w| numeral(w));
+    shared
+        && numerals_agree
+        && crate::roster::canonical_foreign(&old.game).is_some()
+        && crate::roster::canonical_foreign(&new.game).is_none()
+}
+
 /// One parsed reading of a game's attempt counter, off the counter crop or
 /// off the pane's header, into that game's tracker; what it decides goes on
 /// the run. `tracked` says the reading is the tracked game's, whose latest
@@ -5141,12 +5437,18 @@ fn with_counter(mut board: Board, seen: Option<(i64, i64)>, t: i64) -> Board {
 
 fn close_would_fabricate(
     gate_ok: bool,
+    foreign_pane: bool,
     orphaned: bool,
     target: Option<&ForeignRun>,
     ev: &Event,
 ) -> bool {
     let closing = matches!(ev, Event::Reset { .. } | Event::Finished { .. });
-    closing && (orphaned || (!gate_ok && target.is_none()))
+    // `foreign_pane`: the header has read as another game, not a fragment of
+    // this one, on two passes running, whether or not the gate has convicted.
+    // Dragon Warrior II's "Any%" line matches the tracked game's, so the gate
+    // stayed undecided for a day, and a run closing then was filed as Ninja
+    // Gaiden: a run of a game nobody has named yet is dropped, not invented.
+    closing && (orphaned || ((!gate_ok || foreign_pane) && target.is_none()))
 }
 
 /// The log line for a finish of another game. Not the tracked game's
@@ -5821,6 +6123,8 @@ mod tests {
             &Board::default(),
             cfg,
             fp,
+            &mut identity::TitleVote::default(),
+            &mut 0,
             game,
             id,
             &mut None,
@@ -5842,16 +6146,56 @@ mod tests {
         id: &mut identity::Identity,
         foreign: &mut Option<ForeignRun>,
     ) -> Option<String> {
+        feed_pane_target(
+            title,
+            None,
+            0,
+            cfg,
+            fp,
+            id,
+            foreign,
+            &mut identity::TitleVote::default(),
+        )
+    }
+
+    /// The same with the header's second line, the pane's row count and a
+    /// title vote carried across passes: what `follow_title = "any"` files
+    /// a run under.
+    #[allow(clippy::too_many_arguments)]
+    fn feed_pane_target(
+        title: Option<&str>,
+        subtitle: Option<&str>,
+        rows: usize,
+        cfg: &Config,
+        fp: &identity::Fingerprint,
+        id: &mut identity::Identity,
+        foreign: &mut Option<ForeignRun>,
+        vote: &mut identity::TitleVote,
+    ) -> Option<String> {
         let readings = PaneReadings {
             game: title.map(str::to_string),
-            category: None,
+            category: subtitle.map(str::to_string),
             refs: Vec::new(),
+        };
+        let board = Board {
+            title: title.map(str::to_string),
+            subtitle: subtitle.map(str::to_string),
+            counter: None,
+            rows: (0..rows)
+                .map(|i| board::BoardRow {
+                    name: Some(format!("Split {i}")),
+                    cells: vec!["1:00".into()],
+                    y: 0,
+                })
+                .collect(),
         };
         apply_identity(
             &readings,
-            &Board::default(),
+            &board,
             cfg,
             fp,
+            vote,
+            &mut 0,
             &mut None,
             id,
             foreign,
@@ -5861,6 +6205,278 @@ mod tests {
             0,
         );
         foreign.as_ref().map(|f| f.game.clone())
+    }
+
+    /// `follow_title = "any"` files a run under a game no roster lists, once
+    /// its header has read as that game on three passes: the week after
+    /// the Big 20 was Dragon Warrior II and Crystalis, on no list, and none
+    /// of it was recorded. The spelling is the one read most, with the
+    /// sequel the readings agree on printed as a numeral; the category is
+    /// the line under the header.
+    /// A runs-mode `[[games]]` entry pins what a title the pane never reads
+    /// whole is filed as: tesseract read Crystalis's header as "rystalis" and
+    /// "Cc stalis" at 480p, and `name = "Crystalis", match = ["stalis"]` files
+    /// both under Crystalis, with the category read under the header. The
+    /// entry names a game, not the tracked one, so the pass convicts.
+    #[test]
+    fn any_files_a_title_a_runs_alias_names_under_the_alias() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        cfg.game.follow_title = crate::config::FollowTitle::Any;
+        cfg.game.other_category = "Other".into();
+        cfg.games.push(crate::config::GameAlias {
+            name: "Crystalis".into(),
+            category: None,
+            r#match: vec!["stalis".into()],
+            mode: crate::config::GameMode::Runs,
+            roster: None,
+            rosters: Default::default(),
+        });
+        let fp = identity::Fingerprint::of(&cfg, None);
+        let mut id = identity::Identity::new(&cfg);
+        let mut foreign = None;
+        let mut vote = identity::TitleVote::default();
+        let mut feed = |t: &str| {
+            feed_pane_target(
+                Some(t),
+                Some("Any% No Wild Warp"),
+                8,
+                &cfg,
+                &fp,
+                &mut id,
+                &mut foreign,
+                &mut vote,
+            );
+            foreign
+                .as_ref()
+                .map(|f| (f.game.clone(), f.category.clone()))
+        };
+        let cry = Some(("Crystalis".to_string(), "Any% No Wild Warp".to_string()));
+        assert_eq!(feed("rystalis"), None);
+        assert_eq!(feed("Cc stalis"), cry);
+        assert_eq!(feed("rystalis"), cry);
+    }
+
+    #[test]
+    fn any_files_a_run_under_a_title_read_the_same_way_three_times() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        cfg.game.follow_title = crate::config::FollowTitle::Any;
+        cfg.game.other_category = "Other".into();
+        let fp = identity::Fingerprint::of(&cfg, None);
+        let mut id = identity::Identity::new(&cfg);
+        let mut foreign = None;
+        let mut vote = identity::TitleVote::default();
+        let mut feed = |t: &str, sub: Option<&str>| {
+            feed_pane_target(Some(t), sub, 8, &cfg, &fp, &mut id, &mut foreign, &mut vote);
+            foreign
+                .as_ref()
+                .map(|f| (f.game.clone(), f.category.clone()))
+        };
+        let dw2 = Some(("Dragon Warrior II".to_string(), "Any%".to_string()));
+        // Two readings name nothing yet; the gate has only the header.
+        assert_eq!(feed("Dragon Warrior Il", Some("Any%")), None);
+        assert_eq!(feed("Dragon Warnor II", Some("Any%")), None);
+        // The third names it: header plus name convict this pass, and the
+        // gate wants two convicting passes in a row before it suspends.
+        assert_eq!(feed("Dragon Warrior II", Some("Any%")), None);
+        // The fourth, misread differently, is the same game and files under
+        // it, spelled as read most ("Dragon Warrior" two of four, the
+        // numeral II) with the line under the header as its category.
+        assert_eq!(feed("ragon Warrtor Il", Some("Any%")), dw2);
+        // Crystalis, with its own category line.
+        let mut vote2 = identity::TitleVote::default();
+        let mut id2 = identity::Identity::new(&cfg);
+        let mut foreign2 = None;
+        for _ in 0..2 {
+            feed_pane_target(
+                Some("Crystalis"),
+                Some("Any% No Wild Warp"),
+                8,
+                &cfg,
+                &fp,
+                &mut id2,
+                &mut foreign2,
+                &mut vote2,
+            );
+        }
+        assert_eq!(
+            feed_pane_target(
+                Some("Crystalis"),
+                Some("Any% No Wild Warp"),
+                8,
+                &cfg,
+                &fp,
+                &mut id2,
+                &mut foreign2,
+                &mut vote2
+            )
+            .as_deref(),
+            Some("Crystalis")
+        );
+        assert_eq!(
+            foreign2.as_ref().map(|f| f.category.as_str()),
+            Some("Any% No Wild Warp")
+        );
+    }
+
+    /// What `any` must never name: a damaged reading of the tracked game,
+    /// a fragment of it, a category read as a title over a one-row pane
+    /// (Mini Putt's "Traditional"), the race board, a game a roster names
+    /// (that goes the roster path, under the roster's spelling and
+    /// category). None of these becomes a game however often it reads.
+    #[test]
+    fn any_never_names_the_tracked_game_a_category_or_a_board() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        cfg.game.follow_title = crate::config::FollowTitle::Any;
+        cfg.games.push(
+            toml::from_str(
+                "name = \"Big 20 #23 run\"\nmatch = [\"practice run\", \"race\"]\nmode = \"board\"\n",
+            )
+                .expect("an alias"),
+        );
+        let fp = identity::Fingerprint::of(&cfg, None);
+        for (title, sub, rows) in [
+            ("Nlnja Galden (NE5)", Some("Any%"), 6),
+            ("Ninja Gasden (NES)", None, 6),
+            ("Nin Gaid", None, 6),
+            ("Traditional", None, 1),
+            ("Any% No Wild Warp", None, 8),
+            ("Practice Run", Some("Game Total"), 9),
+            ("Warp", Some("Any%"), 8),
+        ] {
+            let mut id = identity::Identity::new(&cfg);
+            let mut foreign = None;
+            let mut vote = identity::TitleVote::default();
+            for _ in 0..5 {
+                feed_pane_target(
+                    Some(title),
+                    sub,
+                    rows,
+                    &cfg,
+                    &fp,
+                    &mut id,
+                    &mut foreign,
+                    &mut vote,
+                );
+            }
+            assert_eq!(
+                foreign.as_ref().map(|f| f.game.clone()),
+                None,
+                "{title:?} became a game"
+            );
+        }
+        // A rostered game is named by the roster, from the first convicting
+        // passes and under its category, not by the vote.
+        let mut id = identity::Identity::new(&cfg);
+        let mut foreign = None;
+        let mut vote = identity::TitleVote::default();
+        feed_pane_target(
+            Some("Double Dragon II: The Revenge"),
+            Some("Beat Game Normal"),
+            8,
+            &cfg,
+            &fp,
+            &mut id,
+            &mut foreign,
+            &mut vote,
+        );
+        let got = feed_pane_target(
+            Some("Double Dragon II: The Revenge"),
+            Some("Beat Game Normal"),
+            8,
+            &cfg,
+            &fp,
+            &mut id,
+            &mut foreign,
+            &mut vote,
+        );
+        assert_eq!(got.as_deref(), Some("Double Dragon II: The Revenge"));
+        assert_eq!(
+            foreign.as_ref().map(|f| f.category.as_str()),
+            Some("Big 20 #23")
+        );
+    }
+
+    /// A run named Double Dragon II by the roster's reading of "Dragon Il"
+    /// takes Dragon Warrior II when the vote names it later; a run named by
+    /// the vote keeps its game against a later roster name, or another of
+    /// the vote's, and follows a better spelling of its own.
+    #[test]
+    fn a_run_named_by_a_roster_fragment_follows_the_vote() {
+        let f = |game: &str, category: &str| ForeignRun {
+            game: game.into(),
+            category: category.into(),
+            min_final_ms: 1,
+        };
+        let ddii = f("Double Dragon II: The Revenge", "Big 20 #23");
+        let dw2 = f("Dragon Warrior II", "Any%");
+        assert!(run_follows_naming(&ddii, &dw2));
+        assert!(!run_follows_naming(&dw2, &ddii));
+        assert!(!run_follows_naming(&ddii, &f("Dragon Warrior III", "Any%")));
+        assert!(!run_follows_naming(&dw2, &f("Crystalis", "Any%")));
+        assert!(run_follows_naming(
+            &f("rystalis", "io Wild Warp"),
+            &f("Crystalis", "Any% No Wild Warp")
+        ));
+        assert!(!run_follows_naming(&dw2, &dw2));
+    }
+
+    /// One damaged read of a Dragon Warrior II header, "Dragon Il", names
+    /// Double Dragon II through the roster's forgiveness of clipped headers,
+    /// and under `track` a run closing then was filed under the race. With
+    /// the vote settled on Dragon Warrior II, the vote's name stands over a
+    /// roster match for a game of another fold.
+    #[test]
+    fn a_settled_vote_outranks_a_roster_match_for_another_game() {
+        let mut cfg = Config::for_test_with_min_final(660_000);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        cfg.game.follow_title = crate::config::FollowTitle::Any;
+        let fp = identity::Fingerprint::of(&cfg, None);
+        let mut id = identity::Identity::new(&cfg);
+        let mut foreign = None;
+        let mut vote = identity::TitleVote::default();
+        for t in [
+            "Dragon Warrior II",
+            "Dragon Warrior Il",
+            "Dragon Warrior II",
+            "Dragon Warnor II",
+        ] {
+            feed_pane_target(
+                Some(t),
+                Some("Any%"),
+                8,
+                &cfg,
+                &fp,
+                &mut id,
+                &mut foreign,
+                &mut vote,
+            );
+        }
+        assert_eq!(
+            foreign.as_ref().map(|f| f.game.as_str()),
+            Some("Dragon Warrior II")
+        );
+        let got = feed_pane_target(
+            Some("Dragon Il"),
+            Some("Any%"),
+            8,
+            &cfg,
+            &fp,
+            &mut id,
+            &mut foreign,
+            &mut vote,
+        );
+        assert_eq!(
+            got.as_deref(),
+            Some("Dragon Warrior II"),
+            "a clipped read named the race's game"
+        );
     }
 
     /// The timer keeps feeding a run filed under a named game through a pass
@@ -6332,25 +6948,41 @@ mod tests {
             category: "Big 20 #23".into(),
             min_final_ms: 30_000,
         };
-        assert!(close_would_fabricate(false, false, None, &reset));
-        assert!(close_would_fabricate(false, false, None, &finish));
+        assert!(close_would_fabricate(false, false, false, None, &reset));
+        // A header reading as another game on two passes, nothing naming it
+        // yet, the gate undecided: a close is dropped, not filed as this game.
+        assert!(close_would_fabricate(true, true, false, None, &reset));
+        assert!(!close_would_fabricate(
+            true,
+            true,
+            false,
+            Some(&target),
+            &reset
+        ));
+        assert!(close_would_fabricate(false, false, false, None, &finish));
         assert!(
-            !close_would_fabricate(false, false, Some(&target), &reset),
+            !close_would_fabricate(false, false, false, Some(&target), &reset),
             "named: filed under it"
         );
         assert!(
-            !close_would_fabricate(true, false, None, &reset),
+            !close_would_fabricate(true, false, false, None, &reset),
             "the tracked game's own run"
         );
         assert!(
-            !close_would_fabricate(false, false, None, &start),
+            !close_would_fabricate(false, false, false, None, &start),
             "a start writes nothing"
         );
         // Orphaned: convicted while open with nothing naming the board. A name
         // that turns up afterwards is the next game, and does not adopt it.
-        assert!(close_would_fabricate(false, true, Some(&target), &reset));
+        assert!(close_would_fabricate(
+            false,
+            false,
+            true,
+            Some(&target),
+            &reset
+        ));
         assert!(
-            close_would_fabricate(true, true, None, &finish),
+            close_would_fabricate(true, false, true, None, &finish),
             "even if the gate has since cleared"
         );
     }

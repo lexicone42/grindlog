@@ -91,6 +91,14 @@ pub enum FollowTitle {
     /// tracked game), splits (the acts are the tracked game's), or any
     /// influence on records (its board's reference rows are gated out).
     Track,
+    /// `track`, and also games no roster names: a header that reads the
+    /// same way (to the spelling the pane damages it into) on three passes
+    /// names the game, and the line under it names the category. The week
+    /// after the Big 20 he ran Dragon Warrior II and Crystalis, on no list,
+    /// and nothing was recorded. The guards that keep a damaged reading of
+    /// the tracked game's own header from becoming a game are in
+    /// `identity::TitleVote`.
+    Any,
 }
 
 /// How a board this entry names is tracked.
@@ -484,6 +492,12 @@ pub struct TimerCfg {
     /// its slicing geometry.
     #[serde(default = "d_cnn_weights")]
     pub cnn_weights: String,
+    /// Weights for the geometry-free reader (`gread`), which reads a crop
+    /// the slot reader declined and finds the timer in a pane no layout
+    /// fits. Read when the file exists; a deployment without it has no
+    /// finder and no fallback, as before.
+    #[serde(default = "d_any_weights")]
+    pub any_weights: String,
     /// true when the timer is light text on a dark background (the usual
     /// LiveSplit look); produces black digits on white for tesseract.
     #[serde(default = "d_true")]
@@ -502,6 +516,7 @@ impl Default for TimerCfg {
             reader: d_reader(),
             glyph_templates: d_glyph_templates(),
             cnn_weights: d_cnn_weights(),
+            any_weights: d_any_weights(),
             auto_threshold: false,
             retry_thresholds: Vec::new(),
             invert: true,
@@ -957,6 +972,9 @@ fn d_glyph_templates() -> String {
 fn d_cnn_weights() -> String {
     "assets/timer_ocr.json".into()
 }
+fn d_any_weights() -> String {
+    "assets/timer_ocr_any.json".into()
+}
 fn d_threshold() -> u8 {
     140
 }
@@ -1094,6 +1112,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.game.follow_title, FollowTitle::Log);
+        let any: Config =
+            toml::from_str("[stream]\nchannel = \"x\"\n[game]\nfollow_title = \"any\"\n")
+                .expect("any parses");
+        assert_eq!(any.game.follow_title, FollowTitle::Any);
         assert_eq!(cfg.games.len(), 2);
         assert_eq!(cfg.games[0].category.as_deref(), Some("10 games"));
         assert_eq!(cfg.games[1].r#match, ["mega man 2", "mm2"]);

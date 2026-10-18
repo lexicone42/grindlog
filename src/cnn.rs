@@ -131,10 +131,10 @@ pub struct InkBox {
 }
 
 impl InkBox {
-    fn height(&self) -> u32 {
+    pub fn height(&self) -> u32 {
         self.bottom - self.top
     }
-    fn clipped(&self, _w: u32, h: u32) -> bool {
+    pub fn clipped(&self, _w: u32, h: u32) -> bool {
         // Ink in the first or last usable column, or the first or last row:
         // a glyph that reaches the edge is cut by it.
         self.left <= self.edge_left
@@ -338,13 +338,13 @@ fn ink_box_within(norm: &GrayImage, expect: Option<u32>, x_lo: u32, x_hi: u32) -
     let sliver = ((bottom - top) / 10).max(3);
     while runs
         .last()
-        .is_some_and(|r| r.1 - r.0 < sliver && r.1 + 3 >= x_hi)
+        .is_some_and(|r| r.1 - r.0 <= sliver && r.1 + 3 >= x_hi)
     {
         runs.pop();
     }
     while runs
         .first()
-        .is_some_and(|r| r.1 - r.0 < sliver && r.0 <= x_lo + 3)
+        .is_some_and(|r| r.1 - r.0 <= sliver && r.0 <= x_lo + 3)
     {
         runs.remove(0);
     }

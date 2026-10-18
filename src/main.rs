@@ -18,6 +18,7 @@ mod config;
 mod counter;
 mod db;
 mod glyph;
+mod gread;
 mod identity;
 mod locate;
 mod lock;

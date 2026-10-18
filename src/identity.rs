@@ -223,8 +223,21 @@ impl Fingerprint {
     /// lines as the pane reader got them, either of which is None when it
     /// was unreadable.
     pub fn read(&self, title: Option<&str>, category: Option<&str>, b: &Board) -> Reading {
+        self.read_voted(title, category, b, None)
+    }
+
+    /// [`read`](Self::read), with the game a [`TitleVote`] has settled the
+    /// header on, if any: a header the rosters cannot place but the vote
+    /// has, which then names another game as a roster match would.
+    pub fn read_voted(
+        &self,
+        title: Option<&str>,
+        category: Option<&str>,
+        b: &Board,
+        voted: Option<&(String, Option<String>)>,
+    ) -> Reading {
         let mut r = Reading::default();
-        self.header(title, &mut r);
+        self.header(title, voted, &mut r);
         self.category(category, &mut r);
         self.counter(b, &mut r);
         self.rows(b, &mut r);
@@ -276,7 +289,12 @@ impl Fingerprint {
     /// World" IS Kid Klown, and "With)" is nothing at all. Recognising the
     /// other game is positive evidence where failing to recognise this one
     /// is only an absence.
-    fn header(&self, title: Option<&str>, r: &mut Reading) {
+    fn header(
+        &self,
+        title: Option<&str>,
+        voted: Option<&(String, Option<String>)>,
+        r: &mut Reading,
+    ) {
         let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) else {
             return;
         };
@@ -292,6 +310,10 @@ impl Fingerprint {
             r.against.push(Signal::NamedAnother);
             r.named = Some(g);
             r.named_category = cat;
+        } else if let Some((g, cat)) = voted {
+            r.against.push(Signal::NamedAnother);
+            r.named = Some(g.clone());
+            r.named_category = cat.clone();
         }
     }
 
@@ -489,6 +511,292 @@ impl Identity {
     }
 }
 
+/// How many passes a title has to read as one game before it names it.
+/// Passes are a minute apart; a game he plays for an evening reads its
+/// header hundreds of times.
+const TITLE_VOTES: u32 = 3;
+
+/// How long a title not seen again keeps its votes. A twenty-game day puts
+/// a new header up every ten minutes, and an earlier game's cluster must
+/// not be revived by one stray misread of a later one.
+const TITLE_MEMORY_MS: i64 = 15 * 60 * 1000;
+
+/// Words a header prints when it is a category and not a game: a pane of
+/// one row read "Traditional" for its title (Mini Putt's), and a title
+/// that reads as a category names no game.
+const CATEGORY_WORDS: [&str; 10] = [
+    "any",
+    "traditional",
+    "warpless",
+    "glitchless",
+    "nmg",
+    "lowpercent",
+    "allbosses",
+    "beginner",
+    "sandbox",
+    "practice",
+];
+
+/// A header read the same way on several passes, for `follow_title = "any"`:
+/// what names a game no roster lists. The readings cluster by what two
+/// readings of one name share (`roster::fold_title`: the stem within a
+/// fifth of its length in edits, the sequel number equal), so "Dragon
+/// Warrior II", "Dragon Warrior Il" and "Dragon Warnor II" are one game; the
+/// game's spelling is the one read most, longer and then alphabetical on a
+/// tie, with its sequel printed as the roman numeral the readings agree on;
+/// its category is the line under the header read most, when that line
+/// reads at all.
+///
+/// What it refuses, each the way a misread of the tracked game's own header
+/// (or of a board that is nothing) would otherwise have become a game:
+/// a title that matches the tracked game or is a fragment of it ("Nin
+/// Gaid"); one that names a `[[games]]` alias (the race, an Arcathlon); one
+/// the rosters already name (the roster's answer wins); one under five
+/// letters or without a three-letter word; one that reads as a category
+/// ("Traditional", anything with a percent sign); and any header over
+/// fewer than two split rows.
+#[derive(Debug, Default)]
+pub struct TitleVote {
+    clusters: Vec<Cluster>,
+    /// Games already in the database under a free title: a name the vote
+    /// settles on within a fifth of its length of one of these (the fold)
+    /// is filed under that spelling, so one game keeps one history across
+    /// days however the pane damaged its header today.
+    known: Vec<String>,
+}
+
+#[derive(Debug)]
+struct Cluster {
+    stem: String,
+    sequel: Option<u32>,
+    spellings: std::collections::HashMap<String, u32>,
+    categories: std::collections::HashMap<String, u32>,
+    votes: u32,
+    last_ms: i64,
+}
+
+impl TitleVote {
+    /// Fold in one pane pass. Returns the game and category the header
+    /// names, once it has named them on enough passes.
+    pub fn observe(
+        &mut self,
+        title: Option<&str>,
+        subtitle: Option<&str>,
+        rows: usize,
+        cfg: &Config,
+        at_ms: i64,
+    ) -> Option<(String, Option<String>)> {
+        self.clusters
+            .retain(|c| at_ms - c.last_ms <= TITLE_MEMORY_MS);
+        let title = title.map(str::trim).filter(|t| !t.is_empty())?;
+        if !plausible_game_title(title, rows, cfg) {
+            return None;
+        }
+        let (stem, sequel) = crate::roster::fold_title(title);
+        if stem.is_empty() {
+            return None;
+        }
+        let spelling = display_spelling(title, sequel);
+        // The category as it will be filed: letters, digits and the percent
+        // sign, single spaces. OCR's damage to a category is its punctuation
+        // ("Any% No 'Wild Warp"), and a stray mark must not make a spelling
+        // of its own that wins a tie by being longer.
+        let category = subtitle
+            .map(|s| {
+                s.chars()
+                    .map(|c| {
+                        if c.is_alphanumeric() || c == '%' {
+                            c
+                        } else {
+                            ' '
+                        }
+                    })
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|s| s.chars().filter(|c| c.is_alphabetic()).count() >= 3);
+        // Within a fifth of its length of any spelling the cluster has seen:
+        // a header clipped at the left ("rystalis", "ystalis", "ystalls")
+        // drifts two edits from the first reading and one from the last, and
+        // compared with the first alone the clipped readings of one game made
+        // three games of it.
+        let i = match self.clusters.iter().position(|c| {
+            c.sequel == sequel
+                && (c.stem == stem
+                    || board::edit_close(&c.stem, &stem)
+                    || c.spellings
+                        .keys()
+                        .any(|s| board::edit_close(&crate::roster::fold_title(s).0, &stem)))
+        }) {
+            Some(i) => i,
+            None => {
+                self.clusters.push(Cluster {
+                    stem: stem.clone(),
+                    sequel,
+                    spellings: Default::default(),
+                    categories: Default::default(),
+                    votes: 0,
+                    last_ms: at_ms,
+                });
+                self.clusters.len() - 1
+            }
+        };
+        let c = &mut self.clusters[i];
+        *c.spellings.entry(spelling).or_insert(0) += 1;
+        if let Some(cat) = category {
+            *c.categories.entry(cat).or_insert(0) += 1;
+        }
+        c.votes += 1;
+        c.last_ms = at_ms;
+        if c.votes < TITLE_VOTES {
+            return None;
+        }
+        let name = c.name();
+        let (stem, sequel) = crate::roster::fold_title(&name);
+        let known = self.known.iter().find(|k| {
+            let (ks, kq) = crate::roster::fold_title(k);
+            kq == sequel && (ks == stem || board::edit_close(&ks, &stem))
+        });
+        Some((known.cloned().unwrap_or(name), c.category()))
+    }
+
+    /// The game the latest cluster with enough votes names, if any, whether
+    /// or not this pass voted: what a clipped read of it is measured against.
+    pub fn settled(&self) -> Option<(String, Option<String>)> {
+        let c = self
+            .clusters
+            .iter()
+            .filter(|c| c.votes >= TITLE_VOTES)
+            .max_by_key(|c| c.last_ms)?;
+        let name = c.name();
+        let (stem, sequel) = crate::roster::fold_title(&name);
+        let known = self.known.iter().find(|k| {
+            let (ks, kq) = crate::roster::fold_title(k);
+            kq == sequel && (ks == stem || board::edit_close(&ks, &stem))
+        });
+        Some((known.cloned().unwrap_or(name), c.category()))
+    }
+
+    /// The games the database already holds under free titles.
+    pub fn know(&mut self, names: Vec<String>) {
+        self.known = names;
+    }
+
+    /// The tracked game is back: whatever was being voted on is over.
+    pub fn clear(&mut self) {
+        self.clusters.clear();
+    }
+}
+
+impl Cluster {
+    fn name(&self) -> String {
+        most_read(&self.spellings).unwrap_or_else(|| self.stem.clone())
+    }
+    /// The line under the header, read most — when it is there to read:
+    /// a pane with no category line (Dragon Warrior II's) still yields a
+    /// stray word on a pass in ten ("ce", "ice"), and a category read on
+    /// fewer than half the votes is noise over nothing, not a category.
+    fn category(&self) -> Option<String> {
+        let read: u32 = self.categories.values().sum();
+        (read * 2 >= self.votes)
+            .then(|| most_read(&self.categories))
+            .flatten()
+    }
+}
+
+/// The longest reading among those read often enough (a third of the most
+/// read), then the most read, then the first alphabetically, so two replays
+/// of one log agree. Longest, because the pane's damage to a header is to
+/// clip it: at 480p "Crystalis" read "rystalis" on most passes, and the
+/// most-read spelling is the clipped one.
+fn most_read(votes: &std::collections::HashMap<String, u32>) -> Option<String> {
+    let max = votes.values().copied().max()?;
+    votes
+        .iter()
+        .filter(|(_, n)| **n * 3 >= max)
+        .max_by(|(a, na), (b, nb)| {
+            a.chars()
+                .count()
+                .cmp(&b.chars().count())
+                .then_with(|| na.cmp(nb))
+                .then_with(|| b.cmp(a))
+        })
+        .map(|(s, _)| s.clone())
+}
+
+/// The title as it will be filed: alphanumerics and single spaces, and a
+/// trailing numeral the readings mangle ("Il", "ll", "I!") printed as the
+/// roman numeral of the sequel the fold read.
+fn display_spelling(title: &str, sequel: Option<u32>) -> String {
+    let cased: String = title
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    let mut words: Vec<String> = cased.split_whitespace().map(str::to_string).collect();
+    if let (Some(n), Some(last)) = (sequel, words.last_mut()) {
+        let numeralish = last.chars().all(|c| {
+            matches!(
+                c,
+                'I' | 'i' | 'l' | 'L' | '1' | '!' | '|' | 'V' | 'v' | 'X' | 'x'
+            )
+        });
+        if numeralish && (1..=12).contains(&n) {
+            const ROMAN: [&str; 12] = [
+                "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII",
+            ];
+            *last = ROMAN[(n - 1) as usize].to_string();
+        }
+    }
+    words.join(" ")
+}
+
+/// Could this header be the name of a game no roster lists? See
+/// [`TitleVote`] for what each refusal protects.
+fn plausible_game_title(title: &str, rows: usize, cfg: &Config) -> bool {
+    if rows < 2 {
+        return false;
+    }
+    if title.contains('%') {
+        return false;
+    }
+    let letters = title.chars().filter(|c| c.is_alphabetic()).count();
+    if letters < 5 {
+        return false;
+    }
+    let norm = board::normalise_title(title);
+    let words: Vec<&str> = norm.split(' ').filter(|w| !w.is_empty()).collect();
+    if !words
+        .iter()
+        .any(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 3)
+    {
+        return false;
+    }
+    if words
+        .iter()
+        .all(|w| CATEGORY_WORDS.contains(w) || w.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+    if board::game_matches(title, &cfg.game.name)
+        || board::title_is_fragment_of(title, &cfg.game.name)
+    {
+        return false;
+    }
+    if norm == board::normalise_title(&cfg.game.category) {
+        return false;
+    }
+    if board::names_an_alias(title, cfg) {
+        return false;
+    }
+    // The rosters' answer wins: a game they name goes the roster path.
+    if crate::roster::canonical_foreign(title).is_some() {
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,6 +812,73 @@ mod tests {
             })
             .collect();
         c
+    }
+
+    /// A pane with no category line reads a stray word under its header now
+    /// and then; the vote names the game with no category unless the line
+    /// is read on at least half its passes.
+    #[test]
+    fn a_category_read_on_few_passes_is_no_category() {
+        let mut cfg = Config::for_test_with_min_final(1);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        let mut v = TitleVote::default();
+        let t = Some("Dragon Warrior II");
+        assert_eq!(v.observe(t, Some("Glitchless"), 8, &cfg, 0), None);
+        assert_eq!(v.observe(t, None, 8, &cfg, 60_000), None);
+        assert_eq!(
+            v.observe(t, None, 8, &cfg, 120_000),
+            Some(("Dragon Warrior II".into(), None))
+        );
+        // Read on half the passes, it is the category.
+        assert_eq!(
+            v.observe(t, Some("Glitchless"), 8, &cfg, 180_000),
+            Some(("Dragon Warrior II".into(), Some("Glitchless".into())))
+        );
+    }
+
+    /// The vote spells a game as the longest reading read often enough: at
+    /// 480p the pane clips the header's first letters on most passes, and
+    /// the most-read spelling is the clipped one. A reading two edits from
+    /// the first stem but none from the best joins the cluster, and a name
+    /// the database already holds is spelled as the database has it.
+    #[test]
+    fn the_vote_spells_a_clipped_header_as_its_longest_reading() {
+        let mut cfg = Config::for_test_with_min_final(1);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        let mut v = TitleVote::default();
+        let sub = Some("Any% No Wild Warp");
+        assert_eq!(v.observe(Some("rystalis"), sub, 8, &cfg, 0), None);
+        assert_eq!(v.observe(Some("rystalis"), sub, 8, &cfg, 60_000), None);
+        assert_eq!(
+            v.observe(Some("Crystalis"), sub, 8, &cfg, 120_000),
+            Some(("Crystalis".into(), Some("Any% No Wild Warp".into())))
+        );
+        // "ystalis" is one edit from "rystalis"; "ystalls" is two from it and
+        // three from "Crystalis", but one from "ystalis": the same game by
+        // the chain of its readings, still spelled Crystalis.
+        assert_eq!(
+            v.observe(Some("ystalis"), sub, 8, &cfg, 180_000)
+                .map(|x| x.0),
+            Some("Crystalis".into())
+        );
+        assert_eq!(
+            v.observe(Some("ystalls"), sub, 8, &cfg, 240_000)
+                .map(|x| x.0),
+            Some("Crystalis".into())
+        );
+        // Known to the database as "Crystalis (NES)": filed under that.
+        let mut v = TitleVote::default();
+        v.know(vec!["Crystalis (NES)".into()]);
+        for t in 0..3 {
+            v.observe(Some("rystalis"), sub, 8, &cfg, t * 60_000);
+        }
+        assert_eq!(
+            v.observe(Some("rystalis"), sub, 8, &cfg, 240_000)
+                .map(|x| x.0),
+            Some("Crystalis (NES)".into())
+        );
     }
 
     fn row(name: Option<&str>) -> BoardRow {

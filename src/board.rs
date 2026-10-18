@@ -745,15 +745,7 @@ pub fn canonical_key(board: &Board, cfg: &Config) -> Option<(String, String)> {
     // a new one: every word of the title reads as a word of the configured
     // name, and there is at least one such word. Without this the fallback
     // mints a key per spelling and the shadow log flaps between them.
-    let cfg_norm = normalise_title(&cfg.game.name);
-    let title_words: Vec<&str> = norm.split(' ').filter(|w| !w.is_empty()).collect();
-    if !title_words.is_empty()
-        && title_words.iter().all(|w| {
-            cfg_norm
-                .split(' ')
-                .any(|c| !c.is_empty() && (c.starts_with(w) || edit_close(w, c)))
-        })
-    {
+    if title_is_fragment_of(title, &cfg.game.name) {
         return Some((cfg.game.name.clone(), cfg.game.category.clone()));
     }
     let cased: String = title
@@ -771,6 +763,56 @@ pub fn canonical_key(board: &Board, cfg: &Config) -> Option<(String, String)> {
         .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
         .unwrap_or_else(|| "unknown".to_string());
     Some((cased, category))
+}
+
+/// Is this title a fragment of that name: every word of it reads as a word
+/// of the name ("Nin Gaid" of "Ninja Gaiden (NES)", or one word of it at
+/// confidence), with at least one such word? Such a title is that game and
+/// not a new one, whatever `game_matches` says of the whole line.
+pub fn title_is_fragment_of(title: &str, name: &str) -> bool {
+    let norm = normalise_title(title);
+    let name_norm = normalise_title(name);
+    let words: Vec<&str> = norm.split(' ').filter(|w| !w.is_empty()).collect();
+    !words.is_empty()
+        && words.iter().all(|w| {
+            name_norm
+                .split(' ')
+                .any(|c| !c.is_empty() && (c.starts_with(w) || edit_close(w, c)))
+        })
+}
+
+/// Does a word of this title read as one of the `[[games]]` aliases' match
+/// strings or names? Such a title is that alias's board (an Arcathlon, the
+/// race), never a game of its own.
+pub fn names_an_alias(title: &str, cfg: &Config) -> bool {
+    let norm = normalise_title(title);
+    cfg.games.iter().any(|alias| {
+        alias
+            .r#match
+            .iter()
+            .chain(std::iter::once(&alias.name))
+            .map(|m| normalise_title(m))
+            .any(|m| word_matches(&norm, &m))
+    })
+}
+
+/// The runs-mode `[[games]]` entry a title names, if any. Under
+/// `follow_title = "any"` it pins a spelling tesseract never reads whole:
+/// `name = "Crystalis", match = ["stalis"]` files "rystalis" and "Cc stalis"
+/// under the one name.
+pub fn runs_alias_for<'a>(title: &str, cfg: &'a Config) -> Option<&'a crate::config::GameAlias> {
+    let norm = normalise_title(title);
+    cfg.games
+        .iter()
+        .filter(|a| a.mode == crate::config::GameMode::Runs)
+        .find(|alias| {
+            alias
+                .r#match
+                .iter()
+                .chain(std::iter::once(&alias.name))
+                .map(|m| normalise_title(m))
+                .any(|m| word_matches(&norm, &m))
+        })
 }
 
 /// The alphabetic words of a name, normalised, when they amount to three

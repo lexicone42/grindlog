@@ -307,6 +307,65 @@ that can be identified, never to "something is wrong here", and a misread
 of the tracked game's own header names no game and so cannot produce a
 foreign run.
 
+**Recording any titled game (`game.follow_title = "any"`).** `track` is only
+as wide as the rosters, and the week after the Big 20 he ran Dragon Warrior
+II and Crystalis, on no list: five broadcasts, nothing recorded. `any` is
+`track` plus a vote (`identity::TitleVote`): a header the rosters cannot
+place, read the same way on three passes, names its game, and the line
+under it names the category. "The same way" is the roster's own fold, the
+stem within a fifth of its length in edits and the sequel number equal, so
+"Dragon Warrior Il", "Dragon Warnor II" and "Dragon Warrior II" are one game.
+It is spelled as the longest reading read often enough (a third of the
+most-read one), because the pane's damage to a header is to clip it:
+at 480p "Crystalis" read "rystalis" on most passes. A reading joins a
+cluster when it is within a fifth of its length of any spelling the cluster
+has seen, since the clipped readings drift from the first. A name the
+database already holds within that distance is used as the database has
+it, so one game keeps one history across days. An open run follows the
+vote while it improves, as long as the better spelling is the same game by
+the roster's fold. A voted name
+counts as "names another game" at the gate, so the header convicts with it
+where Dragon Warrior II's "Any%" category line alone never would.
+
+The safety argument is the list of what the vote refuses, each a way a
+misread would otherwise have become a game: a title that matches the
+tracked game or is a fragment of it ("Nin Gaid"); one that names a
+`[[games]]` alias (the race board, an Arcathlon); one the rosters name
+(the roster's spelling and category win); one under five letters or
+without a three-letter word; one that reads as a category ("Traditional"
+over Mini Putt's one-row pane, anything with a percent sign); and any
+header over fewer than two split rows. Clusters not seen for fifteen
+minutes are forgotten, so an earlier game's name cannot be revived by a
+stray misread of a later one, and the vote is cleared when the tracked
+game returns.
+
+And one rule that is not about naming: a run that closes while the header
+has read as another game on two passes running, not a fragment of the
+tracked game's, and nothing has named it yet, is dropped
+(`close_would_fabricate`). Dragon Warrior II's "Any%" line matches the
+tracked game's, so the gate stayed undecided, and a run closing then was
+filed as Ninja Gaiden: a run of a game nobody has named is not invented.
+
+Two levers over the vote. A header that reads as a clipped form of the
+name the vote has settled on is filed under the settled name even where
+the rosters would name another game from the fragment: "Dragon Il" is
+"dragon" within "doubledragon" to the matcher, and a Dragon Warrior II run
+was filed as Double Dragon II until the settled vote outranked it. A
+header that reads as a roster game whole still wins, since that is a
+switch to it. And a runs-mode `[[games]]` entry pins a spelling the pane
+never reads whole: tesseract read "Crystalis" as "rystalis" and "Cc
+stalis" at 480p and never once correctly on some days, and
+`name = "Crystalis", match = ["stalis"]` files every reading under the one
+name, with the entry's category or the line read under the header.
+
+And the run itself follows a later naming (`run_follows_naming`): a
+better spelling of its own game within the vote's join distance, or a
+vote-named game over a roster-named one when the two share a word of four
+letters and their numerals agree. The whole Dragon Warrior II day once
+replayed as one 7:29:56 run of Double Dragon II: the pane's split rows
+did not read for the first half hour, the vote could not settle, and the
+roster's reading of "Dragon Il" at the start of the run stood.
+
 Three details it must get right, each of which was a bug first:
 
 - **The target is resolved when the run CLOSES, not when it starts.**
@@ -789,6 +848,54 @@ three finished runs where its final time differed from grindlog's by
 40-120 ms the pixels sided with the net every time — tesseract's small
 hundredths again. `tests/fixtures/cnn/` holds real crops named by their
 reading, and a test reads them with the shipped weights.
+
+### Finding the timer geometry-free
+
+The slot net reads a crop whose geometry it was trained on: where the
+digits sit in it and how wide each slot is. A pane no `[[layouts]]` entry
+fits defeats it twice over, because no crop covers the digits and the
+slots would not fit them if one did. The week after the Big 20 he ran
+Dragon Warrior II and Crystalis, whose one-game pane put the run timer
+lower than every configured crop, and five broadcasts recorded nothing.
+
+`src/gread.rs` is the geometry-free reader from the sibling `timer-ocr`
+project, with its net in `assets/timer_ocr_any.json` (`[timer]
+any_weights`), trained on glyph tiles cut from six channels' footage. A
+timer is cut into its glyphs by their own ink: each glyph is a run of
+inked columns in the digit band, a run as wide as two digits is split
+where the ink is faintest, and each glyph becomes a tile centred on it,
+three quarters of the band high. What it needs from a layout is only where
+to look, and for that there are two uses:
+
+- **A fallback reader.** After the slot net and the glyph reader decline
+  a crop, the geometry-free reader reads it before tesseract (`"any"` in
+  the observation log's `reader` field), in the probe and the locked
+  path alike. The print is parsed strictly (`gread::parse_print`:
+  LiveSplit's forms and nothing else), because a glyph reading that lost
+  its point must not become a time.
+- **A finder.** When no configured crop reads a timer on a probe frame and
+  nothing holds the lock, every fourth probe scans the capture in strips
+  for the tallest digit band that reads as a time, which is the run timer
+  on every LiveSplit layout (a split row's time cell and the segment timer
+  under the run's are both smaller). Two looks agreeing on where it is
+  place a crop around it as the timer crop of one layout more than the
+  config has, named `found`. The crop keeps seven band heights to the left
+  of the ink's right edge whatever the ink's width: LiveSplit right-aligns
+  the timer, so a crop placed around "0.91" at the start of a run has to
+  hold "1:19:59.92" an hour later, and the first cut of this lost the
+  leading digit at ten minutes (19:59 read 9:59, 20:00 read as a reset,
+  every ten minutes of a Dragon Warrior II day). That is a
+  candidate like any other: it has to read consistently over the same
+  streak as a configured layout before it takes the lock, and it loses the
+  lock the same way. `tests/fixtures/pane/` holds the capture's union crop
+  of both panes; the finder reads 1:28:47.83 off one and 1:29:26.63 off
+  the other.
+
+What the finder does not do: read splits or the counter for a found pane
+(`found` inherits the base layout's rectangles for those), or move the lock
+off a configured layout that is reading. Where it finds a timer, the pane
+is also one `follow_title = "any"` can name, and the two together are what
+would have recorded that week.
 
 ### Finding the LiveSplit pane automatically
 

@@ -29,7 +29,11 @@ Layout of `src/`:
   splits and counter reads, state machine, database, chat, observation log;
   `lock.rs` — the layout lock as a state machine (probing, held by the
   timer, held by the board) and the judges that let it go.
-- `glyph.rs` — the purpose-built timer reader (templates in
+- `gread.rs` — the geometry-free timer reader and finder (weights
+  `assets/timer_ocr_any.json`): glyphs cut by their own ink, no slots, and
+  a scan of the capture for the tallest band that reads as a time, offered
+  as layout "found" when no configured crop reads;
+  `glyph.rs` — the purpose-built timer reader (templates in
   `assets/glyphs.json`); `ocr.rs` — preprocessing and the tesseract engines.
 - `state.rs` — the run state machine; `sanity.rs` — the smoothed clock;
   `counter.rs` — which attempt number to believe; `splits.rs` — per-act

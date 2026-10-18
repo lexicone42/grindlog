@@ -1275,6 +1275,23 @@ pub async fn last_transition(pool: &SqlitePool) -> Result<Option<TransitionRow>>
     Ok(row)
 }
 
+/// The games the database holds runs of besides the tracked one, by name:
+/// what a title vote (`follow_title = "any"`) spells a game it settles on
+/// the way it was filed before, so one game keeps one history.
+pub async fn other_game_names(
+    pool: &SqlitePool,
+    game: &str,
+    category: &str,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT game FROM runs WHERE NOT (game = ? AND category = ?) ORDER BY game",
+    )
+    .bind(game)
+    .bind(category)
+    .fetch_all(pool)
+    .await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Dead-man check for the live deployment, for a ten-minute cron (see
-# crontab.example). Each pass reads seventeen signals:
+# crontab.example). Each pass reads eighteen signals:
 #
 #   database      ninja-gaiden.db opens and answers a query
 #   tracker-churn at most two board-tracker rebuilds in the last hour
@@ -18,6 +18,11 @@
 #   tracker-echo  under two of today's board rows carry the previous run's time
 #               to the second (a comparison filed as a finish)
 #   site-stale    while a session is open, the public page is under 30 min old
+#   recording-idle a session open two hours or more has filed a run, unless
+#               neither a running timer is being read (the race clock test
+#               over five minutes) nor another game's title has been on the
+#               pane in the last hour (five days of Dragon Warrior II and
+#               Crystalis in 2026-10 went unrecorded with every signal green)
 #
 #   supervisor  the tmux session "ngtimer" exists on the bot's own tmux server
 #               (socket "grindlog") and scripts/run-live.sh is alive in it (the
@@ -435,6 +440,34 @@ if [ -n "$site" ] && command -v curl >/dev/null; then
       check clock 0 "within ${skew#-} s of the site's server"
     fi
   fi
+fi
+# --- recording-idle: the stream has been up for hours, a timer is running
+# or the pane names another game, and nothing has been filed. Whatever the
+# cause (a game on no roster, a pane no layout fits, a board lock holding
+# the timer back), it is the one failure every other signal here misses.
+if [ "$open" -gt 0 ] && command -v jq >/dev/null; then
+  read -r sid sstart <<<"$(sqlite3 -readonly -cmd '.timeout 5000' "$DB" -separator ' ' "SELECT id, started_at_ms FROM sessions WHERE ended_at_ms IS NULL AND source='hls' ORDER BY id DESC LIMIT 1" 2>/dev/null)"
+  open_for=$(( now - ${sstart:-$((now * 1000))} / 1000 ))
+  filed=$(sqlite3 -readonly -cmd '.timeout 5000' "$DB" "SELECT COUNT(*) FROM runs WHERE session_id = ${sid:-0}" 2>/dev/null || echo 0)
+  if [ "$open_for" -ge 7200 ] && [ "${filed:-0}" -eq 0 ]; then
+    running=0
+    case "$(race_clock "$OBS" unix_ms "$five_min_ago_ms")" in
+      few|zero|held|"") ;;
+      *) read -r cn _ cm <<<"$(race_clock "$OBS" unix_ms "$five_min_ago_ms")"; [ $((cm * 3)) -ge "$cn" ] && running=1;;
+    esac
+    other=$(plain | awk -v since="$(date -u -d "@$((now - 3600))" +%Y-%m-%dT%H:%M:%S)" '$1 >= since && /NOT the tracked game/' | wc -l)
+    if [ "$running" = 1 ]; then
+      check recording-idle 1 "a timer has been running and nothing filed in $((open_for / 3600)) h of session #$sid (follow_title? a pane no layout fits? scripts/identity-report.sh)"
+    elif [ "$other" -gt 0 ] && [ "$open_for" -ge 10800 ]; then
+      check recording-idle 1 "another game's pane for $((open_for / 3600)) h of session #$sid and nothing filed ($other title reads in the last hour; follow_title?)"
+    else
+      check recording-idle 0 "nothing filed in $((open_for / 3600)) h, but no timer running and no other game's pane"
+    fi
+  else
+    check recording-idle 0 "${filed:-0} run(s) filed in session #${sid:-?} ($((open_for / 60)) min)"
+  fi
+else
+  check recording-idle 0 "no session open"
 fi
 if [ "$open" -gt 0 ] && [ -n "$site" ] && command -v jq >/dev/null; then
   gen=$(curl -s --max-time 10 "${site%/}/index.html?hc=$now" -H 'Cache-Control: no-cache' \
