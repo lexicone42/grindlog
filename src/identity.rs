@@ -765,6 +765,19 @@ fn plausible_game_title(title: &str, rows: usize, cfg: &Config) -> bool {
     if letters < 5 {
         return false;
     }
+    // Four different letters at least: a pane read off the wrong rectangle
+    // yields "eae ee" and "EEE EE EE" pass after pass, and three of a kind
+    // made a game of it.
+    let mut distinct: Vec<char> = title
+        .chars()
+        .filter(|c| c.is_alphabetic())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    if distinct.len() < 4 {
+        return false;
+    }
     let norm = board::normalise_title(title);
     let words: Vec<&str> = norm.split(' ').filter(|w| !w.is_empty()).collect();
     if !words
@@ -812,6 +825,27 @@ mod tests {
             })
             .collect();
         c
+    }
+
+    /// Garbage read the same way three times is not a game: "eae ee" has
+    /// five letters and a three-letter word, and two letters in all.
+    #[test]
+    fn a_title_of_fewer_than_four_distinct_letters_is_refused() {
+        let mut cfg = Config::for_test_with_min_final(1);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        let mut v = TitleVote::default();
+        for (i, t) in ["eae ee", "EEE EE EE", "oo eee", "eae ee", "eae ee"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                v.observe(Some(t), None, 8, &cfg, i as i64 * 60_000),
+                None,
+                "{t:?}"
+            );
+        }
+        assert!(plausible_game_title("Crystalis", 8, &cfg));
+        assert!(plausible_game_title("Dragon Warrior II", 8, &cfg));
     }
 
     /// A pane with no category line reads a stray word under its header now
