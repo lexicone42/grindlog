@@ -2632,6 +2632,12 @@ pub async fn run(cfg: Config) -> Result<()> {
     // geometry-free finder places at run time on a pane no configured
     // layout fits (the week after the Big 20: Dragon Warrior II, Crystalis).
     // Until it is placed its crop is empty and it competes for nothing.
+    // It inherits the base layout's other rectangles: they shape the pane
+    // the header and rows are read from (`pane_rect` is their union), and
+    // three days read right with them. What is NOT taken from them is a
+    // counter reading: the inherited counter rectangle fell on a Dragon
+    // Warrior II split row and read the "-6:57" delta as attempt 6, and
+    // "16" where the pane said 1. See the counter pass.
     let found_layout = regs.len();
     regs.push(Regions {
         timer: (0, 0, 0, 0),
@@ -4518,8 +4524,15 @@ pub async fn run(cfg: Config) -> Result<()> {
         // foreign. A foreign board's counter is that game's sequence and
         // never reaches the tracked game's tracker. A run the gate could not
         // name is not read (it is dropped at close).
+        // On a found pane the counter rectangle is the base layout's, which
+        // is no place on this pane: read it only once the pane re-measure
+        // has found a counter there. The attempt counter LiveSplit prints on
+        // the header line still reaches the run through the board reader.
+        let counter_rect = reg.counter.filter(|_| {
+            active_layout != found_layout || pane_geom.as_ref().is_some_and(|g| g.counter.is_some())
+        });
         if let (Some((cx, cy, cw2, ch2)), Some(cr)) = (
-            reg.counter,
+            counter_rect,
             current
                 .as_mut()
                 .filter(|c| !c.orphaned && (pane_identity.ok() || c.foreign.is_some())),
