@@ -2632,9 +2632,18 @@ pub async fn run(cfg: Config) -> Result<()> {
     // geometry-free finder places at run time on a pane no configured
     // layout fits (the week after the Big 20: Dragon Warrior II, Crystalis).
     // Until it is placed its crop is empty and it competes for nothing.
+    // It inherits the base layout's union and nothing else that is a place
+    // on the pane: its splits crop is placed with the timer, and a counter
+    // or SoB it has is the pane re-measure's to find. The base layout's
+    // counter rectangle, inherited, fell on a Dragon Warrior II split row and
+    // read the "-6:57" delta as attempt 6 (and "16" where the pane said 1);
+    // the attempt counter LiveSplit prints on the header line is read by
+    // the board reader whatever the rectangles say.
     let found_layout = regs.len();
     regs.push(Regions {
         timer: (0, 0, 0, 0),
+        counter: None,
+        sob: None,
         ..regs[0].clone()
     });
     layout_names.push("found".to_string());
