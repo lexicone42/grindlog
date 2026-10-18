@@ -1562,7 +1562,10 @@ fn apply_identity(
     // The header reads as another game: not this one, and not a fragment of
     // it. Counted over passes running, for `close_would_fabricate`.
     let header_other = reading.against.contains(&identity::Signal::Header)
-        && title.is_some_and(|t| !board::title_is_fragment_of(t, &cfg.game.name));
+        && title.is_some_and(|t| {
+            !board::title_is_fragment_of(t, &cfg.game.name)
+                && !identity::looks_like_tracked_name(t, cfg)
+        });
     if header_other {
         *other_passes += 1;
     } else if reading.for_it.contains(&identity::Signal::Header) {
@@ -4551,7 +4554,13 @@ pub async fn run(cfg: Config) -> Result<()> {
             let timer_fresh = tracker.accepted_age_ms(t).is_some_and(|a| a <= 3_000);
             if cr.ls_attempt.is_none() && timer_fresh && t - last_counter_read_t >= 2000 {
                 last_counter_read_t = t;
-                let cimg = image::imageops::crop_imm(&union_bright, cx, cy, cw2, ch2).to_image();
+                // Off luma, not the brightest channel: the brightest channel is
+                // for a timer LiveSplit colours by pace, and the attempt
+                // counter is small grey text that read on 6 of 13 attempts of
+                // a 480p Ninja Gaiden window off the brightest channel and on
+                // all 13 off luma (the seven short unnumbered attempts were
+                // then not filed).
+                let cimg = image::imageops::crop_imm(&union_img, cx, cy, cw2, ch2).to_image();
                 let cp = trim_at_border(&ocr::preprocess(&cimg, &pre_counter));
                 if std::env::var_os("NG_DUMP_PANE").is_some() {
                     let _ = cp.save("calibration/counter.png");
@@ -4767,8 +4776,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                     // the result as this game's Sum of Best.
                     if pane_identity.ok() && readings.refs.is_empty() {
                         if let Some((bx, by, bw2, bh2)) = reg.sob {
-                            let bimg = image::imageops::crop_imm(&union_bright, bx, by, bw2, bh2)
-                                .to_image();
+                            let bimg =
+                                image::imageops::crop_imm(&union_img, bx, by, bw2, bh2).to_image();
                             let bp = trim_at_border(&ocr::preprocess(&bimg, &pre_counter));
                             if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&bp)?).await {
                                 if let Some(v) = parse_time(txt.trim())

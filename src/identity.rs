@@ -754,6 +754,28 @@ fn display_spelling(title: &str, sequel: Option<u32>) -> String {
 
 /// Could this header be the name of a game no roster lists? See
 /// [`TitleVote`] for what each refusal protects.
+/// A damaged read of the tracked game's own header: a word of four letters
+/// equal or edit-close to one of the tracked game's name. "Ninja (NCO",
+/// "Gaiden (NEO)" and "Ninja Gaigen (NTO" were read three times each on a
+/// 480p Ninja Gaiden window; voted as games, they convicted the pane of
+/// timing something else and suspended recording of the tracked game by
+/// its own name, and counted as a foreign header they had every attempt
+/// closing between two such reads dropped as a fabrication (eight of
+/// thirteen in that window, every one under thirty seconds). Neither a
+/// vote nor a foreign header; the cost is a real other game sharing a
+/// word with the tracked one, which the rosters still name if they list
+/// it.
+pub fn looks_like_tracked_name(title: &str, cfg: &Config) -> bool {
+    let own: Vec<String> = board::normalise_title(&cfg.game.name)
+        .split(' ')
+        .filter(|w| w.chars().count() >= 4)
+        .map(str::to_string)
+        .collect();
+    board::normalise_title(title)
+        .split(' ')
+        .any(|w| w.chars().count() >= 4 && own.iter().any(|o| o == w || board::edit_close(o, w)))
+}
+
 fn plausible_game_title(title: &str, rows: usize, cfg: &Config) -> bool {
     if rows < 2 {
         return false;
@@ -800,6 +822,25 @@ fn plausible_game_title(title: &str, rows: usize, cfg: &Config) -> bool {
     if norm == board::normalise_title(&cfg.game.category) {
         return false;
     }
+    // A damaged read of the tracked game's own header is not another game:
+    // "Ninja (NCO", "Gaiden (NEO)" and "Ninja Gaigen (NTO" were read three
+    // times each on a 480p Ninja Gaiden window, voted as games, and the
+    // vote convicted the pane of timing something else — recording of the
+    // tracked game suspended by its own name. A title with a word of four
+    // letters equal or edit-close to one of the tracked game's is refused;
+    // the cost is a real other game sharing a word with it, which the
+    // rosters still name if they list it.
+    let own: Vec<String> = board::normalise_title(&cfg.game.name)
+        .split(' ')
+        .filter(|w| w.chars().count() >= 4)
+        .map(str::to_string)
+        .collect();
+    if words
+        .iter()
+        .any(|w| w.chars().count() >= 4 && own.iter().any(|o| o == w || board::edit_close(o, w)))
+    {
+        return false;
+    }
     if board::names_an_alias(title, cfg) {
         return false;
     }
@@ -825,6 +866,59 @@ mod tests {
             })
             .collect();
         c
+    }
+
+    /// A damaged read of the tracked game's own header never becomes a game
+    /// of its own, however many times it reads the same way.
+    #[test]
+    fn a_damaged_read_of_the_tracked_name_is_not_a_vote() {
+        let mut cfg = Config::for_test_with_min_final(1);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        for t in [
+            "Ninja (NCO",
+            "Gaiden (NEO)",
+            "Ninja Gaigen (NTO",
+            "Ninja GOaigen (NCO",
+        ] {
+            let mut v = TitleVote::default();
+            for i in 0..4 {
+                assert_eq!(
+                    v.observe(Some(t), Some("Any%"), 6, &cfg, i * 60_000),
+                    None,
+                    "{t:?}"
+                );
+            }
+        }
+        assert!(plausible_game_title("Dragon Warrior II", 8, &cfg));
+        assert!(plausible_game_title("Crystalis", 8, &cfg));
+    }
+
+    /// The same test keeps a damaged read of the tracked name from counting
+    /// as a foreign header at the close.
+    #[test]
+    fn a_damaged_read_of_the_tracked_name_looks_like_it() {
+        let mut cfg = Config::for_test_with_min_final(1);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        for t in [
+            "Ninja (NCO",
+            "Gaiden (NEO)",
+            "Ninja Gaigen (NTO",
+            "Nin Gaid",
+        ] {
+            assert!(
+                looks_like_tracked_name(t, &cfg) || board::title_is_fragment_of(t, &cfg.game.name),
+                "{t:?}"
+            );
+        }
+        for t in [
+            "Dragon Warrior II",
+            "Crystalis",
+            "Mini Putt",
+            "Any% No Wild Warp",
+        ] {
+            assert!(!looks_like_tracked_name(t, &cfg), "{t:?}");
+        }
     }
 
     /// Garbage read the same way three times is not a game: "eae ee" has
