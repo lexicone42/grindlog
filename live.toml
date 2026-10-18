@@ -117,7 +117,15 @@ category = "Any%"
 #
 # Back to "log" is a one-word edit and a rollout; the runs it wrote are all
 # `category = "Other"` and can be removed on their own.
-follow_title = "track"
+#
+# "any" (since 2026-10-18) is "track" plus a vote: a header the rosters
+# cannot place, read the same way on three passes, names its game, and the
+# line under it the category (docs/detection.md, *Recording any titled
+# game*). The week after the Big 20 he ran Dragon Warrior II and Crystalis,
+# on no list, and five broadcasts recorded nothing; whole-day replays of
+# those days under "any" record every run (#186). A pane no configured
+# layout fits is found by the geometry-free reader, as layout "found".
+follow_title = "any"
 # The tracked best only spans what the bot has seen; his LiveSplit comparison
 # is seasonal, so call it what it is.
 record_label = "season best"
