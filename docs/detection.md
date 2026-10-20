@@ -918,13 +918,29 @@ broadcast, before the pane could be read; its header crop read garbage for
 two hours, four runs were dropped as unfilable, and the layout whose pane
 reads "Pac-Mania (NES)" never got to compete, because a lock that keeps
 reading a timer was never judged again. Now a timer-granted lock whose pane
-names nothing (not the tracked game, nothing the rosters, an alias or the
-vote name) on three passes running, after two minutes of it, is let go
-(`lock::LockState::pane_named`), the layout is shunned by the next lock's
-choice among the layouts that fit the timer, and the judge sits again a
-quarter hour later at the earliest — so a pane nothing can read costs one
-re-probe a quarter hour, not a churn. In replay the lock walks `ng-theme`
-to `big20-mid` to `default` in six minutes and files the Pac-Mania runs.
+names nothing is let go (`lock::LockState::pane_named`): three passes
+running that read a title and named nothing (not the tracked game,
+nothing the rosters, an alias or the vote name), after two minutes of it,
+with nothing named for a quarter hour — a pass with no title read is no
+evidence either way, and a pane named within the vote's memory is known,
+so Double Dragon II's header reading in pieces for ten minutes does not
+cost the right layout its lock. The layout let go is shunned by the next
+lock's choice among the layouts that fit the timer, and the judge sits
+again a quarter hour later at the earliest. The run in progress at the
+switch is kept: a close the fabrication rule would drop, arriving within
+ninety seconds of a lock switch and before the new layout's first pane
+pass, is held for one forced pass and decided by what it names (the
+first Pac-Mania of the day, 10:21, closed nineteen seconds after the
+switch). In replay the lock walks `ng-theme` to `big20-mid` to `default`
+and files the Pac-Mania runs.
+
+The attempt counter is read two ways on a foreign pane: the counter crop
+every two seconds at the crop's upscale, and the header line once a
+minute at the pane's. Where the two disagree within two minutes the crop
+is the one that moved: a re-lock twelve pixels up read Kid Klown's 14 as
+44 on nine attempts while the header line read 14 through 28 on two
+hundred passes, so a crop read that disagrees with a recent header-line
+read is discarded.
 
 What the finder does not do: read splits or the counter for a found pane
 (`found` inherits the base layout's rectangles for those), or move the lock

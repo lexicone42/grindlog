@@ -2011,8 +2011,15 @@ const UNNAMED_AGAIN_MS: i64 = 15 * 60 * 1000;
 /// How long a pane has to have named nothing before the judge counts passes.
 const UNNAMED_SPAN_MS: i64 = 2 * 60 * 1000;
 
-/// How long a pane named by anything stays known to the judge.
-const NAMED_HOLD_MS: i64 = 5 * 60 * 1000;
+/// How long a close is held after a lock switch for the new layout's first
+/// pane pass to name the run it belongs to.
+const HELD_CLOSE_MS: i64 = 90 * 1000;
+
+/// How long a pane named by anything stays known to the judge: the vote's
+/// memory. Double Dragon II's header reads in pieces for stretches longer
+/// than five minutes, and the judge let the right layout go in the middle
+/// of a run; a pane that named a game within the quarter hour is known.
+const NAMED_HOLD_MS: i64 = 15 * 60 * 1000;
 
 /// Track a board whose `[[games]]` entry asks for `mode = "board"`: the rows
 /// are different games run back to back, and a row that gains a time is a
@@ -2898,6 +2905,13 @@ pub async fn run(cfg: Config) -> Result<()> {
     // layout whenever three passes missed the header line, and each
     // release cost a probe and sometimes a run.
     let mut last_named_t: i64 = i64::MIN / 2;
+    // The attempt counter as the pane pass last read it off the header line,
+    // and when. The counter crop is read every two seconds at the crop's
+    // upscale and the header line once a minute at the pane's; where the two
+    // disagree within two minutes the crop is the one that moved (a re-lock
+    // twelve pixels up read Kid Klown's 14 as 44 on nine attempts while the
+    // header line read 14 through 28 on two hundred passes).
+    let mut last_header_counter: Option<(i64, i64)> = None;
     // The game the layout says it is timing, and whether runs may be
     // recorded from it. The verdict comes from the board (see `identity`),
     // fingerprinted against the configured game and the highest attempt
@@ -2945,6 +2959,14 @@ pub async fn run(cfg: Config) -> Result<()> {
     // until the next pane pass decides whether it finished or paused (see
     // the freeze block ahead of the event loop).
     let mut held_freeze: Option<(Event, i64)> = None;
+    // A close the fabrication rule would drop, arriving within a minute and
+    // a half of a lock switch and before the new layout's first pane pass:
+    // held for one forced pane pass, which names the pane the run was on,
+    // and re-injected. The run in progress at every change of game — the
+    // first Pac-Mania of 2026-10-19, 10:21 — closed nineteen seconds after
+    // the judge switched layouts and was dropped as unfilable.
+    let mut held_close: Option<(Event, i64)> = None;
+    let mut last_lock_switch_t: i64 = i64::MIN / 2;
     // The marathon in progress, when the board is one a `[[games]]` entry
     // asks to track by completions, the tag its session was given, and how
     // many consecutive pane passes read a board belonging to another game.
@@ -4156,6 +4178,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                         format!("{name} {:+},{:+}{geom_note}", new_off.0, new_off.1),
                     );
                 }
+                if new_layout != active_layout {
+                    last_lock_switch_t = t;
+                }
                 active_layout = new_layout;
                 active_off = new_off;
                 active_regs = new_regs;
@@ -4654,7 +4679,12 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
                 if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&cp)?).await {
                     debug!("counter ocr: {:?} (crop {cx},{cy} {cw2}x{ch2})", txt.trim());
-                    if let Some(v) = crate::timeparse::parse_counter(txt.trim()) {
+                    let header_disagrees = |v: i64| {
+                        last_header_counter.is_some_and(|(hv, ht)| t - ht <= 120_000 && hv != v)
+                    };
+                    if let Some(v) = crate::timeparse::parse_counter(txt.trim())
+                        .filter(|v| !header_disagrees(*v))
+                    {
                         observe_counter(
                             &mut counters,
                             &pool,
@@ -4801,6 +4831,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                         .await?;
                     }
                     let board = with_counter(board, last_counter_seen, t);
+                    if let Some(v) = board
+                        .counter
+                        .as_deref()
+                        .and_then(crate::timeparse::parse_counter)
+                    {
+                        last_header_counter = Some((v, t));
+                    }
                     let named = apply_identity(
                         &readings,
                         &board,
@@ -5037,6 +5074,17 @@ pub async fn run(cfg: Config) -> Result<()> {
         if let Some(Unlock::NoMarathon) = lock.tick(t, marathon_active) {
             info!("no marathon in force on the board-granted lock; probing layouts again");
         }
+        // A close held for the pane pass forced for it (see `held_close`):
+        // back into this frame's events once a pass has happened, or when
+        // the hold runs out, to be decided by the ordinary rule below with
+        // whatever the pass named.
+        if let Some((ev, since)) = held_close.as_ref() {
+            if passed_pane.is_some() || t - since > HELD_CLOSE_MS {
+                let ev = ev.clone();
+                held_close = None;
+                events.insert(0, ev);
+            }
+        }
         // A freeze held from the last frame, decided by the pane pass forced
         // for it — or let through as it came when no pass happened within
         // FREEZE_HOLD_MS (the layout lost its lock in the same moment),
@@ -5193,7 +5241,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
             // Not the tracked game's, and not anyone else's either: drop it.
             // See `close_would_fabricate`.
-            if close_would_fabricate(
+            let would_drop = close_would_fabricate(
                 pane_identity.ok(),
                 pane_other_passes >= 2,
                 current.as_ref().is_some_and(|c| c.orphaned),
@@ -5202,7 +5250,20 @@ pub async fn run(cfg: Config) -> Result<()> {
                     .and_then(|c| c.foreign.as_ref())
                     .or(foreign_target.as_ref()),
                 &ev,
-            ) {
+            );
+            if would_drop
+                && held_close.is_none()
+                && t - last_lock_switch_t <= HELD_CLOSE_MS
+                && last_sob_read_t < last_lock_switch_t
+            {
+                info!(
+                    "a run closing just after the lock switched layouts, nothing naming it yet: holding it for a pane pass"
+                );
+                held_close = Some((ev.clone(), t));
+                last_sob_read_t = i64::MIN / 2;
+                continue;
+            }
+            if would_drop {
                 warn!(
                     "dropping a run closing on a board the gate could not name: \
                      not {:?}, and nothing to file it under",
