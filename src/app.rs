@@ -1569,10 +1569,11 @@ fn apply_identity(
             crate::roster::canonical_foreign(t),
         ) {
             (Some(named), Some((g, _))) if named == g => {
-                vote.saw_roster(named, reading.named_category.as_deref(), at_ms);
+                vote.saw_roster(named, reading.named_category.as_deref(), category, at_ms);
             }
             (None, _) => {
                 if let Some((g, c)) = vote.continuity(t, at_ms) {
+                    vote.refresh_roster(at_ms);
                     reading.named = Some(g);
                     reading.named_category = c;
                     if !reading.against.contains(&identity::Signal::NamedAnother) {

@@ -562,6 +562,10 @@ pub struct TitleVote {
     /// rosters named Kid Klown in Night Mayor World ten minutes ago and now
     /// read "Mayor vvorid" is still that pane. See [`TitleVote::continuity`].
     roster_seen: Option<(String, Option<String>, i64)>,
+    /// The line read under that header: Excitebike's "Selection A", which
+    /// the pane reads as the TITLE on the passes the header line is missed,
+    /// and which is no game either.
+    roster_subtitle: Option<String>,
     /// Games already in the database under a free title: a name the vote
     /// settles on within a fifth of its length of one of these (the fold)
     /// is filed under that spelling, so one game keeps one history across
@@ -687,8 +691,29 @@ impl TitleVote {
     }
 
     /// The rosters named `name` on this pane at `at_ms`.
-    pub fn saw_roster(&mut self, name: &str, category: Option<&str>, at_ms: i64) {
+    pub fn saw_roster(
+        &mut self,
+        name: &str,
+        category: Option<&str>,
+        subtitle: Option<&str>,
+        at_ms: i64,
+    ) {
         self.roster_seen = Some((name.to_string(), category.map(str::to_string), at_ms));
+        if let Some(s) = subtitle
+            .map(board::normalise_title)
+            .filter(|s| !s.is_empty())
+        {
+            self.roster_subtitle = Some(s);
+        }
+    }
+
+    /// Continuity named the pane again: the memory runs from now. A chain
+    /// of damaged reads is one pane; what ends it is another name, or the
+    /// tracked game back (`clear`).
+    pub fn refresh_roster(&mut self, at_ms: i64) {
+        if let Some(r) = self.roster_seen.as_mut() {
+            r.2 = at_ms;
+        }
     }
 
     /// The game the rosters named on this pane within the vote's memory,
@@ -712,10 +737,14 @@ impl TitleVote {
                 .collect()
         };
         let own = words(name);
-        words(title)
-            .iter()
-            .any(|w| own.contains(w))
-            .then(|| (name.clone(), category.clone()))
+        let shares_a_word = words(title).iter().any(|w| own.contains(w));
+        // Or the title is the line that was under the header: the pane's
+        // header line missed, its category line read as the title.
+        let is_its_subtitle = self
+            .roster_subtitle
+            .as_deref()
+            .is_some_and(|s| s == board::normalise_title(title));
+        (shares_a_word || is_its_subtitle).then(|| (name.clone(), category.clone()))
     }
 
     /// The games the database already holds under free titles.
@@ -920,7 +949,7 @@ mod tests {
         );
         let mut v = TitleVote::default();
         assert_eq!(v.continuity("Mayor vvorid", 0), None);
-        v.saw_roster(&kk.0, kk.1.as_deref(), 0);
+        v.saw_roster(&kk.0, kk.1.as_deref(), Some("Any%"), 0);
         for t in ["Mayor vvorid", "AWN IN Mayor vvorid", "NIQNt Mayor vvorid"] {
             assert_eq!(v.continuity(t, 60_000), Some(kk.clone()), "{t:?}");
             assert_eq!(
@@ -932,8 +961,21 @@ mod tests {
         // A word of fewer than five letters, or none of its own: nothing.
         assert_eq!(v.continuity("wn in NIQht", 60_000), None);
         assert_eq!(v.continuity("Dragon Warrior II", 60_000), None);
-        // Memory runs out with the vote's.
+        // Memory runs out with the vote's, unless continuity itself refreshed it.
         assert_eq!(v.continuity("Mayor vvorid", TITLE_MEMORY_MS + 1), None);
+        v.refresh_roster(TITLE_MEMORY_MS);
+        assert_eq!(
+            v.continuity("Mayor vvorid", TITLE_MEMORY_MS + 1),
+            Some(kk.clone())
+        );
+        // The line under a roster-named header, read as the title on a pass
+        // the header line was missed, is that game and not one of its own.
+        let mut e = TitleVote::default();
+        let eb = ("Excitebike".to_string(), Some("Big 20 #23".to_string()));
+        e.saw_roster(&eb.0, eb.1.as_deref(), Some("Selection A"), 0);
+        assert_eq!(e.continuity("Selection A", 60_000), Some(eb.clone()));
+        assert_eq!(e.observe(Some("Selection A"), None, 8, &cfg, 60_000), None);
+        assert_eq!(e.continuity("Selection B", 60_000), None);
     }
 
     /// A damaged read of the tracked game's own header never becomes a game
