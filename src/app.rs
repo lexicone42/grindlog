@@ -1569,10 +1569,11 @@ fn apply_identity(
             crate::roster::canonical_foreign(t),
         ) {
             (Some(named), Some((g, _))) if named == g => {
-                vote.saw_roster(named, reading.named_category.as_deref(), at_ms);
+                vote.saw_roster(named, reading.named_category.as_deref(), category, at_ms);
             }
             (None, _) => {
                 if let Some((g, c)) = vote.continuity(t, at_ms) {
+                    vote.refresh_roster(at_ms);
                     reading.named = Some(g);
                     reading.named_category = c;
                     if !reading.against.contains(&identity::Signal::NamedAnother) {
@@ -2009,6 +2010,23 @@ const UNNAMED_AGAIN_MS: i64 = 15 * 60 * 1000;
 
 /// How long a pane has to have named nothing before the judge counts passes.
 const UNNAMED_SPAN_MS: i64 = 2 * 60 * 1000;
+
+/// How long after a lock switch a close the fabrication rule would drop is
+/// held instead, while nothing has named the pane since the switch: the
+/// first Pac-Mania of 2026-10-19 closed two and a half minutes after the
+/// switch, with the new layout's passes still reading nothing, and the
+/// very next pass named it.
+const HELD_CLOSE_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+/// How long such a close waits for that pane pass before it goes through
+/// as it came.
+const HELD_CLOSE_MS: i64 = 90 * 1000;
+
+/// How long a pane named by anything stays known to the judge: the vote's
+/// memory. Double Dragon II's header reads in pieces for stretches longer
+/// than five minutes, and the judge let the right layout go in the middle
+/// of a run; a pane that named a game within the quarter hour is known.
+const NAMED_HOLD_MS: i64 = 15 * 60 * 1000;
 
 /// Track a board whose `[[games]]` entry asks for `mode = "board"`: the rows
 /// are different games run back to back, and a row that gains a time is a
@@ -2888,6 +2906,19 @@ pub async fn run(cfg: Config) -> Result<()> {
     // every ten seconds and three of them at a broadcast's first scene are
     // no verdict on the tracked game's own layout.
     let mut unnamed_since: Option<i64> = None;
+    // When the pane under the lock last named anything. A pass with no
+    // title read is no evidence either way, and a pane named within the
+    // last five minutes is known: the judge fired mid-run on the right
+    // layout whenever three passes missed the header line, and each
+    // release cost a probe and sometimes a run.
+    let mut last_named_t: i64 = i64::MIN / 2;
+    // The attempt counter as the pane pass last read it off the header line,
+    // and when. The counter crop is read every two seconds at the crop's
+    // upscale and the header line once a minute at the pane's; where the two
+    // disagree within two minutes the crop is the one that moved (a re-lock
+    // twelve pixels up read Kid Klown's 14 as 44 on nine attempts while the
+    // header line read 14 through 28 on two hundred passes).
+    let mut last_header_counter: Option<(i64, i64)> = None;
     // The game the layout says it is timing, and whether runs may be
     // recorded from it. The verdict comes from the board (see `identity`),
     // fingerprinted against the configured game and the highest attempt
@@ -2935,6 +2966,14 @@ pub async fn run(cfg: Config) -> Result<()> {
     // until the next pane pass decides whether it finished or paused (see
     // the freeze block ahead of the event loop).
     let mut held_freeze: Option<(Event, i64)> = None;
+    // A close the fabrication rule would drop, arriving within a minute and
+    // a half of a lock switch and before the new layout's first pane pass:
+    // held for one forced pane pass, which names the pane the run was on,
+    // and re-injected. The run in progress at every change of game — the
+    // first Pac-Mania of 2026-10-19, 10:21 — closed nineteen seconds after
+    // the judge switched layouts and was dropped as unfilable.
+    let mut held_close: Option<(Event, i64)> = None;
+    let mut last_lock_switch_t: i64 = i64::MIN / 2;
     // The marathon in progress, when the board is one a `[[games]]` entry
     // asks to track by completions, the tag its session was given, and how
     // many consecutive pane passes read a board belonging to another game.
@@ -3315,24 +3354,38 @@ pub async fn run(cfg: Config) -> Result<()> {
                         cnn_declines += 1;
                     }
                 }
-                // The geometry-free reader before the glyph templates: the
-                // templates are this streamer's two Ninja Gaiden themes, and on
-                // Dragon Warrior II's font they read resets that never were.
-                let any_hit = if cnn_hit.is_some() {
-                    None
-                } else {
+                // Which of the geometry-free reader and the glyph templates reads
+                // first depends on whose pane this is. The templates are cut
+                // from this streamer's own configured panes and read them
+                // best; on a found pane (Dragon Warrior II's font) they read
+                // resets that never were, so there the geometry-free reader
+                // goes first. The other way round on a configured pane, the
+                // geometry-free reader read Excitebike's 11.89 as 17.39 once
+                // in a thousand frames, and each one was a desync reset and a
+                // run filed twice.
+                let read_any = || {
                     any_reader
                         .as_ref()
                         .and_then(|r| r.read(&g_luma).or_else(|| r.read(&g)))
                         .filter(|rd| parse_timer_text(&rd.text).is_some())
                 };
-                let glyph_hit = if cnn_hit.is_some() || any_hit.is_some() {
-                    None
-                } else {
+                let read_glyph = || {
                     glyph_reader
                         .as_ref()
                         .and_then(|gr| gr.read(&g))
                         .filter(|rd| parse_timer_text(&rd.text).is_some())
+                };
+                let any_first = active_layout == found_layout;
+                let (any_hit, glyph_hit) = if cnn_hit.is_some() {
+                    (None, None)
+                } else if any_first {
+                    let a = read_any();
+                    let gl = if a.is_some() { None } else { read_glyph() };
+                    (a, gl)
+                } else {
+                    let gl = read_glyph();
+                    let a = if gl.is_some() { None } else { read_any() };
+                    (a, gl)
                 };
                 if glyph_reader.is_some() && cnn_hit.is_none() && any_hit.is_none() {
                     if glyph_hit.is_some() {
@@ -4132,6 +4185,21 @@ pub async fn run(cfg: Config) -> Result<()> {
                         format!("{name} {:+},{:+}{geom_note}", new_off.0, new_off.1),
                     );
                 }
+                if new_layout != active_layout {
+                    last_lock_switch_t = t;
+                    // A run orphaned under the old layout was orphaned by that
+                    // layout's crops on this pane (a garbage header convicted
+                    // the gate with nothing named); the new layout's passes
+                    // judge the pane afresh, and the run takes the name they
+                    // give it. The first Pac-Mania of 2026-10-19 was named two
+                    // seconds after the switch and dropped anyway.
+                    if let Some(cr) = current.as_mut() {
+                        if cr.orphaned {
+                            info!("the run open across the layout switch may yet be named by the new layout's pane");
+                            cr.orphaned = false;
+                        }
+                    }
+                }
                 active_layout = new_layout;
                 active_off = new_off;
                 active_regs = new_regs;
@@ -4630,7 +4698,19 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
                 if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&cp)?).await {
                     debug!("counter ocr: {:?} (crop {cx},{cy} {cw2}x{ch2})", txt.trim());
-                    if let Some(v) = crate::timeparse::parse_counter(txt.trim()) {
+                    // On a foreign pane only: there the crop is inherited geometry
+                    // and the header line the surer read. On the tracked
+                    // game's own pane the crop is the calibrated reader, and
+                    // deferring to the header line there cost six of thirteen
+                    // attempts their number on a 480p Ninja Gaiden window.
+                    let header_disagrees = |v: i64| {
+                        !tracked
+                            && last_header_counter
+                                .is_some_and(|(hv, ht)| t - ht <= 120_000 && hv != v)
+                    };
+                    if let Some(v) = crate::timeparse::parse_counter(txt.trim())
+                        .filter(|v| !header_disagrees(*v))
+                    {
                         observe_counter(
                             &mut counters,
                             &pool,
@@ -4777,6 +4857,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                         .await?;
                     }
                     let board = with_counter(board, last_counter_seen, t);
+                    if let Some(v) = board
+                        .counter
+                        .as_deref()
+                        .and_then(crate::timeparse::parse_counter)
+                    {
+                        last_header_counter = Some((v, t));
+                    }
                     let named = apply_identity(
                         &readings,
                         &board,
@@ -4798,23 +4885,62 @@ pub async fn run(cfg: Config) -> Result<()> {
                     // whose pane names the board wins) is made again with a
                     // pane that can be read. Once per quarter hour.
                     let recently = t - last_unnamed_unlock_t < UNNAMED_AGAIN_MS;
+                    // Evidence only: a pass that named something counts for
+                    // the layout; a pass that read a title and named nothing,
+                    // with nothing named for five minutes, counts against it;
+                    // a pass with no title read, or soon after a name, is no
+                    // evidence either way and neither counts nor resets.
+                    // A foreign-named run in progress on this layout is a pane
+                    // that has been named, whatever its header reads between
+                    // the passes; Double Dragon II's read in pieces for twelve
+                    // minutes between two attempts.
+                    let run_named = current.as_ref().is_some_and(|c| c.foreign.is_some());
+                    let against =
+                        board.title.is_some() && !run_named && t - last_named_t >= NAMED_HOLD_MS;
                     if named {
+                        last_named_t = t;
                         unnamed_since = None;
-                    } else if unnamed_since.is_none() {
-                        unnamed_since = Some(t);
-                    }
-                    let too_soon = unnamed_since.is_some_and(|s| t - s < UNNAMED_SPAN_MS);
-                    if let Some(Unlock::Unnamed { passes }) =
-                        lock.pane_named(named || recently || too_soon)
-                    {
-                        info!(
+                        lock.pane_named(true);
+                    } else if against {
+                        if unnamed_since.is_none() {
+                            unnamed_since = Some(t);
+                        }
+                        // The layout the judge put the lock on is no better: its
+                        // pane reads titles and names nothing too, a minute in.
+                        // The shun is lifted, so a lock lost from here (the
+                        // timer dark under crops not drawn for this pane) goes
+                        // back by rows at once instead of after the quarter
+                        // hour; on 2026-10-19 that quarter hour under "default"
+                        // cost two Double Dragon II attempts and forty minutes.
+                        if shunned_layout
+                            .is_some_and(|(l, since)| l != active_layout && t - since >= 60_000)
+                        {
+                            info!(
+                                "layout {:?} names nothing either; the layout let go before it may compete again",
+                                layout_names[active_layout]
+                            );
+                            shunned_layout = None;
+                            // And the judge may move the lock on at once: this
+                            // layout read Double Dragon II's timer on every frame
+                            // of two attempts while its pane named nothing, and
+                            // nothing may start on an unnamed foreign pane, so
+                            // the quarter hour it would otherwise have held the
+                            // lock recorded nothing.
+                            last_unnamed_unlock_t = i64::MIN / 2;
+                        }
+                        let too_soon = unnamed_since.is_some_and(|s| t - s < UNNAMED_SPAN_MS);
+                        if let Some(Unlock::Unnamed { passes }) =
+                            lock.pane_named(recently || too_soon)
+                        {
+                            info!(
                             "layout {:?} explains the timer but its pane named nothing on {passes} passes; probing layouts again",
                             layout_names[active_layout]
                         );
-                        health.event(at_ms, "unnamed", layout_names[active_layout].clone());
-                        last_unnamed_unlock_t = t;
-                        shunned_layout = Some((active_layout, t));
-                        unnamed_since = None;
+                            health.event(at_ms, "unnamed", layout_names[active_layout].clone());
+                            last_unnamed_unlock_t = t;
+                            shunned_layout = Some((active_layout, t));
+                            unnamed_since = None;
+                        }
                     }
                     shadow_board(&board, &cfg, &mut last_board_snapshot, &mut health, at_ms);
                     log_board(&board_log, &board, t, at_ms);
@@ -5003,6 +5129,17 @@ pub async fn run(cfg: Config) -> Result<()> {
         if let Some(Unlock::NoMarathon) = lock.tick(t, marathon_active) {
             info!("no marathon in force on the board-granted lock; probing layouts again");
         }
+        // A close held for the pane pass forced for it (see `held_close`):
+        // back into this frame's events once a pass has happened, or when
+        // the hold runs out, to be decided by the ordinary rule below with
+        // whatever the pass named.
+        if let Some((ev, since)) = held_close.as_ref() {
+            if passed_pane.is_some() || t - since > HELD_CLOSE_MS {
+                let ev = ev.clone();
+                held_close = None;
+                events.insert(0, ev);
+            }
+        }
         // A freeze held from the last frame, decided by the pane pass forced
         // for it — or let through as it came when no pass happened within
         // FREEZE_HOLD_MS (the layout lost its lock in the same moment),
@@ -5159,7 +5296,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             }
             // Not the tracked game's, and not anyone else's either: drop it.
             // See `close_would_fabricate`.
-            if close_would_fabricate(
+            let would_drop = close_would_fabricate(
                 pane_identity.ok(),
                 pane_other_passes >= 2,
                 current.as_ref().is_some_and(|c| c.orphaned),
@@ -5168,7 +5305,20 @@ pub async fn run(cfg: Config) -> Result<()> {
                     .and_then(|c| c.foreign.as_ref())
                     .or(foreign_target.as_ref()),
                 &ev,
-            ) {
+            );
+            if would_drop
+                && held_close.is_none()
+                && t - last_lock_switch_t <= HELD_CLOSE_WINDOW_MS
+                && last_named_t < last_lock_switch_t
+            {
+                info!(
+                    "a run closing just after the lock switched layouts, nothing naming it yet: holding it for a pane pass"
+                );
+                held_close = Some((ev.clone(), t));
+                last_sob_read_t = i64::MIN / 2;
+                continue;
+            }
+            if would_drop {
                 warn!(
                     "dropping a run closing on a board the gate could not name: \
                      not {:?}, and nothing to file it under",
