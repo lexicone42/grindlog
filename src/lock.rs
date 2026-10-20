@@ -63,6 +63,11 @@ pub enum Unlock {
     },
     /// A board-granted lock with no marathon in force after the hold.
     NoMarathon,
+    /// The pane under a timer-granted lock named nothing on this many
+    /// passes running: not the tracked game, nothing the rosters or an
+    /// alias know, no vote. The layout explains the timer and nothing else,
+    /// and another layout's pane may name the board.
+    Unnamed { passes: u32 },
 }
 
 /// The thresholds. The defaults are the frame loop's; `dark_frames` comes
@@ -98,6 +103,9 @@ impl LockCfg {
     }
 }
 
+/// Pane passes naming nothing before a timer-granted lock is let go.
+pub const UNNAMED_PASSES: u32 = 3;
+
 #[derive(Debug, Clone)]
 pub struct LockState {
     cfg: LockCfg,
@@ -113,6 +121,8 @@ pub struct LockState {
     clipped: u32,
     board_hit: Option<(usize, u32)>,
     board_probe_frames: u32,
+    /// Pane passes running on which the pane named nothing.
+    unnamed: u32,
 }
 
 impl LockState {
@@ -136,6 +146,7 @@ impl LockState {
             clipped: 0,
             board_hit: None,
             board_probe_frames: 0,
+            unnamed: 0,
         }
     }
 
@@ -254,6 +265,7 @@ impl LockState {
         self.quality_parsed = 0;
         self.clipped = 0;
         self.dark = 0;
+        self.unnamed = 0;
     }
 
     /// A locked timer read came back clipped against the crop edge, or not:
@@ -310,6 +322,31 @@ impl LockState {
 
     /// One frame passed: a board-granted lock with no marathon in force
     /// `board_hold_ms` after the grant is let go.
+    /// One pane pass under the lock: did the pane name anything? Three in a
+    /// row that named nothing let a timer-granted lock go. On 2026-10-19 the
+    /// Ninja Gaiden layout locked on Pac-Mania's timer seven seconds into
+    /// the broadcast, before the pane could be read; its header crop then
+    /// read garbage for two hours, four runs were dropped as unfilable, and
+    /// the layout whose pane reads "Pac-Mania (NES)" never got to compete
+    /// because a lock that keeps reading a timer is never judged again.
+    pub fn pane_named(&mut self, named: bool) -> Option<Unlock> {
+        if self.single || !self.locked() || self.is_board() {
+            self.unnamed = 0;
+            return None;
+        }
+        if named {
+            self.unnamed = 0;
+            return None;
+        }
+        self.unnamed += 1;
+        if self.unnamed >= UNNAMED_PASSES {
+            let passes = self.unnamed;
+            self.unlock();
+            return Some(Unlock::Unnamed { passes });
+        }
+        None
+    }
+
     pub fn tick(&mut self, t: i64, marathon_active: bool) -> Option<Unlock> {
         match self.lock {
             Lock::Board { since_ms, .. }
@@ -332,6 +369,30 @@ impl LockState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Three pane passes naming nothing let a timer-granted lock go; a pass
+    /// that names something starts the count over, and a board-granted lock
+    /// is never judged this way.
+    #[test]
+    fn a_pane_naming_nothing_three_times_lets_a_timer_lock_go() {
+        let mut s = st(3);
+        s.grant_timer(1, (0, 0));
+        assert!(s.pane_named(false).is_none());
+        assert!(s.pane_named(false).is_none());
+        assert!(s.pane_named(true).is_none());
+        assert!(s.pane_named(false).is_none());
+        assert!(s.pane_named(false).is_none());
+        assert!(matches!(
+            s.pane_named(false),
+            Some(Unlock::Unnamed { passes: 3 })
+        ));
+        assert!(!s.locked());
+        s.grant_board(2, 90, 0);
+        for _ in 0..5 {
+            assert!(s.pane_named(false).is_none());
+        }
+        assert!(s.locked());
+    }
 
     fn st(layouts: usize) -> LockState {
         LockState::new(LockCfg::with_dark_frames(30), layouts)
