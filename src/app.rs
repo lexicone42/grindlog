@@ -4920,6 +4920,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                                 layout_names[active_layout]
                             );
                             shunned_layout = None;
+                            // And the judge may move the lock on at once: this
+                            // layout read Double Dragon II's timer on every frame
+                            // of two attempts while its pane named nothing, and
+                            // nothing may start on an unnamed foreign pane, so
+                            // the quarter hour it would otherwise have held the
+                            // lock recorded nothing.
+                            last_unnamed_unlock_t = i64::MIN / 2;
                         }
                         let too_soon = unnamed_since.is_some_and(|s| t - s < UNNAMED_SPAN_MS);
                         if let Some(Unlock::Unnamed { passes }) =
