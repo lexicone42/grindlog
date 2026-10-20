@@ -2011,6 +2011,9 @@ const UNNAMED_AGAIN_MS: i64 = 15 * 60 * 1000;
 /// How long a pane has to have named nothing before the judge counts passes.
 const UNNAMED_SPAN_MS: i64 = 2 * 60 * 1000;
 
+/// How long a pane named by anything stays known to the judge.
+const NAMED_HOLD_MS: i64 = 5 * 60 * 1000;
+
 /// Track a board whose `[[games]]` entry asks for `mode = "board"`: the rows
 /// are different games run back to back, and a row that gains a time is a
 /// finished run of that game (see [`crate::marathon`]). Returns whether a
@@ -2889,6 +2892,12 @@ pub async fn run(cfg: Config) -> Result<()> {
     // every ten seconds and three of them at a broadcast's first scene are
     // no verdict on the tracked game's own layout.
     let mut unnamed_since: Option<i64> = None;
+    // When the pane under the lock last named anything. A pass with no
+    // title read is no evidence either way, and a pane named within the
+    // last five minutes is known: the judge fired mid-run on the right
+    // layout whenever three passes missed the header line, and each
+    // release cost a probe and sometimes a run.
+    let mut last_named_t: i64 = i64::MIN / 2;
     // The game the layout says it is timing, and whether runs may be
     // recorded from it. The verdict comes from the board (see `identity`),
     // fingerprinted against the configured game and the highest attempt
@@ -3316,24 +3325,38 @@ pub async fn run(cfg: Config) -> Result<()> {
                         cnn_declines += 1;
                     }
                 }
-                // The geometry-free reader before the glyph templates: the
-                // templates are this streamer's two Ninja Gaiden themes, and on
-                // Dragon Warrior II's font they read resets that never were.
-                let any_hit = if cnn_hit.is_some() {
-                    None
-                } else {
+                // Which of the geometry-free reader and the glyph templates reads
+                // first depends on whose pane this is. The templates are cut
+                // from this streamer's own configured panes and read them
+                // best; on a found pane (Dragon Warrior II's font) they read
+                // resets that never were, so there the geometry-free reader
+                // goes first. The other way round on a configured pane, the
+                // geometry-free reader read Excitebike's 11.89 as 17.39 once
+                // in a thousand frames, and each one was a desync reset and a
+                // run filed twice.
+                let read_any = || {
                     any_reader
                         .as_ref()
                         .and_then(|r| r.read(&g_luma).or_else(|| r.read(&g)))
                         .filter(|rd| parse_timer_text(&rd.text).is_some())
                 };
-                let glyph_hit = if cnn_hit.is_some() || any_hit.is_some() {
-                    None
-                } else {
+                let read_glyph = || {
                     glyph_reader
                         .as_ref()
                         .and_then(|gr| gr.read(&g))
                         .filter(|rd| parse_timer_text(&rd.text).is_some())
+                };
+                let any_first = active_layout == found_layout;
+                let (any_hit, glyph_hit) = if cnn_hit.is_some() {
+                    (None, None)
+                } else if any_first {
+                    let a = read_any();
+                    let gl = if a.is_some() { None } else { read_glyph() };
+                    (a, gl)
+                } else {
+                    let gl = read_glyph();
+                    let a = if gl.is_some() { None } else { read_any() };
+                    (a, gl)
                 };
                 if glyph_reader.is_some() && cnn_hit.is_none() && any_hit.is_none() {
                     if glyph_hit.is_some() {
@@ -4800,13 +4823,17 @@ pub async fn run(cfg: Config) -> Result<()> {
                     // pane that can be read. Once per quarter hour.
                     let recently = t - last_unnamed_unlock_t < UNNAMED_AGAIN_MS;
                     if named {
+                        last_named_t = t;
+                    }
+                    let known = named || t - last_named_t < NAMED_HOLD_MS || board.title.is_none();
+                    if known {
                         unnamed_since = None;
                     } else if unnamed_since.is_none() {
                         unnamed_since = Some(t);
                     }
                     let too_soon = unnamed_since.is_some_and(|s| t - s < UNNAMED_SPAN_MS);
                     if let Some(Unlock::Unnamed { passes }) =
-                        lock.pane_named(named || recently || too_soon)
+                        lock.pane_named(known || recently || too_soon)
                     {
                         info!(
                             "layout {:?} explains the timer but its pane named nothing on {passes} passes; probing layouts again",
