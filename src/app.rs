@@ -2906,6 +2906,12 @@ pub async fn run(cfg: Config) -> Result<()> {
     // every ten seconds and three of them at a broadcast's first scene are
     // no verdict on the tracked game's own layout.
     let mut unnamed_since: Option<i64> = None;
+    // When the judge put the lock where it is: a layout the judge chose has
+    // to prove itself, so on it a pass with no title read counts against as
+    // well — "default", chosen for Double Dragon II's pane, read its timer
+    // on every frame of two attempts and no title at all for ten minutes,
+    // and a no-title pass being no evidence, the judge never moved on.
+    let mut judge_chose_t: Option<i64> = None;
     // When the pane under the lock last named anything. A pass with no
     // title read is no evidence either way, and a pane named within the
     // last five minutes is known: the judge fired mid-run on the right
@@ -4895,11 +4901,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                     // the passes; Double Dragon II's read in pieces for twelve
                     // minutes between two attempts.
                     let run_named = current.as_ref().is_some_and(|c| c.foreign.is_some());
-                    let against =
-                        board.title.is_some() && !run_named && t - last_named_t >= NAMED_HOLD_MS;
+                    let against = (board.title.is_some() || judge_chose_t.is_some())
+                        && !run_named
+                        && t - last_named_t >= NAMED_HOLD_MS;
                     if named {
                         last_named_t = t;
                         unnamed_since = None;
+                        judge_chose_t = None;
                         lock.pane_named(true);
                     } else if against {
                         if unnamed_since.is_none() {
