@@ -936,11 +936,13 @@ and files the Pac-Mania runs.
 
 The attempt counter is read two ways on a foreign pane: the counter crop
 every two seconds at the crop's upscale, and the header line once a
-minute at the pane's. Where the two disagree within two minutes the crop
-is the one that moved: a re-lock twelve pixels up read Kid Klown's 14 as
-44 on nine attempts while the header line read 14 through 28 on two
-hundred passes, so a crop read that disagrees with a recent header-line
-read is discarded.
+minute at the pane's. On a foreign pane the crop is inherited geometry
+and the header line the surer read: a re-lock twelve pixels up read Kid
+Klown's 14 as 44 on nine attempts while the header line read 14 through
+28 on two hundred passes, so there a crop read that disagrees with a
+recent header-line read is discarded. On the tracked game's own pane the
+crop is the calibrated reader and is believed as before (deferring to the
+header line there cost six of thirteen attempts their number).
 
 What the finder does not do: read splits or the counter for a found pane
 (`found` inherits the base layout's rectangles for those), or move the lock

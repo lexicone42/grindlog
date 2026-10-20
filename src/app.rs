@@ -4679,8 +4679,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
                 if let Ok(txt) = ocr_engine.recognize(&ocr::to_png(&cp)?).await {
                     debug!("counter ocr: {:?} (crop {cx},{cy} {cw2}x{ch2})", txt.trim());
+                    // On a foreign pane only: there the crop is inherited geometry
+                    // and the header line the surer read. On the tracked
+                    // game's own pane the crop is the calibrated reader, and
+                    // deferring to the header line there cost six of thirteen
+                    // attempts their number on a 480p Ninja Gaiden window.
                     let header_disagrees = |v: i64| {
-                        last_header_counter.is_some_and(|(hv, ht)| t - ht <= 120_000 && hv != v)
+                        !tracked
+                            && last_header_counter
+                                .is_some_and(|(hv, ht)| t - ht <= 120_000 && hv != v)
                     };
                     if let Some(v) = crate::timeparse::parse_counter(txt.trim())
                         .filter(|v| !header_disagrees(*v))
