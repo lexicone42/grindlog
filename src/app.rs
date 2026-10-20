@@ -2011,8 +2011,15 @@ const UNNAMED_AGAIN_MS: i64 = 15 * 60 * 1000;
 /// How long a pane has to have named nothing before the judge counts passes.
 const UNNAMED_SPAN_MS: i64 = 2 * 60 * 1000;
 
-/// How long a close is held after a lock switch for the new layout's first
-/// pane pass to name the run it belongs to.
+/// How long after a lock switch a close the fabrication rule would drop is
+/// held instead, while nothing has named the pane since the switch: the
+/// first Pac-Mania of 2026-10-19 closed two and a half minutes after the
+/// switch, with the new layout's passes still reading nothing, and the
+/// very next pass named it.
+const HELD_CLOSE_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+/// How long such a close waits for that pane pass before it goes through
+/// as it came.
 const HELD_CLOSE_MS: i64 = 90 * 1000;
 
 /// How long a pane named by anything stays known to the judge: the vote's
@@ -5260,8 +5267,8 @@ pub async fn run(cfg: Config) -> Result<()> {
             );
             if would_drop
                 && held_close.is_none()
-                && t - last_lock_switch_t <= HELD_CLOSE_MS
-                && last_sob_read_t < last_lock_switch_t
+                && t - last_lock_switch_t <= HELD_CLOSE_WINDOW_MS
+                && last_named_t < last_lock_switch_t
             {
                 info!(
                     "a run closing just after the lock switched layouts, nothing naming it yet: holding it for a pane pass"

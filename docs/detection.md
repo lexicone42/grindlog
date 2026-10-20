@@ -928,8 +928,8 @@ cost the right layout its lock. The layout let go is shunned by the next
 lock's choice among the layouts that fit the timer, and the judge sits
 again a quarter hour later at the earliest. The run in progress at the
 switch is kept: a close the fabrication rule would drop, arriving within
-ninety seconds of a lock switch and before the new layout's first pane
-pass, is held for one forced pass and decided by what it names (the
+five minutes of a lock switch while nothing has named the pane since,
+is held for one forced pass and decided by what it names (the
 first Pac-Mania of the day, 10:21, closed nineteen seconds after the
 switch). In replay the lock walks `ng-theme` to `big20-mid` to `default`
 and files the Pac-Mania runs.
