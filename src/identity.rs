@@ -558,6 +558,10 @@ const CATEGORY_WORDS: [&str; 10] = [
 #[derive(Debug, Default)]
 pub struct TitleVote {
     clusters: Vec<Cluster>,
+    /// The game the rosters last named on this pane, and when: a pane the
+    /// rosters named Kid Klown in Night Mayor World ten minutes ago and now
+    /// read "Mayor vvorid" is still that pane. See [`TitleVote::continuity`].
+    roster_seen: Option<(String, Option<String>, i64)>,
     /// Games already in the database under a free title: a name the vote
     /// settles on within a fifth of its length of one of these (the fold)
     /// is filed under that spelling, so one game keeps one history across
@@ -590,6 +594,9 @@ impl TitleVote {
             .retain(|c| at_ms - c.last_ms <= TITLE_MEMORY_MS);
         let title = title.map(str::trim).filter(|t| !t.is_empty())?;
         if !plausible_game_title(title, rows, cfg) {
+            return None;
+        }
+        if self.continuity(title, at_ms).is_some() {
             return None;
         }
         let (stem, sequel) = crate::roster::fold_title(title);
@@ -677,6 +684,38 @@ impl TitleVote {
             kq == sequel && (ks == stem || board::edit_close(&ks, &stem))
         });
         Some((known.cloned().unwrap_or(name), c.category()))
+    }
+
+    /// The rosters named `name` on this pane at `at_ms`.
+    pub fn saw_roster(&mut self, name: &str, category: Option<&str>, at_ms: i64) {
+        self.roster_seen = Some((name.to_string(), category.map(str::to_string), at_ms));
+    }
+
+    /// The game the rosters named on this pane within the vote's memory,
+    /// when `title` carries a word of five letters or more of its name as
+    /// read: a 480p pane reads Kid Klown in Night Mayor World's header whole
+    /// on one pass in ten and as "Mayor vvorid", "AWN IN Mayor vvorid",
+    /// "NIQNt Mayor vvorid" the rest of the time, which the matcher cannot
+    /// place and the vote minted five games out of. Continuity, not a
+    /// dictionary: "Dragon Warrior II" on a pane that never read as Double
+    /// Dragon II shares a word with it and names nothing here.
+    pub fn continuity(&self, title: &str, at_ms: i64) -> Option<(String, Option<String>)> {
+        let (name, category, seen) = self.roster_seen.as_ref()?;
+        if at_ms - seen > TITLE_MEMORY_MS {
+            return None;
+        }
+        let words = |s: &str| -> Vec<String> {
+            board::normalise_title(s)
+                .split(' ')
+                .filter(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 5)
+                .map(str::to_string)
+                .collect()
+        };
+        let own = words(name);
+        words(title)
+            .iter()
+            .any(|w| own.contains(w))
+            .then(|| (name.clone(), category.clone()))
     }
 
     /// The games the database already holds under free titles.
@@ -866,6 +905,35 @@ mod tests {
             })
             .collect();
         c
+    }
+
+    /// A pane the rosters named keeps its name through reads the matcher
+    /// cannot place, and the vote does not mint a game of them; a pane they
+    /// never named gets no such help.
+    #[test]
+    fn a_roster_named_pane_keeps_its_name_through_damaged_reads() {
+        let mut cfg = Config::for_test_with_min_final(1);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        let kk = (
+            "Kid Klown in Night Mayor World".to_string(),
+            Some("Big 20 #23".to_string()),
+        );
+        let mut v = TitleVote::default();
+        assert_eq!(v.continuity("Mayor vvorid", 0), None);
+        v.saw_roster(&kk.0, kk.1.as_deref(), 0);
+        for t in ["Mayor vvorid", "AWN IN Mayor vvorid", "NIQNt Mayor vvorid"] {
+            assert_eq!(v.continuity(t, 60_000), Some(kk.clone()), "{t:?}");
+            assert_eq!(
+                v.observe(Some(t), Some("Any%"), 8, &cfg, 60_000),
+                None,
+                "{t:?}"
+            );
+        }
+        // A word of fewer than five letters, or none of its own: nothing.
+        assert_eq!(v.continuity("wn in NIQht", 60_000), None);
+        assert_eq!(v.continuity("Dragon Warrior II", 60_000), None);
+        // Memory runs out with the vote's.
+        assert_eq!(v.continuity("Mayor vvorid", TITLE_MEMORY_MS + 1), None);
     }
 
     /// A damaged read of the tracked game's own header never becomes a game

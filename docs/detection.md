@@ -347,6 +347,16 @@ minutes are forgotten, so an earlier game's name cannot be revived by a
 stray misread of a later one, and the vote is cleared when the tracked
 game returns.
 
+Continuity with the rosters: a pane the rosters named within the vote's
+memory and now read as a damaged form of that name — a word of five letters
+of it as read — is still that pane (`TitleVote::continuity`). On 2026-10-19
+a 480p pane read Kid Klown in Night Mayor World's header whole on one pass
+in ten and as "Mayor vvorid", "AWN IN Mayor vvorid", "NIQNt Mayor vvorid"
+the rest of the time; the matcher could not place those and the vote
+minted five games out of them. Continuity, not a dictionary: "Dragon
+Warrior II" on a pane that never read as Double Dragon II shares a word
+with it and names nothing here.
+
 And one rule that is not about naming: a run that closes while the header
 has read as another game on two passes running — not a fragment of the
 tracked game's, and not a damaged read of its name by the same test the
@@ -901,6 +911,20 @@ to look, and for that there are two uses:
   lock the same way. `tests/fixtures/pane/` holds the capture's union crop
   of both panes; the finder reads 1:28:47.83 off one and 1:29:26.63 off
   the other.
+
+A lock that explains the timer and nothing else is let go. The same day
+the Ninja Gaiden layout locked on Pac-Mania's timer seven seconds into the
+broadcast, before the pane could be read; its header crop read garbage for
+two hours, four runs were dropped as unfilable, and the layout whose pane
+reads "Pac-Mania (NES)" never got to compete, because a lock that keeps
+reading a timer was never judged again. Now a timer-granted lock whose pane
+names nothing (not the tracked game, nothing the rosters, an alias or the
+vote name) on three passes running, after two minutes of it, is let go
+(`lock::LockState::pane_named`), the layout is shunned by the next lock's
+choice among the layouts that fit the timer, and the judge sits again a
+quarter hour later at the earliest — so a pane nothing can read costs one
+re-probe a quarter hour, not a churn. In replay the lock walks `ng-theme`
+to `big20-mid` to `default` in six minutes and files the Pac-Mania runs.
 
 What the finder does not do: read splits or the counter for a found pane
 (`found` inherits the base layout's rectangles for those), or move the lock

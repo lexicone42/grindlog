@@ -1500,7 +1500,7 @@ fn apply_identity(
     seen_shapes: &mut std::collections::HashSet<String>,
     health: &mut db::SessionHealth,
     at_ms: i64,
-) {
+) -> bool {
     let title = board_read.title.as_deref().or(readings.game.as_deref());
     let category = board_read
         .subtitle
@@ -1559,6 +1559,30 @@ fn apply_identity(
             }
         }
     }
+    // Continuity with the rosters: a pane they named ten minutes ago and now
+    // read as a damaged form of that name ("Mayor vvorid" after "Kid Klown
+    // in Night Mayor World") is still that pane; the matcher cannot place
+    // the fragment and the vote would mint a game of it.
+    if let Some(t) = title {
+        match (
+            reading.named.as_deref(),
+            crate::roster::canonical_foreign(t),
+        ) {
+            (Some(named), Some((g, _))) if named == g => {
+                vote.saw_roster(named, reading.named_category.as_deref(), at_ms);
+            }
+            (None, _) => {
+                if let Some((g, c)) = vote.continuity(t, at_ms) {
+                    reading.named = Some(g);
+                    reading.named_category = c;
+                    if !reading.against.contains(&identity::Signal::NamedAnother) {
+                        reading.against.push(identity::Signal::NamedAnother);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     // The header reads as another game: not this one, and not a fragment of
     // it. Counted over passes running, for `close_would_fabricate`.
     let header_other = reading.against.contains(&identity::Signal::Header)
@@ -1611,6 +1635,17 @@ fn apply_identity(
             *pane_game = Some(name.to_string());
         }
     }
+    // Did the pane name anything: the tracked game (whole, a fragment or a
+    // damaged read of it), a game the rosters or the vote named, an alias?
+    // The lock's judge of a layout that explains the timer and nothing
+    // else (`lock::LockState::pane_named`).
+    let named = reading.named.is_some()
+        || title.is_some_and(|t| {
+            game_matches(t, &cfg.game.name)
+                || board::title_is_fragment_of(t, &cfg.game.name)
+                || identity::looks_like_tracked_name(t, cfg)
+                || board::names_an_alias(t, cfg)
+        });
     let verdict = id.verdict(&reading);
     // What the pass actually saw, once per distinct shape rather than once
     // a minute. Without this the only thing the log ever showed was the
@@ -1688,7 +1723,7 @@ fn apply_identity(
         _ => None,
     };
     let Some(ok) = changed else {
-        return;
+        return named;
     };
     let what = title.unwrap_or("another game");
     if ok {
@@ -1710,6 +1745,7 @@ fn apply_identity(
             format!("{what} ({})", reading.describe_against()),
         );
     }
+    named
 }
 
 /// Shadow mode of the board reader (`game.follow_title = "log"`): say what
@@ -1965,6 +2001,14 @@ impl MarathonKeep {
 /// recorded of the event it is picking up. Longer than his longest marathon
 /// (5h20m) and shorter than the gap to the next day's.
 const MARATHON_RECONCILE_MS: i64 = 8 * 60 * 60 * 1000;
+
+/// How long after a timer-granted lock was let go for a pane naming nothing
+/// before that judge sits again: the vote's memory, so a pane nothing can
+/// read costs one re-probe a quarter hour and not one every three passes.
+const UNNAMED_AGAIN_MS: i64 = 15 * 60 * 1000;
+
+/// How long a pane has to have named nothing before the judge counts passes.
+const UNNAMED_SPAN_MS: i64 = 2 * 60 * 1000;
 
 /// Track a board whose `[[games]]` entry asks for `mode = "board"`: the rows
 /// are different games run back to back, and a row that gains a time is a
@@ -2830,6 +2874,20 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
     }
     let mut last_sob_read_t: i64 = i64::MIN / 2;
+    // When a timer-granted lock was last let go for a pane naming nothing:
+    // a pane nothing can read must not churn the lock every three passes.
+    let mut last_unnamed_unlock_t: i64 = i64::MIN / 2;
+    // The layout let go that way, shunned by the next lock's choice among the
+    // layouts that fit the timer for the same quarter hour: the re-probe
+    // picked the same layout back by its rows ("explains the timer too, and
+    // its splits column reads more rows") while the pane that reads
+    // "Pac-Mania (NES)" was an unnamed fit on that pass.
+    let mut shunned_layout: Option<(usize, i64)> = None;
+    // When the pane under this lock first named nothing: the judge counts
+    // passes only after two minutes of it, since the unsettled pane reads
+    // every ten seconds and three of them at a broadcast's first scene are
+    // no verdict on the tracked game's own layout.
+    let mut unnamed_since: Option<i64> = None;
     // The game the layout says it is timing, and whether runs may be
     // recorded from it. The verdict comes from the board (see `identity`),
     // fingerprinted against the configured game and the highest attempt
@@ -3844,8 +3902,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                     // rows only after. On the tracked game's own pane the rows
                     // decide, as they always have.
                     let foreign = fits.iter().any(|f| f.foreign);
+                    let shunned = shunned_layout
+                        .filter(|(_, since)| t - since < UNNAMED_AGAIN_MS)
+                        .map(|(l, _)| l);
                     let score = |f: &Fit| {
-                        if foreign {
+                        if Some(f.li) == shunned {
+                            (false, 0, 0)
+                        } else if foreign {
                             (f.named, u64::MAX - f.area, f.n as u64)
                         } else {
                             (f.named, f.n as u64, u64::MAX - f.area)
@@ -4125,7 +4188,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 } => info!(
                     "locked position reads poorly ({parsed}/{frames} parsed, {clipped} clipped in a row); probing layouts and offsets"
                 ),
-                Unlock::NoMarathon => {}
+                Unlock::NoMarathon | Unlock::Unnamed { .. } => {}
             }
         }
         // Fine drift: a nudge too small to break the timer still misaligns the
@@ -4714,7 +4777,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         .await?;
                     }
                     let board = with_counter(board, last_counter_seen, t);
-                    apply_identity(
+                    let named = apply_identity(
                         &readings,
                         &board,
                         &cfg,
@@ -4729,6 +4792,30 @@ pub async fn run(cfg: Config) -> Result<()> {
                         &mut health,
                         at_ms,
                     );
+                    // A layout that explains the timer and whose pane names
+                    // nothing three passes running is let go, so the probe's
+                    // choice among the layouts that fit the timer (the one
+                    // whose pane names the board wins) is made again with a
+                    // pane that can be read. Once per quarter hour.
+                    let recently = t - last_unnamed_unlock_t < UNNAMED_AGAIN_MS;
+                    if named {
+                        unnamed_since = None;
+                    } else if unnamed_since.is_none() {
+                        unnamed_since = Some(t);
+                    }
+                    let too_soon = unnamed_since.is_some_and(|s| t - s < UNNAMED_SPAN_MS);
+                    if let Some(Unlock::Unnamed { passes }) =
+                        lock.pane_named(named || recently || too_soon)
+                    {
+                        info!(
+                            "layout {:?} explains the timer but its pane named nothing on {passes} passes; probing layouts again",
+                            layout_names[active_layout]
+                        );
+                        health.event(at_ms, "unnamed", layout_names[active_layout].clone());
+                        last_unnamed_unlock_t = t;
+                        shunned_layout = Some((active_layout, t));
+                        unnamed_since = None;
+                    }
                     shadow_board(&board, &cfg, &mut last_board_snapshot, &mut health, at_ms);
                     log_board(&board_log, &board, t, at_ms);
                     marathon_active = track_marathon(
