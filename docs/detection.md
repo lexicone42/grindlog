@@ -926,7 +926,15 @@ evidence either way, and a pane named within the vote's memory is known,
 so Double Dragon II's header reading in pieces for ten minutes does not
 cost the right layout its lock. The layout let go is shunned by the next
 lock's choice among the layouts that fit the timer, and the judge sits
-again a quarter hour later at the earliest. The run in progress at the
+again a quarter hour later at the earliest — unless the layout it chose
+reads titles and names nothing either, a minute in, when the shun and
+the wait are both lifted: nothing may start on an unnamed foreign pane,
+so a layout that reads the timer and names nothing records nothing for
+as long as it holds the lock (two Double Dragon II attempts, once). A
+foreign-named run in progress counts the pane as named whatever its
+header reads between the passes, and a run orphaned under the old layout
+(a garbage header convicted the gate with nothing named) is judged afresh
+by the new one. The run in progress at the
 switch is kept: a close the fabrication rule would drop, arriving within
 five minutes of a lock switch while nothing has named the pane since,
 is held for one forced pass and decided by what it names (the
