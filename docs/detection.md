@@ -930,7 +930,9 @@ again a quarter hour later at the earliest — unless the layout it chose
 reads titles and names nothing either, a minute in, when the shun and
 the wait are both lifted: nothing may start on an unnamed foreign pane,
 so a layout that reads the timer and names nothing records nothing for
-as long as it holds the lock (two Double Dragon II attempts, once). A
+as long as it holds the lock (two Double Dragon II attempts, once). A layout the judge
+chose has to prove itself: on it a pass with no title read counts against
+as well, until it names something. A
 foreign-named run in progress counts the pane as named whatever its
 header reads between the passes, and a run orphaned under the old layout
 (a garbage header convicted the gate with nothing named) is judged afresh
