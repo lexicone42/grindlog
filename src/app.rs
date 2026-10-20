@@ -4904,6 +4904,20 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let against = (board.title.is_some() || judge_chose_t.is_some())
                         && !run_named
                         && t - last_named_t >= NAMED_HOLD_MS;
+                    // While the judge's own choice holds the lock, say what the
+                    // judge sees on every pass: the state is rare and what it
+                    // does next is what decides whether a game gets recorded.
+                    if let Some(chosen) = judge_chose_t {
+                        info!(
+                            "judge: on {:?} chosen {}s ago: title {}, named {named}, against {against}, run named {run_named}, last named {}s ago, unnamed since {:?}s, shunned {:?}",
+                            layout_names[active_layout],
+                            (t - chosen) / 1000,
+                            board.title.as_deref().map(|s| format!("{s:?}")).unwrap_or_else(|| "none".into()),
+                            (t - last_named_t).clamp(0, 99_999_999) / 1000,
+                            unnamed_since.map(|s| (t - s) / 1000),
+                            shunned_layout.map(|(l, _)| layout_names[l].clone()),
+                        );
+                    }
                     if named {
                         last_named_t = t;
                         unnamed_since = None;
@@ -4948,6 +4962,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                             last_unnamed_unlock_t = t;
                             shunned_layout = Some((active_layout, t));
                             unnamed_since = None;
+                            judge_chose_t = Some(t);
                         }
                     }
                     shadow_board(&board, &cfg, &mut last_board_snapshot, &mut health, at_ms);
