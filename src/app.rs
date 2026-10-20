@@ -4822,27 +4822,33 @@ pub async fn run(cfg: Config) -> Result<()> {
                     // whose pane names the board wins) is made again with a
                     // pane that can be read. Once per quarter hour.
                     let recently = t - last_unnamed_unlock_t < UNNAMED_AGAIN_MS;
+                    // Evidence only: a pass that named something counts for
+                    // the layout; a pass that read a title and named nothing,
+                    // with nothing named for five minutes, counts against it;
+                    // a pass with no title read, or soon after a name, is no
+                    // evidence either way and neither counts nor resets.
+                    let against = board.title.is_some() && t - last_named_t >= NAMED_HOLD_MS;
                     if named {
                         last_named_t = t;
-                    }
-                    let known = named || t - last_named_t < NAMED_HOLD_MS || board.title.is_none();
-                    if known {
                         unnamed_since = None;
-                    } else if unnamed_since.is_none() {
-                        unnamed_since = Some(t);
-                    }
-                    let too_soon = unnamed_since.is_some_and(|s| t - s < UNNAMED_SPAN_MS);
-                    if let Some(Unlock::Unnamed { passes }) =
-                        lock.pane_named(known || recently || too_soon)
-                    {
-                        info!(
+                        lock.pane_named(true);
+                    } else if against {
+                        if unnamed_since.is_none() {
+                            unnamed_since = Some(t);
+                        }
+                        let too_soon = unnamed_since.is_some_and(|s| t - s < UNNAMED_SPAN_MS);
+                        if let Some(Unlock::Unnamed { passes }) =
+                            lock.pane_named(recently || too_soon)
+                        {
+                            info!(
                             "layout {:?} explains the timer but its pane named nothing on {passes} passes; probing layouts again",
                             layout_names[active_layout]
                         );
-                        health.event(at_ms, "unnamed", layout_names[active_layout].clone());
-                        last_unnamed_unlock_t = t;
-                        shunned_layout = Some((active_layout, t));
-                        unnamed_since = None;
+                            health.event(at_ms, "unnamed", layout_names[active_layout].clone());
+                            last_unnamed_unlock_t = t;
+                            shunned_layout = Some((active_layout, t));
+                            unnamed_since = None;
+                        }
                     }
                     shadow_board(&board, &cfg, &mut last_board_snapshot, &mut health, at_ms);
                     log_board(&board_log, &board, t, at_ms);

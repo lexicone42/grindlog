@@ -870,9 +870,12 @@ fn plausible_game_title(title: &str, rows: usize, cfg: &Config) -> bool {
     }
     let norm = board::normalise_title(title);
     let words: Vec<&str> = norm.split(' ').filter(|w| !w.is_empty()).collect();
+    // A word of four letters at least: "Dal iw" (a Double Dragon II header
+    // in pieces) has five letters, five of them different, and two words
+    // of three and two, and read three times it became a game.
     if !words
         .iter()
-        .any(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 3)
+        .any(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 4)
     {
         return false;
     }
