@@ -4878,7 +4878,13 @@ pub async fn run(cfg: Config) -> Result<()> {
                     // with nothing named for five minutes, counts against it;
                     // a pass with no title read, or soon after a name, is no
                     // evidence either way and neither counts nor resets.
-                    let against = board.title.is_some() && t - last_named_t >= NAMED_HOLD_MS;
+                    // A foreign-named run in progress on this layout is a pane
+                    // that has been named, whatever its header reads between
+                    // the passes; Double Dragon II's read in pieces for twelve
+                    // minutes between two attempts.
+                    let run_named = current.as_ref().is_some_and(|c| c.foreign.is_some());
+                    let against =
+                        board.title.is_some() && !run_named && t - last_named_t >= NAMED_HOLD_MS;
                     if named {
                         last_named_t = t;
                         unnamed_since = None;
@@ -4886,6 +4892,22 @@ pub async fn run(cfg: Config) -> Result<()> {
                     } else if against {
                         if unnamed_since.is_none() {
                             unnamed_since = Some(t);
+                        }
+                        // The layout the judge put the lock on is no better: its
+                        // pane reads titles and names nothing too, a minute in.
+                        // The shun is lifted, so a lock lost from here (the
+                        // timer dark under crops not drawn for this pane) goes
+                        // back by rows at once instead of after the quarter
+                        // hour; on 2026-10-19 that quarter hour under "default"
+                        // cost two Double Dragon II attempts and forty minutes.
+                        if shunned_layout
+                            .is_some_and(|(l, since)| l != active_layout && t - since >= 60_000)
+                        {
+                            info!(
+                                "layout {:?} names nothing either; the layout let go before it may compete again",
+                                layout_names[active_layout]
+                            );
+                            shunned_layout = None;
                         }
                         let too_soon = unnamed_since.is_some_and(|s| t - s < UNNAMED_SPAN_MS);
                         if let Some(Unlock::Unnamed { passes }) =
