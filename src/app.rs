@@ -4187,6 +4187,18 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
                 if new_layout != active_layout {
                     last_lock_switch_t = t;
+                    // A run orphaned under the old layout was orphaned by that
+                    // layout's crops on this pane (a garbage header convicted
+                    // the gate with nothing named); the new layout's passes
+                    // judge the pane afresh, and the run takes the name they
+                    // give it. The first Pac-Mania of 2026-10-19 was named two
+                    // seconds after the switch and dropped anyway.
+                    if let Some(cr) = current.as_mut() {
+                        if cr.orphaned {
+                            info!("the run open across the layout switch may yet be named by the new layout's pane");
+                            cr.orphaned = false;
+                        }
+                    }
                 }
                 active_layout = new_layout;
                 active_off = new_off;
