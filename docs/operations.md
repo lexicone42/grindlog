@@ -123,3 +123,35 @@ fixture, rows AS READ, for hand-correction against the frame. For a frame at
 an offset of a VOD, a copy of `live.toml` with `source = "vod"`, `vod_id` and
 `start_secs` is the config; `locate --frames 1` on it writes
 `calibration/locate.png` with every layout's crops drawn.
+
+## The nightly self-audit
+
+Every failure of the first week under `follow_title = "any"` lived in the
+first minutes of a scene — the wrong layout locked before the pane could be
+read, a header read in pieces until the roster or the vote caught up — and
+every fix was proven by replaying the day on the fixed build. The cron line
+runs that replay by itself: `scripts/self-audit.sh` takes the newest archived
+VOD that is over and not yet audited, replays it on `target/release` with
+`live.toml` into `self-audit/` (`replay-big20.sh`), and compares the pass's
+practice rows with the live database's for the VOD's span. The report goes
+to `logs/self-audit.log`, one block per VOD:
+
+- `REPLAY-ONLY` — a run the live bot missed;
+- `LIVE-ONLY` — a live row the replay has no counterpart for (the same game
+  and category, starting within thirty seconds of each other, or the same
+  finish), flagged `UNNAMED` when no roster, no earlier day of the database
+  and not the tracked game knows the name — what a minted spelling looks
+  like (`MONSIer rary [Any%]`);
+- `MINTED` — a replay row under a name nothing knows: the replay's own
+  mistake, and the reason an import is refused.
+
+`scripts/self-audit.sh <vod> --import` lands the pass with
+`import-big20.sh --replace-live --deploy`, only when the replay minted
+nothing; live rows the replay lacks are kept, and a live row under a minted
+name is never deleted by it — those are listed with their ids for a hand
+`DELETE`. The cron line is report-only on purpose: read the block, then
+import. `SELF_AUDIT_PASS=<dir>` compares an existing pass instead of
+replaying. On 2026-10-20 the block read seven `REPLAY-ONLY` (six Monster
+Party and one Mega Man 6 that live had filed under "MONSIer rary" and "Mega
+hian") against seven `LIVE-ONLY … UNNAMED`, and nothing else: that is the
+shape of a day worth importing.

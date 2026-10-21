@@ -4,6 +4,8 @@
 # reference box's; edit REPO for another checkout.
 #
 # The two monitoring lines (healthcheck.sh, daily-summary.sh) deliver through
+# Grind Log: the nightly self-audit — replay yesterday's broadcast on the deployed build and report what the live bot missed, misnamed or invented (logs/self-audit.log). Report only; `--import` lands it.
+30 4 * * * PATH="/home/bryan/.local/bin:/usr/bin:/bin" OMP_THREAD_LIMIT=1 /datar/workspace/claude_code_experiments/ngtwitchtimer/scripts/self-audit.sh >> /datar/workspace/claude_code_experiments/ngtwitchtimer/logs/self-audit-cron.log 2>&1
 # scripts/notify.sh when NG_ALERT_URL (an ntfy topic or a Discord webhook) or
 # NG_ALERT_MAIL is set; with neither they only write logs/health.log and
 # logs/summary.log. Put the variables at the top of your own crontab as
