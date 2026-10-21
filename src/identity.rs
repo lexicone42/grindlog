@@ -566,6 +566,8 @@ pub struct TitleVote {
     /// the pane reads as the TITLE on the passes the header line is missed,
     /// and which is no game either.
     roster_subtitle: Option<String>,
+    /// The same line as read, for filing: "Any%" rather than "any".
+    roster_line: Option<String>,
     /// Games already in the database under a free title: a name the vote
     /// settles on within a fifth of its length of one of these (the fold)
     /// is filed under that spelling, so one game keeps one history across
@@ -715,7 +717,20 @@ impl TitleVote {
             .filter(|s| !s.is_empty())
         {
             self.roster_subtitle = Some(s);
+            self.roster_line = subtitle.map(display_category).filter(|l| !l.is_empty());
         }
+    }
+
+    /// The line read under the roster-named header, as read: what a run of
+    /// one of the race's games is filed under once the race is over. Sticky
+    /// across passes that cannot read the line, so a run does not flap
+    /// between "Any%" and the fallback.
+    pub fn roster_line(&self, at_ms: i64) -> Option<&str> {
+        let (_, _, seen) = self.roster_seen.as_ref()?;
+        if at_ms - seen > TITLE_MEMORY_MS {
+            return None;
+        }
+        self.roster_line.as_deref()
     }
 
     /// Continuity named the pane again: the memory runs from now. A chain
@@ -833,6 +848,34 @@ fn display_spelling(title: &str, sequel: Option<u32>) -> String {
 
 /// Could this header be the name of a game no roster lists? See
 /// [`TitleVote`] for what each refusal protects.
+/// A category line as read, kept to what a category is spelled with:
+/// letters, digits, spaces and the percent sign ("Any®% All" is "Any% All").
+pub fn display_category(read: &str) -> String {
+    read.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '%' || *c == ' ')
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Are two category lines the same category: equal, within the fold's
+/// distance, or one a fragment of the other of four characters or more
+/// ("Loop" of "From Sandbox to End Loop 1"), once reduced to letters, digits
+/// and the percent sign.
+pub fn same_category(a: &str, b: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '%')
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let (x, y) = (norm(a), norm(b));
+    let fragment =
+        x.chars().count() >= 4 && y.chars().count() >= 4 && (y.contains(&x) || x.contains(&y));
+    !x.is_empty() && (x == y || board::edit_close(&x, &y) || fragment)
+}
+
 /// A damaged read of the tracked game's own header: a word of four letters
 /// equal or edit-close to one of the tracked game's name. "Ninja (NCO",
 /// "Gaiden (NEO)" and "Ninja Gaigen (NTO" were read three times each on a

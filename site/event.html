@@ -226,6 +226,21 @@ if (D.kind === 'game') {
     const bestRun = fins.reduce((m, r) => (m == null || r.final_time_ms < m.final_time_ms) ? r : m, null);
     const latest = fins.length ? fins[fins.length - 1] : null;
     const avg = fins.length ? fins.reduce((n, r) => n + r.final_time_ms, 0) / fins.length : null;
+    // One game, more than one category: the race's task (its goal, named)
+    // and his own full game are not one record. Mega Man 6's "best 8:37"
+    // sat beside three 45-minute runs until these were told apart. A row
+    // inside a full run is the race's; a practice row filed under the
+    // race's own label is the race's too; anything else is its own.
+    const raceCat = D.race ? `Big 20 ${D.race.name}` : '';
+    const catOf = r => (r.kind === 'run' || (raceCat && r.category === raceCat)) ? 'race' : (r.category || 'other');
+    const catLabel = c => c === 'race' ? (D.race && D.race.goal ? D.race.goal : 'the race') : c;
+    const bestIn = {};
+    for (const r of fins) { const c = catOf(r); if (!bestIn[c] || r.final_time_ms < bestIn[c].final_time_ms) bestIn[c] = r; }
+    const cats = Object.keys(bestIn);
+    const multi = cats.length > 1;
+    const bestLine = multi
+      ? ' · best ' + cats.map(c => `${tf(bestIn[c])(bestIn[c].final_time_ms)} (${catLabel(c)})`).join(', ')
+      : (bestRun ? ` · best ${tf(bestRun)(bestRun.final_time_ms)}` : '');
     const days = [...new Set(pool.map(r => r.day))];
     const rate = played ? Math.round(100 * fins.length / played) : 0;
     const R = D.race;
@@ -244,7 +259,7 @@ if (D.kind === 'game') {
     document.getElementById('sub').textContent =
       (R ? `Big 20 ${R.name} · game ${R.n} of ${R.of || 20}${R.goal ? ' · ' + R.goal : ''} · ` : '') +
       `${played} attempt${played === 1 ? '' : 's'}${inRuns ? ` (${inRuns} inside full runs)` : ''}, ${fins.length} finished` +
-      (bestRun ? ` · best ${tf(bestRun)(bestRun.final_time_ms)}` : '') +
+      bestLine +
       (played > 1 ? ` · ${dshort(pool[0].started_at_ms)} to ${dshort(pool[played - 1].started_at_ms)}` : '');
     if (R) {
       document.getElementById('sub').insertAdjacentHTML('beforeend',
@@ -258,11 +273,23 @@ if (D.kind === 'game') {
     tiles.innerHTML =
       tile(played, played === 1 ? 'attempt' : 'attempts', `over ${days.length} day${days.length === 1 ? '' : 's'}` + (inRuns ? ` · ${inRuns} inside full runs` : '') + counterSpan) +
       tile(fins.length, 'finished', played ? `${rate}% of attempts` : '') +
-      tile(bestRun ? tf(bestRun)(bestRun.final_time_ms) : '—', 'best', bestRun ? when(bestRun) : 'no finish yet', 'gold') +
-      tile(latest ? tf(latest)(latest.final_time_ms) : '—', 'latest finish',
-           latest && latest !== bestRun ? `+${(latest.practice || bestRun.practice ? fmt : fmtS)(latest.final_time_ms - bestRun.final_time_ms)} off the best`
-           : latest ? 'is the best' : '') +
-      tile(avg != null ? fmt(avg) : '—', 'average finish', fins.length > 1 ? `over ${fins.length} finishes` : '') +
+      (multi
+        ? cats.map(c => tile(tf(bestIn[c])(bestIn[c].final_time_ms), `best · ${catLabel(c)}`, when(bestIn[c]), 'gold')).join('')
+        : tile(bestRun ? tf(bestRun)(bestRun.final_time_ms) : '—', 'best', bestRun ? when(bestRun) : 'no finish yet', 'gold')) +
+      (() => {
+        // The latest finish against the best of ITS category, and the
+        // average over that category: a 42:55 full game is not 34 minutes
+        // off an 8:37 race task.
+        const lc = latest ? catOf(latest) : null;
+        const lbest = lc ? bestIn[lc] : null;
+        const lfins = lc ? fins.filter(r => catOf(r) === lc) : fins;
+        const lavg = lfins.length ? lfins.reduce((n, r) => n + r.final_time_ms, 0) / lfins.length : null;
+        const catNote = multi && lc ? ` · ${catLabel(lc)}` : '';
+        return tile(latest ? tf(latest)(latest.final_time_ms) : '—', 'latest finish',
+             latest && lbest && latest !== lbest ? `+${(latest.practice || lbest.practice ? fmt : fmtS)(latest.final_time_ms - lbest.final_time_ms)} off the best${catNote}`
+             : latest ? `is the best${catNote}` : '') +
+          tile(lavg != null ? fmt(lavg) : '—', 'average finish', lfins.length > 1 ? `over ${lfins.length} finishes${catNote}` : '');
+      })() +
       (R && R.marathon_ms != null
         ? tile(fmtS(R.marathon_ms), 'in an Arcathlon', `${dshort(R.marathon_at_ms)} · not practice`) : '');
 

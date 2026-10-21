@@ -865,6 +865,39 @@ pub fn near_race_game(name: &str) -> Option<(String, Option<String>)> {
     Some((g.to_string(), r.category_of(g).map(str::to_string)))
 }
 
+/// The goal a game is finished to in the race (the Big 20's `goals`, by
+/// position), when the race lists it: "Beat X4 Password Start" for Mega
+/// Man 6, whose full game is a different category.
+pub fn race_goal_of(name: &str) -> Option<String> {
+    let (race, _) = SHIPPED.get_or_init(|| (big20(), bundled_all()));
+    let (r, e) = race.as_ref()?;
+    r.lineup(*e)
+        .into_iter()
+        .find(|(g, _)| *g == name)
+        .and_then(|(_, goal)| goal.map(str::to_string))
+}
+
+/// Is the race run and over at `at_ms` (unix ms)? The day after its `date`,
+/// in UTC: a run of one of its games on a practice pane is practice for the
+/// race before that and his own game after it.
+pub fn race_over(at_ms: i64) -> bool {
+    let (race, _) = SHIPPED.get_or_init(|| (big20(), bundled_all()));
+    let Some((r, e)) = race.as_ref() else {
+        return false;
+    };
+    let Some(date) = r.event_source(*e).1 else {
+        return false;
+    };
+    let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+        return false;
+    };
+    let next = d.succ_opt().unwrap_or(d);
+    let end_ms = next
+        .and_hms_opt(0, 0, 0)
+        .map(|t| t.and_utc().timestamp_millis());
+    end_ms.is_some_and(|end| at_ms >= end)
+}
+
 /// Plain Levenshtein distance.
 fn edit_distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
@@ -899,6 +932,27 @@ pub fn fold_title(name: &str) -> (String, Option<u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The race has a goal per game and a date: Mega Man 6's goal is not its
+    /// full game, and 2026-10-10's race is over from the 11th.
+    #[test]
+    fn the_race_has_a_goal_per_game_and_a_day_it_is_over() {
+        assert_eq!(
+            race_goal_of("Mega Man 6").as_deref(),
+            Some("Beat X4 Password Start")
+        );
+        assert_eq!(race_goal_of("Crystalis"), None);
+        let oct10 = chrono::NaiveDate::from_ymd_opt(2026, 10, 10).unwrap();
+        let at = |d: chrono::NaiveDate, h: u32| {
+            d.and_hms_opt(h, 0, 0).unwrap().and_utc().timestamp_millis()
+        };
+        assert!(!race_over(at(oct10, 23)));
+        assert!(race_over(at(oct10.succ_opt().unwrap(), 0)));
+        assert!(race_over(at(
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap(),
+            17
+        )));
+    }
 
     fn shipped() -> Rosters {
         let path =
