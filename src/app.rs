@@ -1597,6 +1597,7 @@ fn apply_identity(
                 let line = category
                     .map(identity::display_category)
                     .filter(|l| l.chars().filter(|c| c.is_alphabetic()).count() >= 3)
+                    .map(|l| vote.settle_category(&l))
                     .or_else(|| vote.roster_line(at_ms).map(str::to_string));
                 reading.named_category = match line {
                     Some(l) if identity::same_category(&l, &goal) => reading.named_category.take(),
@@ -2984,6 +2985,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     // The header readings a game no roster lists is named from, under
     // `follow_title = "any"`.
     let mut title_vote = identity::TitleVote::default();
+    title_vote.know_categories(db::known_categories(&pool).await.unwrap_or_default());
     title_vote.know(
         db::other_game_names(&pool, &cfg.game.name, &cfg.game.category)
             .await

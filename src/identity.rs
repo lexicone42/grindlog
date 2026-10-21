@@ -568,6 +568,10 @@ pub struct TitleVote {
     roster_subtitle: Option<String>,
     /// The same line as read, for filing: "Any%" rather than "any".
     roster_line: Option<String>,
+    /// Every category the database already holds a run under, by spelling,
+    /// and the race's goals: what a line read off a pane is snapped to, and
+    /// what a header that is really a category line is refused as.
+    known_categories: Vec<String>,
     /// Games already in the database under a free title: a name the vote
     /// settles on within a fifth of its length of one of these (the fold)
     /// is filed under that spelling, so one game keeps one history across
@@ -600,6 +604,16 @@ impl TitleVote {
             .retain(|c| at_ms - c.last_ms <= TITLE_MEMORY_MS);
         let title = title.map(str::trim).filter(|t| !t.is_empty())?;
         if !plausible_game_title(title, rows, cfg) {
+            return None;
+        }
+        // A header that reads as a category the database holds or a goal of
+        // the race is a category line read as the title ("Tradrional" over
+        // Mini Putt's pane), not a game.
+        if self
+            .known_categories
+            .iter()
+            .any(|c| same_category(title, c))
+        {
             return None;
         }
         if self.continuity(title, at_ms).is_some() {
@@ -767,10 +781,40 @@ impl TitleVote {
         // Or the title is the line that was under the header: the pane's
         // header line missed, its category line read as the title.
         let is_its_subtitle = self
-            .roster_subtitle
+            .roster_line
             .as_deref()
-            .is_some_and(|s| s == board::normalise_title(title));
+            .is_some_and(|s| same_category(title, s));
         (shares_a_word || is_its_subtitle).then(|| (name.clone(), category.clone()))
+    }
+
+    /// The categories the database already holds, and the race's goals.
+    pub fn know_categories(&mut self, mut cats: Vec<String>) {
+        cats.extend(crate::roster::race_goals());
+        cats.sort();
+        cats.dedup();
+        self.known_categories = cats;
+    }
+
+    /// A category line as read, snapped to a spelling already in use: the
+    /// line last read under this pane's roster-named header when the two
+    /// are the same category, else a category the database holds or a goal
+    /// of the race, else the line as read. Mini Putt's "Traditional" read
+    /// "Tradnional", "Traditional" and "Tradrional" on three attempts and
+    /// filed them as three categories.
+    pub fn settle_category(&self, line: &str) -> String {
+        if let Some(l) = self.roster_line.as_deref() {
+            if same_category(line, l) {
+                return l.to_string();
+            }
+        }
+        if let Some(k) = self
+            .known_categories
+            .iter()
+            .find(|k| same_category(line, k))
+        {
+            return k.clone();
+        }
+        line.to_string()
     }
 
     /// The games the database already holds under free titles.
@@ -859,20 +903,20 @@ pub fn display_category(read: &str) -> String {
         .join(" ")
 }
 
-/// Are two category lines the same category: equal, within the fold's
-/// distance, or one a fragment of the other of four characters or more
-/// ("Loop" of "From Sandbox to End Loop 1"), once reduced to letters, digits
-/// and the percent sign.
-pub fn same_category(a: &str, b: &str) -> bool {
+/// Is a category line `read` the category `of`: equal, within the fold's
+/// distance, or the line a fragment of four characters or more of it
+/// ("Loop" of "From Sandbox to End Loop 1") — never the other way round,
+/// since "Any%" inside "JP Any%" is a different category with more said.
+/// Reduced to letters, digits and the percent sign first.
+pub fn same_category(read: &str, of: &str) -> bool {
     let norm = |s: &str| -> String {
         s.chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '%')
             .map(|c| c.to_ascii_lowercase())
             .collect()
     };
-    let (x, y) = (norm(a), norm(b));
-    let fragment =
-        x.chars().count() >= 4 && y.chars().count() >= 4 && (y.contains(&x) || x.contains(&y));
+    let (x, y) = (norm(read), norm(of));
+    let fragment = x.chars().count() >= 4 && y.contains(&x);
     !x.is_empty() && (x == y || board::edit_close(&x, &y) || fragment)
 }
 
@@ -1027,6 +1071,36 @@ mod tests {
         assert_eq!(m.observe(Some("Mega hian"), None, 8, &cfg, 60_000), None);
     }
 
+    /// A category line is snapped to a spelling in use — the line last read
+    /// under this pane's header, else one the database holds or a goal of
+    /// the race — and a header that reads as a category is not a game.
+    #[test]
+    fn a_category_line_is_snapped_to_a_spelling_in_use() {
+        let mut cfg = Config::for_test_with_min_final(1);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        let mut v = TitleVote::default();
+        v.know_categories(vec!["Traditional".into(), "Any%".into()]);
+        assert_eq!(v.settle_category("Tradnional"), "Traditional");
+        assert_eq!(
+            v.settle_category("Beat X4 Pasword Start"),
+            "Beat X4 Password Start"
+        );
+        assert_eq!(v.settle_category("JP Any%"), "JP Any%");
+        v.saw_roster("Mini Putt", Some("Big 20 #23"), Some("Tradrional"), 0);
+        // The line last read under the header wins over the dictionary's
+        // spelling only when it IS the same category as the one read now.
+        assert_eq!(v.settle_category("Traditional"), "Tradrional");
+        // A header that is really the category line names the pane's game,
+        // and is never voted as a game.
+        assert_eq!(
+            v.continuity("Tradrional", 60_000),
+            Some(("Mini Putt".into(), Some("Big 20 #23".into())))
+        );
+        for t in ["Tradrional", "Traditional", "Beat Any Course"] {
+            assert_eq!(v.observe(Some(t), None, 8, &cfg, 60_000), None, "{t:?}");
+        }
+    }
+
     /// A pane the rosters named keeps its name through reads the matcher
     /// cannot place, and the vote does not mint a game of them; a pane they
     /// never named gets no such help.
@@ -1066,7 +1140,7 @@ mod tests {
         e.saw_roster(&eb.0, eb.1.as_deref(), Some("Selection A"), 0);
         assert_eq!(e.continuity("Selection A", 60_000), Some(eb.clone()));
         assert_eq!(e.observe(Some("Selection A"), None, 8, &cfg, 60_000), None);
-        assert_eq!(e.continuity("Selection B", 60_000), None);
+        assert_eq!(e.continuity("Sandbox", 60_000), None);
     }
 
     /// A damaged read of the tracked game's own header never becomes a game
