@@ -1597,7 +1597,10 @@ fn apply_identity(
                 let line = category
                     .map(identity::display_category)
                     .filter(|l| l.chars().filter(|c| c.is_alphabetic()).count() >= 3)
-                    .map(|l| vote.settle_category(&l))
+                    .map(|l| {
+                        vote.note_category(&l);
+                        vote.settle_category(&l)
+                    })
                     .or_else(|| vote.roster_line(at_ms).map(str::to_string));
                 reading.named_category = match line {
                     Some(l) if identity::same_category(&l, &goal) => reading.named_category.take(),
