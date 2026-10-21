@@ -664,19 +664,30 @@ impl TitleVote {
         if c.votes < TITLE_VOTES {
             return None;
         }
+        let c = &self.clusters[i];
+        Some(self.resolve(c))
+    }
+
+    /// What a cluster with enough votes names: a spelling three readings
+    /// agree on, within a third of its length of exactly one game of the
+    /// race, is that game ("MONSIer rary" is Monster Party, which the
+    /// matcher could not place from one read); else a name the database
+    /// already holds within the fold's distance, spelled as the database
+    /// has it; else the spelling read most. One answer for the pass that
+    /// settles the vote and for every later pass that asks what settled:
+    /// the second Monster Party run was filed under the raw spelling by the
+    /// latter while the first had the game.
+    fn resolve(&self, c: &Cluster) -> (String, Option<String>) {
         let name = c.name();
-        let (stem, sequel) = crate::roster::fold_title(&name);
-        // A spelling three readings agree on, within a third of its length of
-        // exactly one game of the race, is that game: "MONSIer rary" is
-        // Monster Party, which the matcher could not place from one read.
         if let Some(near) = crate::roster::near_race_game(&name) {
-            return Some(near);
+            return near;
         }
+        let (stem, sequel) = crate::roster::fold_title(&name);
         let known = self.known.iter().find(|k| {
             let (ks, kq) = crate::roster::fold_title(k);
             kq == sequel && (ks == stem || board::edit_close(&ks, &stem))
         });
-        Some((known.cloned().unwrap_or(name), c.category()))
+        (known.cloned().unwrap_or(name), c.category())
     }
 
     /// The game the latest cluster with enough votes names, if any, whether
@@ -687,13 +698,7 @@ impl TitleVote {
             .iter()
             .filter(|c| c.votes >= TITLE_VOTES)
             .max_by_key(|c| c.last_ms)?;
-        let name = c.name();
-        let (stem, sequel) = crate::roster::fold_title(&name);
-        let known = self.known.iter().find(|k| {
-            let (ks, kq) = crate::roster::fold_title(k);
-            kq == sequel && (ks == stem || board::edit_close(&ks, &stem))
-        });
-        Some((known.cloned().unwrap_or(name), c.category()))
+        Some(self.resolve(c))
     }
 
     /// The rosters named `name` on this pane at `at_ms`.
@@ -943,6 +948,40 @@ mod tests {
             })
             .collect();
         c
+    }
+
+    /// A spelling three readings agree on, near exactly one game of the
+    /// race, is that game — on the pass that settles the vote and on every
+    /// later pass that asks what settled; a damaged read sharing a
+    /// four-letter word with the pane's roster-named game is that game.
+    #[test]
+    fn a_settled_spelling_near_one_race_game_is_that_game() {
+        let mut cfg = Config::for_test_with_min_final(1);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        let mut v = TitleVote::default();
+        let mp = Some(("Monster Party".to_string(), Some("Big 20 #23".to_string())));
+        assert_eq!(
+            v.observe(Some("MONSIer rary"), Some("Any%"), 8, &cfg, 0),
+            None
+        );
+        assert_eq!(
+            v.observe(Some("MONSIer rary"), Some("Any%"), 8, &cfg, 60_000),
+            None
+        );
+        assert_eq!(
+            v.observe(Some("MONSIer rary"), Some("Any%"), 8, &cfg, 120_000),
+            mp
+        );
+        assert_eq!(v.settled(), mp);
+        assert_eq!(crate::roster::near_race_game("Dragon Warrior II"), None);
+        assert_eq!(crate::roster::near_race_game("Crystalis"), None);
+        let mut m = TitleVote::default();
+        m.saw_roster("Mega Man 6", Some("Big 20 #23"), None, 0);
+        assert_eq!(
+            m.continuity("Mega hian", 60_000),
+            Some(("Mega Man 6".into(), Some("Big 20 #23".into())))
+        );
+        assert_eq!(m.observe(Some("Mega hian"), None, 8, &cfg, 60_000), None);
     }
 
     /// A pane the rosters named keeps its name through reads the matcher

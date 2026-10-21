@@ -347,6 +347,18 @@ impl LockState {
         None
     }
 
+    /// The marathon on the board-granted lock ended having recorded nothing
+    /// (the race file opened between two games and closed again): the lock
+    /// goes now, not after the hold. On 2026-10-20 the hold cost the live
+    /// bot five minutes of Steel Legion and a replay the whole run.
+    pub fn drop_board(&mut self) -> bool {
+        if self.is_board() {
+            self.unlock();
+            return true;
+        }
+        false
+    }
+
     pub fn tick(&mut self, t: i64, marathon_active: bool) -> Option<Unlock> {
         match self.lock {
             Lock::Board { since_ms, .. }
@@ -373,6 +385,16 @@ mod tests {
     /// Three pane passes naming nothing let a timer-granted lock go; a pass
     /// that names something starts the count over, and a board-granted lock
     /// is never judged this way.
+    #[test]
+    fn a_board_lock_is_dropped_at_once_when_asked() {
+        let mut s = st(3);
+        s.grant_board(2, 90, 0);
+        assert!(s.is_board());
+        assert!(s.drop_board());
+        assert!(!s.locked());
+        assert!(!s.drop_board());
+    }
+
     #[test]
     fn a_pane_naming_nothing_three_times_lets_a_timer_lock_go() {
         let mut s = st(3);

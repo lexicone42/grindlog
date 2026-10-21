@@ -1002,6 +1002,11 @@ impl Marathon {
     /// The board's rows as this tracker has settled them, for the log: the
     /// name of each slot, canonicalised where the roster knows it, and
     /// whether it has been recorded.
+    /// How many rows this tracker has recorded as finished games.
+    pub fn recorded_count(&self) -> usize {
+        self.slots.iter().filter(|s| s.recorded.is_some()).count()
+    }
+
     pub fn describe(&self) -> String {
         let names: Vec<String> = self
             .slots
