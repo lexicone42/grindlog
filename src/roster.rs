@@ -898,6 +898,19 @@ pub fn race_over(at_ms: i64) -> bool {
     end_ms.is_some_and(|end| at_ms >= end)
 }
 
+/// Every goal the race lists, by spelling: a header that reads as one of
+/// them is a category line read as the title, not a game.
+pub fn race_goals() -> Vec<String> {
+    let (race, _) = SHIPPED.get_or_init(|| (big20(), bundled_all()));
+    let Some((r, e)) = race.as_ref() else {
+        return Vec::new();
+    };
+    r.lineup(*e)
+        .into_iter()
+        .filter_map(|(_, g)| g.map(str::to_string))
+        .collect()
+}
+
 /// Plain Levenshtein distance.
 fn edit_distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
