@@ -1584,6 +1584,28 @@ fn apply_identity(
             _ => {}
         }
     }
+    // After the race, a run of one of its games on a practice pane is his
+    // own game, not practice for the race: filed under the line read under
+    // the header ("Any%"; Mega Man 6's full game beside the race's "Beat X4
+    // Password Start" task), under the race still when that line IS the
+    // race's goal, and under `other_category` when no line has read within
+    // the vote's memory. The roster says the race's date; before it, as
+    // before.
+    if let Some(g) = reading.named.clone() {
+        if let Some(goal) = crate::roster::race_goal_of(&g) {
+            if crate::roster::race_over(at_ms) {
+                let line = category
+                    .map(identity::display_category)
+                    .filter(|l| l.chars().filter(|c| c.is_alphabetic()).count() >= 3)
+                    .or_else(|| vote.roster_line(at_ms).map(str::to_string));
+                reading.named_category = match line {
+                    Some(l) if identity::same_category(&l, &goal) => reading.named_category.take(),
+                    Some(l) => Some(l),
+                    None => Some(cfg.game.other_category.clone()),
+                };
+            }
+        }
+    }
     // The header reads as another game: not this one, and not a fragment of
     // it. Counted over passes running, for `close_would_fabricate`.
     let header_other = reading.against.contains(&identity::Signal::Header)
@@ -6510,6 +6532,105 @@ mod tests {
     /// of it was recorded. The spelling is the one read most, with the
     /// sequel the readings agree on printed as a numeral; the category is
     /// the line under the header.
+    /// After the race, a run of one of its games on a practice pane is
+    /// filed under the line read under the header; under the race still
+    /// when that line is the race's goal; under `other_category` when no
+    /// line has read; and before the race's date, under the race as before.
+    #[test]
+    fn after_the_race_a_practice_run_is_filed_under_the_panes_own_line() {
+        let mut cfg = Config::for_test_with_min_final(1);
+        cfg.game.name = "Ninja Gaiden (NES)".into();
+        cfg.game.category = "Any%".into();
+        cfg.game.follow_title = crate::config::FollowTitle::Any;
+        cfg.game.other_category = "Other".into();
+        let fp = identity::Fingerprint::of(&cfg, None);
+        let day = |m: u32, d: u32, h: u32| {
+            chrono::NaiveDate::from_ymd_opt(2026, m, d)
+                .unwrap()
+                .and_hms_opt(h, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp_millis()
+        };
+        // One pass of a Mega Man 6 pane through the gate given.
+        let pass = |vote: &mut identity::TitleVote,
+                    id: &mut identity::Identity,
+                    foreign: &mut Option<ForeignRun>,
+                    sub: Option<&str>,
+                    at_ms: i64| {
+            let readings = PaneReadings {
+                game: Some("Mega Man 6".into()),
+                category: sub.map(str::to_string),
+                refs: Vec::new(),
+            };
+            let board = Board {
+                title: Some("Mega Man 6".into()),
+                subtitle: sub.map(str::to_string),
+                counter: None,
+                rows: (0..8)
+                    .map(|i| board::BoardRow {
+                        name: Some(format!("Stage {i}")),
+                        cells: vec!["1:00".into()],
+                        y: 0,
+                    })
+                    .collect(),
+            };
+            apply_identity(
+                &readings,
+                &board,
+                &cfg,
+                &fp,
+                vote,
+                &mut 0,
+                &mut None,
+                id,
+                foreign,
+                &mut None,
+                &mut Default::default(),
+                &mut db::SessionHealth::default(),
+                at_ms,
+            );
+            foreign.as_ref().map(|f| f.category.clone())
+        };
+        // The gate convicts on two passes running: a case is two passes on
+        // one fresh gate.
+        let case = |sub: Option<&str>, at_ms: i64| {
+            let mut vote = identity::TitleVote::default();
+            let mut id = identity::Identity::new(&cfg);
+            let mut foreign = None;
+            pass(&mut vote, &mut id, &mut foreign, sub, at_ms);
+            pass(&mut vote, &mut id, &mut foreign, sub, at_ms + 10_000)
+        };
+        let big20 = Some("Big 20 #23".to_string());
+        assert_eq!(case(Some("Any%"), day(10, 1, 20)), big20);
+        assert_eq!(case(Some("Any%"), day(10, 21, 17)), Some("Any%".into()));
+        assert_eq!(case(Some("Beat X4 Password Start"), day(10, 21, 17)), big20);
+        // A fragment of the goal is the goal: Pac-Mania's pane reads "Loop".
+        assert!(identity::same_category(
+            "Loop",
+            "From Sandbox to End Loop 1"
+        ));
+        assert!(identity::same_category("Any% All O3ses", "Any% All Bosses"));
+        assert!(!identity::same_category("Any%", "Watch us dance / Round 5"));
+        assert!(!identity::same_category("JP Any%", "Beat Stage 3"));
+        assert_eq!(case(None, day(10, 21, 17)), Some("Other".into()));
+        // A line read on an earlier pass holds through passes that read none.
+        let mut vote = identity::TitleVote::default();
+        let mut id = identity::Identity::new(&cfg);
+        let mut foreign = None;
+        let t = day(10, 21, 17);
+        pass(&mut vote, &mut id, &mut foreign, Some("Any%"), t);
+        pass(&mut vote, &mut id, &mut foreign, Some("Any%"), t + 10_000);
+        assert_eq!(
+            foreign.as_ref().map(|f| f.category.clone()),
+            Some("Any%".into())
+        );
+        assert_eq!(
+            pass(&mut vote, &mut id, &mut foreign, None, t + 70_000),
+            Some("Any%".into())
+        );
+    }
+
     /// A runs-mode `[[games]]` entry pins what a title the pane never reads
     /// whole is filed as: tesseract read Crystalis's header as "rystalis" and
     /// "Cc stalis" at 480p, and `name = "Crystalis", match = ["stalis"]` files

@@ -238,7 +238,7 @@ while IFS= read -r game; do
                        then "/arcathlon/" + ($e.label | ltrimstr("Arcathlon #")) + "/index.html"
                        elif $e.randomized then "/rando/" + $e.day + "/index.html"
                        else null end),
-                final_time_ms, last_timer_ms, outcome, attempt_number}]}' site/api/v1/report.json > "$slice"
+                final_time_ms, last_timer_ms, outcome, attempt_number, category}]}' site/api/v1/report.json > "$slice"
   render_event "game/$slug" "$game" "$slice"
   rm -f "$slice"
   events=$((events + 1))
