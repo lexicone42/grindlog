@@ -3166,7 +3166,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         reason: crate::state::ResetReason::Disappeared,
                     };
                     if close_would_fabricate(
-                        pane_identity.ok(),
+                        pane_identity.ok() && pane_identity.tally().clear > 0,
                         pane_other_passes >= 2,
                         current.as_ref().is_some_and(|c| c.orphaned),
                         current.as_ref().and_then(|c| c.foreign.as_ref()),
@@ -5330,7 +5330,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             // Not the tracked game's, and not anyone else's either: drop it.
             // See `close_would_fabricate`.
             let would_drop = close_would_fabricate(
-                pane_identity.ok(),
+                pane_identity.ok() && pane_identity.tally().clear > 0,
                 pane_other_passes >= 2,
                 current.as_ref().is_some_and(|c| c.orphaned),
                 current
@@ -5735,6 +5735,11 @@ fn close_would_fabricate(
     ev: &Event,
 ) -> bool {
     let closing = matches!(ev, Event::Reset { .. } | Event::Finished { .. });
+    // `gate_ok` is also false until the gate has acquitted the pane once this
+    // session: a run begins as the tracked game, and a bot started cold under
+    // another game's pane whose header reads nothing for ten minutes (the
+    // Uninvited pane, 2026-10-20) filed two of its attempts as Ninja Gaiden.
+    // On the tracked game's own pane the first pass acquits.
     // `foreign_pane`: the header has read as another game, not a fragment of
     // this one, on two passes running, whether or not the gate has convicted.
     // Dragon Warrior II's "Any%" line matches the tracked game's, so the gate
