@@ -1277,13 +1277,15 @@ pub async fn last_transition(pool: &SqlitePool) -> Result<Option<TransitionRow>>
 
 /// Every category the database holds a run under, by spelling: what a
 /// category line read off a pane is snapped to, so "Tradnional" files as
-/// the "Traditional" it already holds rather than as a category of its own.
-pub async fn known_categories(pool: &SqlitePool) -> Result<Vec<String>> {
-    Ok(
-        sqlx::query_scalar::<_, String>("SELECT DISTINCT category FROM runs ORDER BY category")
-            .fetch_all(pool)
-            .await?,
+/// the "Traditional" it already holds rather than as a category of its own —
+/// with how many runs each spelling has, since a misread that got in files
+/// a row or two and the spelling in use files hundreds.
+pub async fn known_categories(pool: &SqlitePool) -> Result<Vec<(String, i64)>> {
+    Ok(sqlx::query_as::<_, (String, i64)>(
+        "SELECT category, COUNT(*) FROM runs GROUP BY category ORDER BY COUNT(*) DESC, category",
     )
+    .fetch_all(pool)
+    .await?)
 }
 
 /// The games the database holds runs of besides the tracked one, by name:

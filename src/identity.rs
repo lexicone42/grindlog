@@ -571,7 +571,7 @@ pub struct TitleVote {
     /// Every category the database already holds a run under, by spelling,
     /// and the race's goals: what a line read off a pane is snapped to, and
     /// what a header that is really a category line is refused as.
-    known_categories: Vec<String>,
+    known_categories: Vec<(String, i64)>,
     /// Games already in the database under a free title: a name the vote
     /// settles on within a fifth of its length of one of these (the fold)
     /// is filed under that spelling, so one game keeps one history across
@@ -612,7 +612,7 @@ impl TitleVote {
         if self
             .known_categories
             .iter()
-            .any(|c| same_category(title, c))
+            .any(|(c, _)| same_category(title, c))
         {
             return None;
         }
@@ -731,7 +731,12 @@ impl TitleVote {
             .filter(|s| !s.is_empty())
         {
             self.roster_subtitle = Some(s);
-            self.roster_line = subtitle.map(display_category).filter(|l| !l.is_empty());
+            // Settled through the dictionary first: a session whose first
+            // legible read was "Tradrional" must not remember that spelling.
+            self.roster_line = subtitle
+                .map(display_category)
+                .filter(|l| !l.is_empty())
+                .map(|l| self.known_spelling(&l).unwrap_or(l));
         }
     }
 
@@ -788,11 +793,40 @@ impl TitleVote {
     }
 
     /// The categories the database already holds, and the race's goals.
-    pub fn know_categories(&mut self, mut cats: Vec<String>) {
-        cats.extend(crate::roster::race_goals());
-        cats.sort();
-        cats.dedup();
+    pub fn know_categories(&mut self, mut cats: Vec<(String, i64)>) {
+        // The race's goals outrank anything read: they are the spellings.
+        cats.extend(
+            crate::roster::race_goals()
+                .into_iter()
+                .map(|g| (g, i64::MAX / 4)),
+        );
+        cats.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        cats.dedup_by(|a, b| a.0 == b.0);
         self.known_categories = cats;
+    }
+
+    /// One legible category line read this pass, into the tally: the
+    /// spelling's count goes up, a spelling not seen before starts at one.
+    /// So a session on a cold database (the nightly self-audit's replays)
+    /// settles on the spelling read most within a few passes, and an open
+    /// run follows the settled spelling as it would a better name.
+    pub fn note_category(&mut self, line: &str) {
+        if let Some(e) = self.known_categories.iter_mut().find(|(k, _)| k == line) {
+            e.1 = e.1.saturating_add(1);
+        } else {
+            self.known_categories.push((line.to_string(), 1));
+        }
+    }
+
+    /// The best-attested spelling in use of the category `line` reads as, if
+    /// any: a misread that got into the database files a row or two, the
+    /// spelling in use hundreds, and the race's goals outrank both.
+    fn known_spelling(&self, line: &str) -> Option<String> {
+        self.known_categories
+            .iter()
+            .filter(|(k, _)| same_category(line, k))
+            .max_by_key(|(k, n)| (*n, k.chars().count()))
+            .map(|(k, _)| k.clone())
     }
 
     /// A category line as read, snapped to a spelling already in use: the
@@ -807,14 +841,8 @@ impl TitleVote {
                 return l.to_string();
             }
         }
-        if let Some(k) = self
-            .known_categories
-            .iter()
-            .find(|k| same_category(line, k))
-        {
-            return k.clone();
-        }
-        line.to_string()
+        self.known_spelling(line)
+            .unwrap_or_else(|| line.to_string())
     }
 
     /// The games the database already holds under free titles.
@@ -1079,7 +1107,11 @@ mod tests {
         let mut cfg = Config::for_test_with_min_final(1);
         cfg.game.name = "Ninja Gaiden (NES)".into();
         let mut v = TitleVote::default();
-        v.know_categories(vec!["Traditional".into(), "Any%".into()]);
+        v.know_categories(vec![
+            ("Tradrional".into(), 2),
+            ("Traditional".into(), 15),
+            ("Any%".into(), 40),
+        ]);
         assert_eq!(v.settle_category("Tradnional"), "Traditional");
         assert_eq!(
             v.settle_category("Beat X4 Pasword Start"),
@@ -1087,9 +1119,21 @@ mod tests {
         );
         assert_eq!(v.settle_category("JP Any%"), "JP Any%");
         v.saw_roster("Mini Putt", Some("Big 20 #23"), Some("Tradrional"), 0);
-        // The line last read under the header wins over the dictionary's
-        // spelling only when it IS the same category as the one read now.
-        assert_eq!(v.settle_category("Traditional"), "Tradrional");
+        // The remembered line is itself settled through the dictionary: a
+        // misread first read never becomes the session's spelling.
+        assert_eq!(v.roster_line(0), Some("Traditional"));
+        // On a cold database the tally learns: one "Tradrional" then three
+        // "Traditional" settle on the latter, and the misread snaps to it.
+        let mut cold = TitleVote::default();
+        cold.know_categories(Vec::new());
+        cold.note_category("Tradrional");
+        assert_eq!(cold.settle_category("Tradrional"), "Tradrional");
+        for _ in 0..3 {
+            cold.note_category("Traditional");
+        }
+        assert_eq!(cold.settle_category("Tradrional"), "Traditional");
+        assert_eq!(cold.settle_category("Tradnional"), "Traditional");
+        assert_eq!(v.settle_category("Tradrional"), "Traditional");
         // A header that is really the category line names the pane's game,
         // and is never voted as a game.
         assert_eq!(
