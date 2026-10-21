@@ -820,9 +820,11 @@ pub fn bundled_all() -> Vec<Rosters> {
 ///
 /// Cached: the identity gate asks once a pane pass, and the files do not
 /// change while the bot runs.
+/// The shipped rosters, read once: the race first, then the pools.
+type Shipped = (Option<(Rosters, usize)>, Vec<Rosters>);
+static SHIPPED: std::sync::OnceLock<Shipped> = std::sync::OnceLock::new();
+
 pub fn canonical_foreign(read: &str) -> Option<(String, Option<String>)> {
-    type Shipped = (Option<(Rosters, usize)>, Vec<Rosters>);
-    static SHIPPED: std::sync::OnceLock<Shipped> = std::sync::OnceLock::new();
     let (race, pool) = SHIPPED.get_or_init(|| (big20(), bundled_all()));
     if let Some((r, e)) = race {
         if let Some(g) = r.assign(Some(*e), &[Some(read)]).first().copied().flatten() {
@@ -833,6 +835,50 @@ pub fn canonical_foreign(read: &str) -> Option<(String, Option<String>)> {
         let g = r.assign(None, &[Some(read)]).first().copied().flatten()?;
         Some((g.to_string(), r.category_of(g).map(str::to_string)))
     })
+}
+
+/// The one game of the race within a third of its length in edits of a
+/// reading the matcher could not place, the sequel number equal: for a
+/// title the vote has already read the same way three times. On
+/// 2026-10-20 the pane read Monster Party's header as "MONSIer rary" for
+/// an hour (three edits in twelve letters, one more than the matcher
+/// forgives), the roster named nothing, and the vote minted a game of it.
+/// A third of the length is far too loose for one reading, and about
+/// right for a spelling three readings agree on; "Dragon Warrior II" is
+/// nowhere near "Double Dragon II" by it.
+pub fn near_race_game(name: &str) -> Option<(String, Option<String>)> {
+    let (race, _) = SHIPPED.get_or_init(|| (big20(), bundled_all()));
+    let (r, e) = race.as_ref()?;
+    let (stem, sequel) = fold_title(name);
+    if stem.chars().count() < 5 {
+        return None;
+    }
+    let mut hits = r.lineup(*e).into_iter().filter(|(g, _)| {
+        let (gs, gq) = fold_title(g);
+        gq == sequel
+            && edit_distance(&stem, &gs) * 3 <= stem.chars().count().max(gs.chars().count())
+    });
+    let (g, _) = hits.next()?;
+    if hits.next().is_some() {
+        return None;
+    }
+    Some((g.to_string(), r.category_of(g).map(str::to_string)))
+}
+
+/// Plain Levenshtein distance.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 /// The canonical name for a damaged reading, across every shipped roster.

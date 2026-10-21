@@ -666,6 +666,12 @@ impl TitleVote {
         }
         let name = c.name();
         let (stem, sequel) = crate::roster::fold_title(&name);
+        // A spelling three readings agree on, within a third of its length of
+        // exactly one game of the race, is that game: "MONSIer rary" is
+        // Monster Party, which the matcher could not place from one read.
+        if let Some(near) = crate::roster::near_race_game(&name) {
+            return Some(near);
+        }
         let known = self.known.iter().find(|k| {
             let (ks, kq) = crate::roster::fold_title(k);
             kq == sequel && (ks == stem || board::edit_close(&ks, &stem))
@@ -732,7 +738,7 @@ impl TitleVote {
         let words = |s: &str| -> Vec<String> {
             board::normalise_title(s)
                 .split(' ')
-                .filter(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 5)
+                .filter(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 4)
                 .map(str::to_string)
                 .collect()
         };
