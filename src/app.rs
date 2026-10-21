@@ -1873,6 +1873,9 @@ struct MarathonKeep {
     /// The tracker as of the last pass, and when (broadcast wall-clock ms):
     /// what a take-up carries on with, when it is this board's and recent.
     checkpoint: Option<(marathon::Marathon, i64)>,
+    /// A marathon just ended having recorded nothing: the board-granted lock
+    /// is dropped at the next tick instead of held (`LockState::drop_board`).
+    stillborn: bool,
     /// The tracker set aside when the stream went offline.
     aside: Option<Aside>,
     /// Consecutive passes of this event's board that did not match the
@@ -1926,6 +1929,7 @@ impl MarathonKeep {
         Self {
             path,
             checkpoint,
+            stillborn: false,
             aside: None,
             aside_refused: 0,
             run_floor_ms: i64::MIN,
@@ -2067,6 +2071,9 @@ async fn track_marathon(
             if let Some(m) = state.take() {
                 info!("marathon over: {}", m.describe());
                 health.event(at_ms, "marathon", format!("{} ended", m.category()));
+                if m.recorded_count() == 0 {
+                    keep.stillborn = true;
+                }
             }
             // The tag stays: it names the BROADCAST, and the event ending
             // does not unname it. What clears it is the broadcast ending
@@ -3159,7 +3166,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                         reason: crate::state::ResetReason::Disappeared,
                     };
                     if close_would_fabricate(
-                        pane_identity.ok(),
+                        pane_identity.ok() && pane_identity.tally().clear > 0,
                         pane_other_passes >= 2,
                         current.as_ref().is_some_and(|c| c.orphaned),
                         current.as_ref().and_then(|c| c.foreign.as_ref()),
@@ -5149,6 +5156,9 @@ pub async fn run(cfg: Config) -> Result<()> {
         // five minutes after the grant — the event ended, or the pane stopped
         // reading as one before a tracker was ever taken up — the timer's
         // rules apply again and the probe resumes.
+        if std::mem::take(&mut marathon_keep.stillborn) && lock.drop_board() {
+            info!("the marathon on the board-granted lock recorded nothing; probing layouts again now");
+        }
         if let Some(Unlock::NoMarathon) = lock.tick(t, marathon_active) {
             info!("no marathon in force on the board-granted lock; probing layouts again");
         }
@@ -5320,7 +5330,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             // Not the tracked game's, and not anyone else's either: drop it.
             // See `close_would_fabricate`.
             let would_drop = close_would_fabricate(
-                pane_identity.ok(),
+                pane_identity.ok() && pane_identity.tally().clear > 0,
                 pane_other_passes >= 2,
                 current.as_ref().is_some_and(|c| c.orphaned),
                 current
@@ -5725,6 +5735,11 @@ fn close_would_fabricate(
     ev: &Event,
 ) -> bool {
     let closing = matches!(ev, Event::Reset { .. } | Event::Finished { .. });
+    // `gate_ok` is also false until the gate has acquitted the pane once this
+    // session: a run begins as the tracked game, and a bot started cold under
+    // another game's pane whose header reads nothing for ten minutes (the
+    // Uninvited pane, 2026-10-20) filed two of its attempts as Ninja Gaiden.
+    // On the tracked game's own pane the first pass acquits.
     // `foreign_pane`: the header has read as another game, not a fragment of
     // this one, on two passes running, whether or not the gate has convicted.
     // Dragon Warrior II's "Any%" line matches the tracked game's, so the gate
