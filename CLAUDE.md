@@ -160,6 +160,10 @@ client (aws-lc, through rustls) compiles from source once per target dir.
   reboot line that restarts the supervisor, the site deploys, the nightly
   `backup-db.sh`, the ten-minute `healthcheck.sh` and the 23:58
   `daily-summary.sh`); `scripts/install-cron.sh` installs it idempotently.
+  The 04:30 `self-audit.sh` replays yesterday's broadcast on the deployed
+  build and reports what live missed, misnamed or invented
+  (`logs/self-audit.log`; docs/operations.md, *The nightly self-audit*);
+  it imports only when told to.
   Backups land in `backups/` (ignored by git), 30 days kept.
 - Monitoring writes to `logs/health.log` and `logs/summary.log`; it only
   leaves the box when `NG_ALERT_URL` (ntfy topic or Discord webhook) or
