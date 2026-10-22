@@ -1245,6 +1245,13 @@ async fn probe_boards_at(
 /// name column, and the same rows read clean off the pane alone.
 pub(crate) fn pane_rect(regs: &Regions, union_w: u32, union_h: u32) -> R {
     const MARGIN: u32 = 12;
+    // The header (the game's title and its category) sits above the
+    // highest crop, and a measurement that places the rows one line low
+    // pulls the top edge down with them: with the margin alone the title
+    // was cut off for an hour on 2026-10-21 (the rows and counter still
+    // read, the category line read as the title, nothing named the pane).
+    // Room for a line of header above the crops, whatever the rows say.
+    const HEADROOM: u32 = 36;
     let rects = std::iter::once(regs.timer)
         .chain(regs.splits)
         .chain(regs.counter)
@@ -1257,7 +1264,7 @@ pub(crate) fn pane_rect(regs: &Regions, union_w: u32, union_h: u32) -> R {
         y1 = y1.max(r.1 + r.3);
     }
     let x0 = x0.saturating_sub(MARGIN);
-    let y0 = y0.saturating_sub(MARGIN);
+    let y0 = y0.saturating_sub(MARGIN + HEADROOM);
     let x1 = (x1 + MARGIN).min(union_w);
     let y1 = (y1 + MARGIN).min(union_h);
     (
@@ -6278,6 +6285,29 @@ async fn handle_event(
 mod tests {
     use super::*;
     use crate::config::LayoutSearchCfg;
+    /// The pane rectangle keeps a line of headroom above its highest crop:
+    /// the header lives there, and a measurement that places the rows a
+    /// line low must not pull the top edge down over it.
+    #[test]
+    fn pane_rect_keeps_a_line_of_headroom_above_the_crops() {
+        let regs = Regions {
+            union: (0, 0, 800, 700),
+            timer: (220, 206, 340, 162),
+            splits: Some((390, 70, 150, 216)),
+            counter: Some((465, 56, 90, 50)),
+            sob: None,
+        };
+        let (x, y, w, h) = pane_rect(&regs, 800, 700);
+        assert_eq!((x, y), (220 - 12, 56 - 12 - 36));
+        assert_eq!((x + w, y + h), (220 + 340 + 12, 206 + 162 + 12));
+        // Rows and counter measured 12 px low: the header is still inside.
+        let low = Regions {
+            splits: Some((390, 82, 150, 216)),
+            counter: Some((465, 68, 90, 50)),
+            ..regs
+        };
+        assert!(pane_rect(&low, 800, 700).1 <= 56 - 12);
+    }
 
     fn regs() -> Regions {
         Regions {
