@@ -828,13 +828,59 @@ pub fn canonical_foreign(read: &str) -> Option<(String, Option<String>)> {
     let (race, pool) = SHIPPED.get_or_init(|| (big20(), bundled_all()));
     if let Some((r, e)) = race {
         if let Some(g) = r.assign(Some(*e), &[Some(read)]).first().copied().flatten() {
+            if !header_fits(read, g) {
+                return None;
+            }
             return Some((g.to_string(), r.category_of(g).map(str::to_string)));
         }
     }
     pool.iter().find_map(|r| {
         let g = r.assign(None, &[Some(read)]).first().copied().flatten()?;
+        if !header_fits(read, g) {
+            return None;
+        }
         Some((g.to_string(), r.category_of(g).map(str::to_string)))
     })
+}
+
+/// Does a header read look like the game the matcher placed it on? The
+/// row matcher forgives a lot, because a race board's rows are one of ten
+/// known names and a wrong answer is caught by the row's own time; a pane
+/// header under `any` has no such check, and "a Mini" (the top of a Mini
+/// Putt header read mid-switch) was placed on Mega Man 6 and a run filed
+/// under it. The read must share a word of four or more letters with the
+/// name, or its stem must sit inside the name's (or the reverse), or be
+/// within a third of the longer in edits, the sequel equal when both have
+/// one — "vited" is Uninvited, "ible Dragon Il" is Double Dragon II,
+/// "Kiown in Night Mayor World" is Kid Klown, "a Mini" is nobody.
+fn header_fits(read: &str, game: &str) -> bool {
+    let (rs, rq) = fold_title(read);
+    let (gs, gq) = fold_title(game);
+    if rs.chars().count() < 4 {
+        return false;
+    }
+    if let (Some(a), Some(b)) = (rq, gq) {
+        if a != b {
+            return false;
+        }
+    }
+    if gs.contains(&rs) || rs.contains(&gs) {
+        return true;
+    }
+    if edit_distance(&rs, &gs) * 3 <= rs.chars().count().max(gs.chars().count()) {
+        return true;
+    }
+    let words = |s: &str| -> Vec<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.chars().count() >= 4)
+            .map(str::to_string)
+            .collect()
+    };
+    let gw = words(game);
+    words(read)
+        .iter()
+        .any(|w| gw.iter().any(|g| g == w || edit_distance(w, g) <= 1))
 }
 
 /// The one game of the race within a third of its length in edits of a
@@ -1385,6 +1431,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ok.lineup(0), vec![("Die Hard", None), ("Jaws", None)]);
+    }
+
+    /// A header the matcher places has to resemble the game it names: the
+    /// row matcher's forgiveness is for a board of ten known names, and
+    /// "a Mini" — the top of a Mini Putt header read mid-switch — was
+    /// Mega Man 6 by it, with a run filed under that name.
+    #[test]
+    fn a_clipped_header_names_only_a_game_it_resembles() {
+        let name = |s: &str| canonical_foreign(s).map(|(g, _)| g);
+        assert_eq!(name("a Mini"), None);
+        assert_eq!(name("Putt").as_deref(), Some("Mini Putt"));
+        assert_eq!(name("Mint Putt").as_deref(), Some("Mini Putt"));
+        assert_eq!(name("vited").as_deref(), Some("Uninvited"));
+        assert_eq!(name("Megs Man").as_deref(), Some("Mega Man 6"));
+        assert_eq!(
+            name("ible Dragon Il").as_deref(),
+            Some("Double Dragon II: The Revenge")
+        );
+        assert_eq!(
+            name("Kiown in Night Mayor World").as_deref(),
+            Some("Kid Klown in Night Mayor World")
+        );
     }
 
     /// A foreign header with its numeral lost lands on the race's one game of

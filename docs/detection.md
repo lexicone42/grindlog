@@ -169,7 +169,13 @@ sprites beside the pane in the rectangle; the tall layout's pane is 20%
 smaller and reads the name. Not under a lock the board granted: the board probe chose that
 layout by the rows its pane reads.
 
-**The pane's own words.** A second, unrestricted sparse-text pass over the
+**The pane's own words.** A pane pass reads the layout's crops' bounding
+box with a small margin, plus a line of headroom above the highest crop:
+the header sits there, and a measurement that placed the rows one line
+low (2026-10-21, after a re-anchor) pulled the top edge down over the
+title for an hour — rows and counter still read, the category line read as
+the title, nothing named the pane, and five finishes went unrecorded. A
+second, unrestricted sparse-text pass over the
 same crop reads the letters: at every lock (with `[splits]` enabled) and
 again every 60 s while locked, the bot reads the title row above the splits
 (game and category, logged as `layout title: …` and recorded as a session
@@ -259,7 +265,13 @@ game, against it, or not at all:
   wide inside-a-roster net — it holds one Mega Man and one Ghostbusters, so
   a header that lost its numeral ("Mega Man", "New Ghostbusters") still lands
   on the right one — and the Arcathlon pool after, with the sequel kept
-  strict (`roster::canonical_foreign`). Recognising the other game is *corroboration*, which is
+  strict (`roster::canonical_foreign`). The matcher's answer for a header
+  has to resemble the game it names — a shared word of four letters or
+  more, a stem inside the name's, or within a third of the longer in edits —
+  because the row matcher's forgiveness is sized for a board of ten known
+  names, each checked by its own time: "a Mini", the top of a Mini Putt
+  header read mid-switch, was Mega Man 6 by it and a run was filed under
+  that name (2026-10-21). Recognising the other game is *corroboration*, which is
   why a header alone can convict when it names something and cannot when
   it does not.
 
