@@ -337,10 +337,33 @@ impl SessionHealth {
     /// title, suspended/resumed, reference, counter); capped so a
     /// pathological day can't grow the row without bound.
     pub fn event(&mut self, at_ms: i64, kind: &str, detail: impl Into<String>) {
-        if self.events.len() < 400 {
-            self.events
-                .push(serde_json::json!({"t": at_ms, "k": kind, "d": detail.into()}));
+        self.push(serde_json::json!({"t": at_ms, "k": kind, "d": detail.into()}));
+    }
+
+    /// The cap keeps the NEWEST events, not the first 400. A full list used
+    /// to refuse everything after it: on 2026-11-25 a morning of "Quest of
+    /// the Crystal Palace" read in dozens of spellings filled it by 22:00
+    /// UTC, the afternoon's Ninja Gaiden title never got in, and the site's
+    /// live panel — which shows the last title event — said "last board
+    /// read was Crystal Palace" through two hours of Ninja Gaiden runs. A
+    /// marathon's "ended" would have been refused the same way. The oldest
+    /// title read makes room (titles are the bulk, and an old spelling is
+    /// the least worth keeping); with none left, the oldest event that is
+    /// not a marathon's, whose state lines the panel reads back.
+    fn push(&mut self, e: serde_json::Value) {
+        const CAP: usize = 400;
+        if self.events.len() >= CAP {
+            let oldest = |k: &dyn Fn(&serde_json::Value) -> bool| self.events.iter().position(k);
+            let evict =
+                oldest(&|e| e["k"] == "title").or_else(|| oldest(&|e| e["k"] != "marathon"));
+            match evict {
+                Some(i) => {
+                    self.events.remove(i);
+                }
+                None => return,
+            }
         }
+        self.events.push(e);
     }
 
     /// An event that also knows the canonical name of what it read.
@@ -357,11 +380,34 @@ impl SessionHealth {
         detail: impl Into<String>,
         canonical: &str,
     ) {
-        if self.events.len() < 400 {
-            self.events.push(
-                serde_json::json!({"t": at_ms, "k": kind, "d": detail.into(), "c": canonical}),
-            );
+        self.push(serde_json::json!({"t": at_ms, "k": kind, "d": detail.into(), "c": canonical}));
+    }
+}
+
+#[cfg(test)]
+mod event_cap_tests {
+    use super::SessionHealth;
+
+    /// A full event list keeps the newest: the title read after the cap is
+    /// what the live panel shows, and a marathon's state lines survive.
+    #[test]
+    fn a_full_event_list_evicts_the_oldest_title_for_a_new_event() {
+        let mut h = SessionHealth::default();
+        h.event(0, "marathon", "Big 20 #23 run started");
+        for i in 1..=500 {
+            h.event(i, "title", format!("C stal Palace {i}"));
         }
+        assert_eq!(h.events.len(), 400);
+        h.event_named(600, "title", "Ninja Gaiden (NES)", "Ninja Gaiden (NES)");
+        h.event(601, "marathon", "Big 20 #23 run ended");
+        assert_eq!(h.events.len(), 400);
+        let last_title = h.events.iter().rev().find(|e| e["k"] == "title").unwrap();
+        assert_eq!(last_title["d"], "Ninja Gaiden (NES)");
+        assert_eq!(h.events[0]["d"], "Big 20 #23 run started");
+        assert_eq!(h.events.last().unwrap()["d"], "Big 20 #23 run ended");
+        // Times stay in order: eviction removes, it never reorders.
+        let ts: Vec<i64> = h.events.iter().map(|e| e["t"].as_i64().unwrap()).collect();
+        assert!(ts.windows(2).all(|w| w[0] <= w[1]));
     }
 }
 
