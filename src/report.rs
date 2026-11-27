@@ -562,9 +562,7 @@ pub async fn run(cfg: Config, json: bool, api_dir: Option<&Path>) -> Result<()> 
         // honest answer: better a damaged name than a confident wrong one.
         let mut now = db::now_playing(&pool).await?;
         if let Some(raw) = now.game.as_deref() {
-            if let Some(c) = roster::canonical_any(raw) {
-                now.game = Some(c);
-            }
+            now.game = Some(now_name(raw, &game));
         }
         // Every finished run, oldest first — the site's finish-times chart.
         let finishes: Vec<serde_json::Value> = brief
@@ -1465,5 +1463,42 @@ mod tests {
         let out = rts(Some(&other), &[race_1, race_2]);
         assert!(out["live"].is_null());
         assert_eq!(out["run_throughs"][0]["live"], false);
+    }
+}
+
+/// The name the live panel shows for a header: the tracked game's own when
+/// the header is it, else the rosters' canonical name, else the reading.
+/// The tracked game first, because the rosters hold a game of nearly the
+/// same name: "Ninja Gaiden (NES)" folded onto the Arcathlon's "Ninja
+/// Gaiden", the panel no longer matched the tracked game, and it linked
+/// "its times" to a page of three marathon rows instead of his 3,200
+/// attempts. A sequel is not it: "Ninja Gaiden II" stays Ninja Gaiden II.
+fn now_name(raw: &str, tracked: &str) -> String {
+    let base = tracked.split(" (").next().unwrap_or(tracked).trim();
+    if crate::board::game_matches(raw, tracked) {
+        return tracked.to_string();
+    }
+    match roster::canonical_any(raw) {
+        Some(c) if c.eq_ignore_ascii_case(base) => tracked.to_string(),
+        Some(c) => c,
+        None => raw.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod now_name_tests {
+    use super::now_name;
+
+    #[test]
+    fn the_tracked_game_is_not_folded_onto_a_roster_namesake() {
+        let t = "Ninja Gaiden (NES)";
+        assert_eq!(now_name("Ninja Gaiden (NES)", t), t);
+        assert_eq!(now_name("Ninja Gaiden", t), t);
+        assert_eq!(now_name("Ninja Gaiden II", t), "Ninja Gaiden II");
+        assert_eq!(now_name("Megs Man", t), "Mega Man 6");
+        assert_eq!(
+            now_name("Some Game Nobody Listed", t),
+            "Some Game Nobody Listed"
+        );
     }
 }
